@@ -18,6 +18,7 @@ from typing import Any
 
 from app_paths import get_reports_dir
 from cli import SimpleCLI
+from location_resolver import LocationRecord
 from skyscanner_neo import (
     DEFAULT_REGIONS,
     NeoCli,
@@ -25,6 +26,9 @@ from skyscanner_neo import (
     quotes_to_dicts,
     run_page_scan,
 )
+
+
+MAX_LOCATION_SUGGESTIONS = 8
 
 
 class App:
@@ -49,12 +53,24 @@ class App:
         self.status_var = tk.StringVar(value="就绪")
         self.origin_hint_var = tk.StringVar(value="")
         self.destination_hint_var = tk.StringVar(value="")
+        self.location_entries: dict[str, ttk.Entry] = {}
+        self.location_listboxes: dict[str, tk.Listbox] = {}
+        self.location_hint_labels: dict[str, ttk.Label] = {}
+        self.location_suggestion_values: dict[str, list[LocationRecord]] = {
+            "origin": [],
+            "destination": [],
+        }
 
         self._build_ui()
         self.origin_var.trace_add("write", self._refresh_location_hints)
         self.destination_var.trace_add("write", self._refresh_location_hints)
+        self.origin_var.trace_add("write", self._refresh_origin_suggestions)
+        self.destination_var.trace_add("write", self._refresh_destination_suggestions)
         self.exact_airport_var.trace_add("write", self._refresh_location_hints)
+        self.exact_airport_var.trace_add("write", self._refresh_origin_suggestions)
         self._refresh_location_hints()
+        self._refresh_origin_suggestions()
+        self._refresh_destination_suggestions()
         self._poll_queue()
 
     def _build_ui(self) -> None:
@@ -75,7 +91,13 @@ class App:
         form.pack(fill=tk.X)
 
         self._add_labeled_entry(
-            form, "出发地", self.origin_var, 0, 0, hint_var=self.origin_hint_var
+            form,
+            "出发地",
+            self.origin_var,
+            0,
+            0,
+            hint_var=self.origin_hint_var,
+            location_field="origin",
         )
         self._add_labeled_entry(
             form,
@@ -84,6 +106,7 @@ class App:
             0,
             1,
             hint_var=self.destination_hint_var,
+            location_field="destination",
         )
         self._add_labeled_entry(form, "日期", self.date_var, 0, 2)
         self._add_labeled_entry(form, "地区代码", self.regions_var, 1, 0, colspan=2)
@@ -144,6 +167,7 @@ class App:
         column: int,
         colspan: int = 1,
         hint_var: tk.StringVar | None = None,
+        location_field: str | None = None,
     ) -> None:
         cell = ttk.Frame(parent)
         cell.grid(
@@ -155,12 +179,176 @@ class App:
             pady=(0, 8),
         )
         ttk.Label(cell, text=label).pack(anchor="w")
-        ttk.Entry(cell, textvariable=var).pack(fill=tk.X, expand=True)
-        if hint_var is not None:
-            ttk.Label(cell, textvariable=hint_var, foreground="#666666").pack(
-                anchor="w", pady=(4, 0)
+        entry = ttk.Entry(cell, textvariable=var)
+        entry.pack(fill=tk.X, expand=True)
+        if location_field is not None:
+            self.location_entries[location_field] = entry
+            listbox = tk.Listbox(cell, height=0, activestyle="none", exportselection=False)
+            listbox.pack(fill=tk.X, expand=True, pady=(4, 0))
+            listbox.pack_forget()
+            listbox.bind(
+                "<ButtonRelease-1>",
+                lambda event, field=location_field: self._select_location_suggestion(field),
             )
+            listbox.bind(
+                "<Return>",
+                lambda event, field=location_field: self._select_location_suggestion(field) or "break",
+            )
+            listbox.bind(
+                "<Double-Button-1>",
+                lambda event, field=location_field: self._select_location_suggestion(field),
+            )
+            self.location_listboxes[location_field] = listbox
+            entry.bind(
+                "<Down>",
+                lambda event, field=location_field: self._focus_location_suggestions(field),
+            )
+            entry.bind(
+                "<Return>",
+                lambda event, field=location_field: self._accept_first_location_suggestion(field),
+            )
+            entry.bind(
+                "<FocusOut>",
+                lambda event, field=location_field: self.root.after(
+                    150, lambda: self._hide_location_suggestions(field)
+                ),
+            )
+            listbox.bind(
+                "<Up>",
+                lambda event, field=location_field: self._move_location_selection(field, -1),
+            )
+            listbox.bind(
+                "<Down>",
+                lambda event, field=location_field: self._move_location_selection(field, 1),
+            )
+            listbox.bind(
+                "<Escape>",
+                lambda event, field=location_field: self._close_location_suggestions(field),
+            )
+        if hint_var is not None:
+            hint_label = ttk.Label(cell, textvariable=hint_var, foreground="#666666")
+            hint_label.pack(anchor="w", pady=(4, 0))
+            if location_field is not None:
+                self.location_hint_labels[location_field] = hint_label
         parent.columnconfigure(column, weight=1)
+
+    def _format_location_suggestion(self, item: LocationRecord) -> str:
+        if item.kind == "metro":
+            return f"{item.name} ({item.code}, 城市)"
+        details = [part for part in [item.municipality, item.country] if part]
+        suffix = f" - {' / '.join(details)}" if details else ""
+        return f"{item.name} ({item.code}){suffix}"
+
+    def _get_location_suggestions(
+        self, value: str, *, prefer_metro: bool
+    ) -> list[LocationRecord]:
+        return self.cli.location_resolver.search_locations(
+            value,
+            prefer_metro=prefer_metro,
+            limit=MAX_LOCATION_SUGGESTIONS,
+        )
+
+    def _set_location_suggestions(
+        self, field: str, suggestions: list[LocationRecord]
+    ) -> None:
+        listbox = self.location_listboxes[field]
+        self.location_suggestion_values[field] = suggestions
+        listbox.delete(0, tk.END)
+        if not suggestions:
+            self._hide_location_suggestions(field)
+            return
+
+        for item in suggestions:
+            listbox.insert(tk.END, self._format_location_suggestion(item))
+        listbox.config(height=min(len(suggestions), MAX_LOCATION_SUGGESTIONS))
+        listbox.selection_clear(0, tk.END)
+        listbox.selection_set(0)
+        listbox.activate(0)
+        if not listbox.winfo_ismapped():
+            pack_kwargs: dict[str, object] = {"fill": tk.X, "expand": True, "pady": (4, 0)}
+            hint_label = self.location_hint_labels.get(field)
+            if hint_label is not None:
+                pack_kwargs["before"] = hint_label
+            listbox.pack(**pack_kwargs)
+
+    def _hide_location_suggestions(self, field: str) -> None:
+        listbox = self.location_listboxes[field]
+        self.location_suggestion_values[field] = []
+        listbox.delete(0, tk.END)
+        if listbox.winfo_ismapped():
+            listbox.pack_forget()
+
+    def _refresh_origin_suggestions(self, *args: object) -> None:
+        suggestions = self._get_location_suggestions(
+            self.origin_var.get(), prefer_metro=not self.exact_airport_var.get()
+        )
+        self._set_location_suggestions("origin", suggestions)
+
+    def _refresh_destination_suggestions(self, *args: object) -> None:
+        suggestions = self._get_location_suggestions(
+            self.destination_var.get(), prefer_metro=False
+        )
+        self._set_location_suggestions("destination", suggestions)
+
+    def _focus_location_suggestions(self, field: str) -> str:
+        values = self.location_suggestion_values[field]
+        if not values:
+            return "break"
+        listbox = self.location_listboxes[field]
+        listbox.focus_set()
+        if not listbox.curselection():
+            listbox.selection_set(0)
+            listbox.activate(0)
+        return "break"
+
+    def _accept_first_location_suggestion(self, field: str) -> str:
+        values = self.location_suggestion_values[field]
+        if not values:
+            return ""
+        listbox = self.location_listboxes[field]
+        selection = listbox.curselection()
+        index = selection[0] if selection else 0
+        self._apply_location_suggestion(field, index)
+        return "break"
+
+    def _move_location_selection(self, field: str, step: int) -> str:
+        values = self.location_suggestion_values[field]
+        if not values:
+            return "break"
+        listbox = self.location_listboxes[field]
+        current = listbox.curselection()
+        index = current[0] if current else 0
+        next_index = max(0, min(len(values) - 1, index + step))
+        listbox.selection_clear(0, tk.END)
+        listbox.selection_set(next_index)
+        listbox.activate(next_index)
+        listbox.see(next_index)
+        return "break"
+
+    def _close_location_suggestions(self, field: str) -> str:
+        self._hide_location_suggestions(field)
+        self.location_entries[field].focus_set()
+        return "break"
+
+    def _select_location_suggestion(self, field: str) -> None:
+        listbox = self.location_listboxes[field]
+        selection = listbox.curselection()
+        if not selection:
+            return
+        self._apply_location_suggestion(field, selection[0])
+
+    def _apply_location_suggestion(self, field: str, index: int) -> None:
+        values = self.location_suggestion_values[field]
+        if index < 0 or index >= len(values):
+            return
+        value = values[index].name
+        if field == "origin":
+            self.origin_var.set(value)
+        else:
+            self.destination_var.set(value)
+        self._hide_location_suggestions(field)
+        self.location_entries[field].focus_set()
+        self.location_entries[field].icursor(tk.END)
 
     def _set_location_hint(
         self, hint_var: tk.StringVar, label: str, value: str, prefer_metro: bool
@@ -171,7 +359,7 @@ class App:
             return
         try:
             code = self.cli.normalize_location(raw, prefer_metro=prefer_metro)
-            kind = "城市代码" if len(code) == 4 else "机场代码"
+            kind = self.cli.location_resolver.describe_code_kind(code)
             hint_var.set(f"{label}将使用 {kind}: {code}")
         except ValueError as exc:
             hint_var.set(str(exc))

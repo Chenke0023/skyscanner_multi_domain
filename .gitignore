@@ -12,3 +12,5 @@ outputs/gui_app.log
 outputs/*-cdp-profile/
 
 Skyscanner 多市场比价.app/
+
+data/airport-codes.csv
