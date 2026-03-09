@@ -1,0 +1,14 @@
+__pycache__/
+*.pyc
+.DS_Store
+
+.ruff_cache/
+
+logs/
+data/browser-profiles/
+outputs/reports/
+
+outputs/gui_app.log
+outputs/*-cdp-profile/
+
+Skyscanner 多市场比价.app/
