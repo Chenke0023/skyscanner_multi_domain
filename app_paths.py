@@ -29,6 +29,11 @@ def get_log_file(name: str) -> Path:
     return LOGS_DIR / name
 
 
+def get_fx_cache_file() -> Path:
+    ensure_runtime_dirs()
+    return DATA_DIR / "fx_rates_cache.json"
+
+
 def get_browser_profile_dir(browser_name: str) -> Path:
     ensure_runtime_dirs()
     target = BROWSER_PROFILES_DIR / f"{browser_name}-cdp-profile"

@@ -22,6 +22,140 @@ METRO_CODES = {
     "new york": "NYCA",
 }
 
+METRO_CODE_COUNTRIES = {
+    "BJSA": "CN",
+    "SHAA": "CN",
+    "LOND": "GB",
+    "NYCA": "US",
+}
+
+MANUAL_AIRPORT_COUNTRIES = {
+    "PEK": "CN",
+    "PVG": "CN",
+    "CAN": "CN",
+    "SZX": "CN",
+    "CTU": "CN",
+    "HGH": "CN",
+    "XIY": "CN",
+    "CKG": "CN",
+    "HKG": "HK",
+    "TPE": "TW",
+    "NRT": "JP",
+    "ICN": "KR",
+    "SIN": "SG",
+    "KUL": "MY",
+    "BKK": "TH",
+    "KIX": "JP",
+    "HND": "JP",
+    "ITM": "JP",
+    "NGO": "JP",
+    "CTS": "JP",
+    "FUK": "JP",
+    "OKA": "JP",
+    "GMP": "KR",
+    "PUS": "KR",
+    "CJU": "KR",
+    "MNL": "PH",
+    "CEB": "PH",
+    "MPH": "PH",
+    "KLO": "PH",
+    "SGN": "VN",
+    "HAN": "VN",
+    "DAD": "VN",
+    "CXR": "VN",
+    "PQC": "VN",
+    "DMK": "TH",
+    "HKT": "TH",
+    "CNX": "TH",
+    "CEI": "TH",
+    "UTP": "TH",
+    "KBV": "TH",
+    "USM": "TH",
+    "BKI": "MY",
+    "PEN": "MY",
+    "LGK": "MY",
+    "KCH": "MY",
+    "JHB": "MY",
+    "CGK": "ID",
+    "DPS": "ID",
+    "SUB": "ID",
+    "YIA": "ID",
+    "LOP": "ID",
+    "BWN": "BN",
+    "PNH": "KH",
+    "SAI": "KH",
+    "VTE": "LA",
+    "RGN": "MM",
+    "KTM": "NP",
+    "CMB": "LK",
+    "MLE": "MV",
+    "DAC": "BD",
+    "DEL": "IN",
+    "BOM": "IN",
+    "BLR": "IN",
+    "MAA": "IN",
+    "HYD": "IN",
+    "CCU": "IN",
+    "GOI": "IN",
+    "DXB": "AE",
+    "AUH": "AE",
+    "DOH": "QA",
+    "RUH": "SA",
+    "JED": "SA",
+    "IST": "TR",
+    "AMS": "NL",
+    "CDG": "FR",
+    "FRA": "DE",
+    "MUC": "DE",
+    "MXP": "IT",
+    "FCO": "IT",
+    "BCN": "ES",
+    "MAD": "ES",
+    "ZRH": "CH",
+    "GVA": "CH",
+    "VIE": "AT",
+    "PRG": "CZ",
+    "ATH": "GR",
+    "LIS": "PT",
+    "DUB": "IE",
+    "BUD": "HU",
+    "CPH": "DK",
+    "HEL": "FI",
+    "ARN": "SE",
+    "OSL": "NO",
+    "SVO": "RU",
+    "LAX": "US",
+    "SFO": "US",
+    "SEA": "US",
+    "ORD": "US",
+    "BOS": "US",
+    "YVR": "CA",
+    "YYZ": "CA",
+    "SYD": "AU",
+    "BNE": "AU",
+    "OOL": "AU",
+    "PER": "AU",
+    "ADL": "AU",
+    "CNS": "AU",
+    "MEL": "AU",
+    "AKL": "NZ",
+    "ZQN": "NZ",
+    "CHC": "NZ",
+    "ALA": "KZ",
+    "TAS": "UZ",
+    "NQZ": "KZ",
+    "UBN": "MN",
+    "CAI": "EG",
+    "CMN": "MA",
+    "RAK": "MA",
+    "MRU": "MU",
+    "SEZ": "SC",
+    "HFE": "CN",
+    "JKT": "ID",
+    "LHR": "GB",
+    "JFK": "US",
+}
+
 MANUAL_AIRPORT_CODES = {
     "北京": "PEK",
     "beijing": "PEK",
@@ -310,6 +444,16 @@ class LocationRecord:
     search_name: str = ""
 
 
+@dataclass(frozen=True)
+class ResolvedLocation:
+    query: str
+    code: str
+    kind: str
+    name: str
+    municipality: str = ""
+    country: str = ""
+
+
 class LocationResolver:
     def __init__(self) -> None:
         self._records = load_airport_records()
@@ -317,27 +461,41 @@ class LocationResolver:
         self._metro_code_set = set(METRO_CODES.values())
         self._manual_lookup = {key.lower(): value for key, value in MANUAL_AIRPORT_CODES.items()}
         self._metro_lookup = {key.lower(): value for key, value in METRO_CODES.items()}
+        self._records_by_code: dict[str, list[LocationRecord]] = {}
+        for record in self._records:
+            self._records_by_code.setdefault(record.code, []).append(record)
 
     def normalize_location(self, value: str, prefer_metro: bool) -> str:
+        return self.resolve_location(value, prefer_metro=prefer_metro).code
+
+    def resolve_location(self, value: str, prefer_metro: bool) -> ResolvedLocation:
         raw = value.strip()
         if not raw:
             raise ValueError("地点不能为空。")
 
         upper = raw.upper()
         if prefer_metro and upper in self._metro_code_set:
-            return upper
+            return self._build_resolved_location(raw, upper, kind="metro")
         if upper in self._airport_code_set:
-            return upper
+            return self._build_resolved_location(raw, upper, kind="airport")
 
         lookup = raw.lower()
         if prefer_metro and lookup in self._metro_lookup:
-            return self._metro_lookup[lookup]
+            return self._build_resolved_location(raw, self._metro_lookup[lookup], kind="metro")
         if lookup in self._manual_lookup:
-            return self._manual_lookup[lookup]
+            return self._build_resolved_location(raw, self._manual_lookup[lookup], kind="airport")
 
         suggestions = self.search_locations(raw, prefer_metro=prefer_metro, limit=1)
         if suggestions:
-            return suggestions[0].code
+            record = suggestions[0]
+            return ResolvedLocation(
+                query=raw,
+                code=record.code,
+                kind=record.kind,
+                name=record.name,
+                municipality=record.municipality,
+                country=record.country,
+            )
 
         raise ValueError(
             f"无法识别地点“{raw}”。请使用常见城市名、机场名，或直接输入 IATA/城市代码（例如 PEK、ALA、JKT、BJSA）。"
@@ -372,6 +530,37 @@ class LocationResolver:
     def describe_code_kind(self, code: str) -> str:
         return "城市代码" if code.upper() in self._metro_code_set else "机场代码"
 
+    def _build_resolved_location(self, query: str, code: str, *, kind: str) -> ResolvedLocation:
+        record = self._pick_record_for_code(code, kind=kind)
+        if record is not None:
+            return ResolvedLocation(
+                query=query,
+                code=record.code,
+                kind=kind,
+                name=record.name,
+                municipality=record.municipality,
+                country=record.country,
+            )
+        if kind == "metro":
+            return ResolvedLocation(
+                query=query,
+                code=code,
+                kind=kind,
+                name=query,
+                country=METRO_CODE_COUNTRIES.get(code, ""),
+            )
+        return ResolvedLocation(query=query, code=code, kind=kind, name=query)
+
+    def _pick_record_for_code(self, code: str, *, kind: str) -> LocationRecord | None:
+        records = self._records_by_code.get(code, [])
+        preferred = [record for record in records if record.kind == kind]
+        if not preferred:
+            return None
+        with_country = [record for record in preferred if record.country]
+        if with_country:
+            return sorted(with_country, key=lambda record: (len(record.name), record.name))[0]
+        return sorted(preferred, key=lambda record: (len(record.name), record.name))[0]
+
     def _score(self, lowered: str, record: LocationRecord) -> int | None:
         if lowered == record.code.lower() or lowered == record.search_name:
             return 0
@@ -400,6 +589,7 @@ def load_airport_records() -> list[LocationRecord]:
                 name=alias,
                 code=code,
                 kind="metro",
+                country=METRO_CODE_COUNTRIES.get(code, ""),
                 search_name=alias.lower(),
             )
         )
@@ -444,6 +634,7 @@ def load_airport_records() -> list[LocationRecord]:
                 name=alias,
                 code=code,
                 kind="airport",
+                country=MANUAL_AIRPORT_COUNTRIES.get(code, ""),
                 search_name=alias.lower(),
             )
         )

@@ -19,11 +19,13 @@ from pathlib import Path
 from typing import Optional
 
 from app_paths import PROJECT_ROOT, get_reports_dir
+from fx_rates import FxRateService
 from location_resolver import LocationResolver
 from skyscanner_neo import (
     DEFAULT_REGIONS,
     NeoCli,
     REGIONS,
+    build_effective_region_codes,
     detect_cdp_version,
     print_doctor,
     quotes_to_dicts,
@@ -31,29 +33,38 @@ from skyscanner_neo import (
 )
 
 
-FX_TO_CNY = {
-    "CNY": 1.0,
-    "USD": 6.91,
-    "GBP": 9.29,
-    "SGD": 5.44,
-    "HKD": 0.88,
-    "EUR": 7.49,
-    "JPY": 0.046,
-    "KZT": 0.013,
-}
-
-
 QuoteRow = dict[str, object]
-SimplifiedQuoteRow = dict[str, str | float]
+SimplifiedQuoteRow = dict[str, str | float | None]
 
 
 class SimpleCLI:
     def __init__(self) -> None:
         self.project_root = PROJECT_ROOT
         self.location_resolver = LocationResolver()
+        self.fx_rates = FxRateService()
 
     def normalize_location(self, value: str, prefer_metro: bool) -> str:
         return self.location_resolver.normalize_location(value, prefer_metro=prefer_metro)
+
+    def resolve_location(self, value: str, prefer_metro: bool):
+        return self.location_resolver.resolve_location(value, prefer_metro=prefer_metro)
+
+    def build_effective_regions(
+        self,
+        origin_value: str,
+        destination_value: str,
+        *,
+        prefer_origin_metro: bool,
+        manual_region_codes: list[str] | None = None,
+    ) -> tuple[object, object, list[str]]:
+        origin = self.resolve_location(origin_value, prefer_metro=prefer_origin_metro)
+        destination = self.resolve_location(destination_value, prefer_metro=False)
+        regions = build_effective_region_codes(
+            origin_country=origin.country,
+            destination_country=destination.country,
+            manual_region_codes=manual_region_codes or [],
+        )
+        return origin, destination, regions
 
     def print_banner(self) -> None:
         print(
@@ -68,9 +79,7 @@ class SimpleCLI:
     def to_cny(
         self, price: Optional[float], currency: Optional[str]
     ) -> Optional[float]:
-        if price is None or not currency or currency not in FX_TO_CNY:
-            return None
-        return round(price * FX_TO_CNY[currency], 2)
+        return self.fx_rates.convert_to_cny(price, currency)
 
     def simplify_quotes(self, quotes: list[QuoteRow]) -> list[SimplifiedQuoteRow]:
         simplified: list[SimplifiedQuoteRow] = []
@@ -81,23 +90,29 @@ class SimpleCLI:
                 continue
             if currency is not None and not isinstance(currency, str):
                 continue
-            cny_price = self.to_cny(
-                float(price) if price is not None else None, currency
-            )
-            if cny_price is None:
-                continue
             region_name = quote.get("region_name")
             source_url = quote.get("source_url")
             if not isinstance(region_name, str) or not isinstance(source_url, str):
                 continue
+            numeric_price = float(price) if price is not None else None
+            cny_price = self.to_cny(numeric_price, currency)
+            if numeric_price is None or not currency:
+                continue
             simplified.append(
                 {
                     "region_name": region_name,
+                    "display_price": f"{numeric_price:,.2f} {currency.upper()}",
                     "cny_price": cny_price,
                     "link": source_url,
                 }
             )
-        simplified.sort(key=lambda item: item["cny_price"])
+        simplified.sort(
+            key=lambda item: (
+                item["cny_price"] is None,
+                item["cny_price"] if isinstance(item["cny_price"], (int, float)) else float("inf"),
+                str(item["region_name"]),
+            )
+        )
         return simplified
 
     def build_markdown_table(
@@ -121,13 +136,18 @@ class SimpleCLI:
 
         lines.extend(
             [
-                "| 地区 | 价格（人民币） | 链接 |",
-                "| --- | ---: | --- |",
+                "| 地区 | 原币价格 | 价格（人民币） | 链接 |",
+                "| --- | ---: | ---: | --- |",
             ]
         )
         for row in rows:
+            cny_text = (
+                f"¥{row['cny_price']:,.2f}"
+                if isinstance(row.get("cny_price"), (int, float))
+                else "待换算"
+            )
             lines.append(
-                f"| {row['region_name']} | ¥{row['cny_price']:,.2f} | [打开结果页]({row['link']}) |"
+                f"| {row['region_name']} | {row['display_price']} | {cny_text} | [打开结果页]({row['link']}) |"
             )
         return "\n".join(lines) + "\n"
 
@@ -135,11 +155,16 @@ class SimpleCLI:
         if not rows:
             print("\n暂无可用价格结果。")
             return
-        print("\n| 地区 | 价格（人民币） | 链接 |")
-        print("| --- | ---: | --- |")
+        print("\n| 地区 | 原币价格 | 价格（人民币） | 链接 |")
+        print("| --- | ---: | ---: | --- |")
         for row in rows:
+            cny_text = (
+                f"¥{row['cny_price']:,.2f}"
+                if isinstance(row.get("cny_price"), (int, float))
+                else "待换算"
+            )
             print(
-                f"| {row['region_name']} | ¥{row['cny_price']:,.2f} | {row['link']} |"
+                f"| {row['region_name']} | {row['display_price']} | {cny_text} | {row['link']} |"
             )
 
     def save_results(
@@ -159,17 +184,20 @@ class SimpleCLI:
         return filename
 
     async def run_page_command(self, args: argparse.Namespace) -> int:
-        origin = self.normalize_location(
-            args.origin, prefer_metro=not args.exact_airport
-        )
-        destination = self.normalize_location(args.destination, prefer_metro=False)
-        regions = [
+        manual_regions = [
             code.strip().upper() for code in args.regions.split(",") if code.strip()
         ]
+        origin, destination, regions = self.build_effective_regions(
+            args.origin,
+            args.destination,
+            prefer_origin_metro=not args.exact_airport,
+            manual_region_codes=manual_regions,
+        )
+        print(f"本次实际地区: {', '.join(regions)}")
 
         quotes = await run_page_scan(
-            origin=origin,
-            destination=destination,
+            origin=origin.code,
+            destination=destination.code,
             date=args.date,
             region_codes=regions,
             page_wait=args.wait,
@@ -183,14 +211,19 @@ class SimpleCLI:
         rows = self.simplify_quotes(quote_dicts)
         self.print_quotes(rows)
 
-        winner = rows[0] if rows else None
+        winner = next(
+            (row for row in rows if isinstance(row.get("cny_price"), (int, float))),
+            None,
+        )
         if winner:
             print(f"\n最低价: ¥{winner['cny_price']:,.2f} 来自 {winner['region_name']}")
+        elif rows:
+            print("\n已提取市场价格，但人民币换算暂不可用。")
         else:
             print("\n未能成功提取任何市场价格。")
 
         if args.save:
-            saved = self.save_results(quote_dicts, origin, destination, args.date)
+            saved = self.save_results(quote_dicts, origin.code, destination.code, args.date)
             print(f"结果已保存到: {saved}")
 
         if not args.exact_airport and args.origin in {"北京", "beijing", "BEIJING"}:
@@ -205,8 +238,8 @@ class SimpleCLI:
         destination = input("目的地（如 阿拉木图 / ALA）: ").strip()
         date = input("日期（YYYY-MM-DD）: ").strip()
         regions = input(
-            f"地区代码（默认 {','.join(DEFAULT_REGIONS)}）: "
-        ).strip() or ",".join(DEFAULT_REGIONS)
+            f"额外地区代码（默认会自动包含 {','.join(DEFAULT_REGIONS)}）: "
+        ).strip()
         args = argparse.Namespace(
             origin=origin,
             destination=destination,
@@ -247,7 +280,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     page.add_argument("-t", "--date", required=True, help="出发日期 YYYY-MM-DD")
     page.add_argument(
-        "-r", "--regions", default=",".join(DEFAULT_REGIONS), help="地区代码，逗号分隔"
+        "-r", "--regions", default="", help="额外地区代码，逗号分隔，会叠加到智能默认地区上"
     )
     page.add_argument("--wait", type=int, default=10, help="打开结果页后的等待秒数")
     page.add_argument("--timeout", type=int, default=30, help="HTTP/CDP 超时")
