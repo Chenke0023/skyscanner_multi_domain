@@ -147,16 +147,33 @@ class App:
         results = ttk.LabelFrame(outer, text="结果", padding=12)
         results.pack(fill=tk.BOTH, expand=True, pady=(12, 0))
 
-        columns = ("region", "price_native", "price_cny", "link")
+        columns = (
+            "region",
+            "best_native",
+            "best_cny",
+            "cheapest_native",
+            "cheapest_cny",
+            "status",
+            "error",
+            "link",
+        )
         self.tree = ttk.Treeview(results, columns=columns, show="headings", height=10)
         self.tree.heading("region", text="地区")
-        self.tree.heading("price_native", text="原币价格")
-        self.tree.heading("price_cny", text="价格（人民币）")
+        self.tree.heading("best_native", text="最佳（原币）")
+        self.tree.heading("best_cny", text="最佳（人民币）")
+        self.tree.heading("cheapest_native", text="最低价（原币）")
+        self.tree.heading("cheapest_cny", text="最低价（人民币）")
+        self.tree.heading("status", text="状态")
+        self.tree.heading("error", text="错误")
         self.tree.heading("link", text="链接")
-        self.tree.column("region", width=120, anchor="w")
-        self.tree.column("price_native", width=150, anchor="e")
-        self.tree.column("price_cny", width=140, anchor="e")
-        self.tree.column("link", width=430, anchor="w")
+        self.tree.column("region", width=110, anchor="w")
+        self.tree.column("best_native", width=120, anchor="e")
+        self.tree.column("best_cny", width=120, anchor="e")
+        self.tree.column("cheapest_native", width=120, anchor="e")
+        self.tree.column("cheapest_cny", width=120, anchor="e")
+        self.tree.column("status", width=100, anchor="w")
+        self.tree.column("error", width=220, anchor="w")
+        self.tree.column("link", width=240, anchor="w")
         self.tree.pack(fill=tk.BOTH, expand=True)
 
         actions = ttk.Frame(results)
@@ -568,29 +585,46 @@ class App:
         rows = self.cli.simplify_quotes(quotes)
         self.clear_results()
         for row in rows:
-            cny_text = (
-                f"¥{row['cny_price']:,.2f}"
-                if isinstance(row.get("cny_price"), (int, float))
-                else "待换算"
+            best_cny_text = (
+                f"¥{row['best_cny_price']:,.2f}"
+                if isinstance(row.get("best_cny_price"), (int, float))
+                else "-"
+            )
+            cheapest_cny_text = (
+                f"¥{row['cheapest_cny_price']:,.2f}"
+                if isinstance(row.get("cheapest_cny_price"), (int, float))
+                else "-"
             )
             self.tree.insert(
                 "",
                 tk.END,
                 values=(
                     row["region_name"],
-                    row["display_price"],
-                    cny_text,
+                    row.get("best_display_price") or "-",
+                    best_cny_text,
+                    row.get("cheapest_display_price") or "-",
+                    cheapest_cny_text,
+                    row.get("status") or "-",
+                    row.get("error") or "-",
                     row["link"],
                 ),
             )
 
-        winner = next(
-            (row for row in rows if isinstance(row.get("cny_price"), (int, float))),
+        best_winner = next(
+            (row for row in rows if isinstance(row.get("best_cny_price"), (int, float))),
             None,
         )
-        if winner:
+        cheapest_winner = next(
+            (row for row in rows if isinstance(row.get("cheapest_cny_price"), (int, float))),
+            None,
+        )
+        if best_winner:
             self.log(
-                f"最低价: ¥{winner['cny_price']:,.2f} 来自 {winner['region_name']}"
+                f"最佳: ¥{best_winner['best_cny_price']:,.2f} 来自 {best_winner['region_name']}"
+            )
+        if cheapest_winner:
+            self.log(
+                f"最低价: ¥{cheapest_winner['cheapest_cny_price']:,.2f} 来自 {cheapest_winner['region_name']}"
             )
         elif rows:
             self.log("已提取市场价格，但人民币换算暂不可用。")

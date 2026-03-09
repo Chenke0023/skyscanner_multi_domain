@@ -4,7 +4,7 @@ Practical CLI for Skyscanner multi-market scans via Edge page reads.
 Default path:
 1. Use the local Edge instance on CDP port 9222.
 2. Open each market's result page.
-3. Read the rendered page text and extract the "Cheapest" price.
+3. Read the rendered page text and extract both the "Best" and "Cheapest" prices.
 
 Example:
   python cli.py page -o 北京 -d 阿拉木图 -t 2026-04-29
@@ -35,6 +35,10 @@ from skyscanner_neo import (
 
 QuoteRow = dict[str, object]
 SimplifiedQuoteRow = dict[str, str | float | None]
+
+
+BEST_LABEL = "最佳"
+CHEAPEST_LABEL = "最低价"
 
 
 class SimpleCLI:
@@ -71,7 +75,7 @@ class SimpleCLI:
             """
 ╔═══════════════════════════════════════════════════════════════╗
 ║      Skyscanner 多市场 CLI（Edge 页面模式）                  ║
-║      一条命令打开各站点并提取最低价                           ║
+║      一条命令打开各站点并提取最佳价与最低价                   ║
 ╚═══════════════════════════════════════════════════════════════╝
             """.strip()
         )
@@ -84,32 +88,59 @@ class SimpleCLI:
     def simplify_quotes(self, quotes: list[QuoteRow]) -> list[SimplifiedQuoteRow]:
         simplified: list[SimplifiedQuoteRow] = []
         for quote in quotes:
-            price = quote.get("price")
             currency = quote.get("currency")
-            if price is not None and not isinstance(price, (int, float)):
-                continue
             if currency is not None and not isinstance(currency, str):
                 continue
             region_name = quote.get("region_name")
             source_url = quote.get("source_url")
             if not isinstance(region_name, str) or not isinstance(source_url, str):
                 continue
-            numeric_price = float(price) if price is not None else None
-            cny_price = self.to_cny(numeric_price, currency)
-            if numeric_price is None or not currency:
+
+            best_price = quote.get("best_price")
+            cheapest_price = quote.get("cheapest_price")
+
+            if best_price is not None and not isinstance(best_price, (int, float)):
                 continue
+            if cheapest_price is not None and not isinstance(cheapest_price, (int, float)):
+                continue
+            if best_price is None and cheapest_price is None:
+                continue
+
+            best_numeric = float(best_price) if best_price is not None else None
+            cheapest_numeric = float(cheapest_price) if cheapest_price is not None else None
+            best_cny = self.to_cny(best_numeric, currency) if currency else None
+            cheapest_cny = self.to_cny(cheapest_numeric, currency) if currency else None
+
             simplified.append(
                 {
                     "region_name": region_name,
-                    "display_price": f"{numeric_price:,.2f} {currency.upper()}",
-                    "cny_price": cny_price,
+                    "best_display_price": (
+                        f"{best_numeric:,.2f} {currency.upper()}"
+                        if best_numeric is not None and currency
+                        else None
+                    ),
+                    "best_cny_price": best_cny,
+                    "cheapest_display_price": (
+                        f"{cheapest_numeric:,.2f} {currency.upper()}"
+                        if cheapest_numeric is not None and currency
+                        else None
+                    ),
+                    "cheapest_cny_price": cheapest_cny,
                     "link": source_url,
+                    "status": str(quote.get("status") or "-"),
+                    "error": str(quote.get("error") or "-"),
                 }
             )
         simplified.sort(
             key=lambda item: (
-                item["cny_price"] is None,
-                item["cny_price"] if isinstance(item["cny_price"], (int, float)) else float("inf"),
+                item["cheapest_cny_price"] is None,
+                item["cheapest_cny_price"]
+                if isinstance(item["cheapest_cny_price"], (int, float))
+                else float("inf"),
+                item["best_cny_price"] is None,
+                item["best_cny_price"]
+                if isinstance(item["best_cny_price"], (int, float))
+                else float("inf"),
                 str(item["region_name"]),
             )
         )
@@ -136,18 +167,23 @@ class SimpleCLI:
 
         lines.extend(
             [
-                "| 地区 | 原币价格 | 价格（人民币） | 链接 |",
-                "| --- | ---: | ---: | --- |",
+                "| 地区 | 最佳（原币） | 最佳（人民币） | 最低价（原币） | 最低价（人民币） | 状态 | 错误 | 链接 |",
+                "| --- | ---: | ---: | ---: | ---: | --- | --- | --- |",
             ]
         )
         for row in rows:
-            cny_text = (
-                f"¥{row['cny_price']:,.2f}"
-                if isinstance(row.get("cny_price"), (int, float))
-                else "待换算"
+            best_cny_text = (
+                f"¥{row['best_cny_price']:,.2f}"
+                if isinstance(row.get("best_cny_price"), (int, float))
+                else "-"
+            )
+            cheapest_cny_text = (
+                f"¥{row['cheapest_cny_price']:,.2f}"
+                if isinstance(row.get("cheapest_cny_price"), (int, float))
+                else "-"
             )
             lines.append(
-                f"| {row['region_name']} | {row['display_price']} | {cny_text} | [打开结果页]({row['link']}) |"
+                f"| {row['region_name']} | {row.get('best_display_price') or '-'} | {best_cny_text} | {row.get('cheapest_display_price') or '-'} | {cheapest_cny_text} | {row.get('status') or '-'} | {row.get('error') or '-'} | [打开结果页]({row['link']}) |"
             )
         return "\n".join(lines) + "\n"
 
@@ -155,16 +191,21 @@ class SimpleCLI:
         if not rows:
             print("\n暂无可用价格结果。")
             return
-        print("\n| 地区 | 原币价格 | 价格（人民币） | 链接 |")
-        print("| --- | ---: | ---: | --- |")
+        print("\n| 地区 | 最佳（原币） | 最佳（人民币） | 最低价（原币） | 最低价（人民币） | 状态 | 错误 | 链接 |")
+        print("| --- | ---: | ---: | ---: | ---: | --- | --- | --- |")
         for row in rows:
-            cny_text = (
-                f"¥{row['cny_price']:,.2f}"
-                if isinstance(row.get("cny_price"), (int, float))
-                else "待换算"
+            best_cny_text = (
+                f"¥{row['best_cny_price']:,.2f}"
+                if isinstance(row.get("best_cny_price"), (int, float))
+                else "-"
+            )
+            cheapest_cny_text = (
+                f"¥{row['cheapest_cny_price']:,.2f}"
+                if isinstance(row.get("cheapest_cny_price"), (int, float))
+                else "-"
             )
             print(
-                f"| {row['region_name']} | {row['display_price']} | {cny_text} | {row['link']} |"
+                f"| {row['region_name']} | {row.get('best_display_price') or '-'} | {best_cny_text} | {row.get('cheapest_display_price') or '-'} | {cheapest_cny_text} | {row.get('status') or '-'} | {row.get('error') or '-'} | {row['link']} |"
             )
 
     def save_results(
@@ -211,12 +252,22 @@ class SimpleCLI:
         rows = self.simplify_quotes(quote_dicts)
         self.print_quotes(rows)
 
-        winner = next(
-            (row for row in rows if isinstance(row.get("cny_price"), (int, float))),
+        best_winner = next(
+            (row for row in rows if isinstance(row.get("best_cny_price"), (int, float))),
             None,
         )
-        if winner:
-            print(f"\n最低价: ¥{winner['cny_price']:,.2f} 来自 {winner['region_name']}")
+        cheapest_winner = next(
+            (row for row in rows if isinstance(row.get("cheapest_cny_price"), (int, float))),
+            None,
+        )
+        if best_winner:
+            print(
+                f"\n最佳: ¥{best_winner['best_cny_price']:,.2f} 来自 {best_winner['region_name']}"
+            )
+        if cheapest_winner:
+            print(
+                f"最低价: ¥{cheapest_winner['cheapest_cny_price']:,.2f} 来自 {cheapest_winner['region_name']}"
+            )
         elif rows:
             print("\n已提取市场价格，但人民币换算暂不可用。")
         else:
@@ -230,7 +281,7 @@ class SimpleCLI:
             print(
                 "提示: 本次默认使用 BJSA（北京任意机场）。如需严格 PEK，请加 --exact-airport 或直接传 PEK。"
             )
-        return 0 if winner else 2
+        return 0 if best_winner or cheapest_winner else 2
 
     def interactive_page(self) -> int:
         self.print_banner()
@@ -271,7 +322,7 @@ def build_parser() -> argparse.ArgumentParser:
     doctor = subparsers.add_parser("doctor", help="检查 Edge/CDP/Neo 环境")
     doctor.add_argument("--capture-file", help="可选：检查某个 Neo export 文件是否存在")
 
-    page = subparsers.add_parser("page", help="打开各市场结果页并抽取最低价")
+    page = subparsers.add_parser("page", help="打开各市场结果页并抽取最佳价和最低价")
     page.add_argument(
         "-o", "--origin", required=True, help="出发地（中文、IATA 或 metro code）"
     )

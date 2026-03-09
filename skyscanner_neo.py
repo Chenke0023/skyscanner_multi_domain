@@ -4,7 +4,7 @@ Skyscanner multi-domain comparison powered by Neo captures.
 This script does two related jobs:
 1. Validate whether Neo is available and whether this machine is ready to use it.
 2. Reuse a captured Skyscanner search request, rewrite market/locale/currency
-   for multiple regions, then compare the lowest price returned by each region.
+   for multiple regions, then compare the best and cheapest prices returned by each region.
 
 Recommended workflow:
 1. Install Neo and load its Chrome extension.
@@ -59,6 +59,10 @@ class FlightQuote:
     source_url: str
     status: str
     price_path: Optional[str] = None
+    best_price: Optional[float] = None
+    best_price_path: Optional[str] = None
+    cheapest_price: Optional[float] = None
+    cheapest_price_path: Optional[str] = None
     error: Optional[str] = None
 
 
@@ -73,7 +77,9 @@ REGIONS: dict[str, RegionConfig] = {
     "DE": RegionConfig("DE", "德国", "https://www.skyscanner.de", "de-DE", "EUR"),
     "KR": RegionConfig("KR", "韩国", "https://www.skyscanner.co.kr", "ko-KR", "KRW"),
     "SE": RegionConfig("SE", "瑞典", "https://www.skyscanner.se", "sv-SE", "SEK"),
-    "ID": RegionConfig("ID", "印度尼西亚", "https://www.skyscanner.co.id", "id-ID", "IDR"),
+    "ID": RegionConfig(
+        "ID", "印度尼西亚", "https://www.skyscanner.co.id", "id-ID", "IDR"
+    ),
     "FR": RegionConfig("FR", "法国", "https://www.skyscanner.fr", "fr-FR", "EUR"),
     "IT": RegionConfig("IT", "意大利", "https://www.skyscanner.it", "it-IT", "EUR"),
     "ES": RegionConfig("ES", "西班牙", "https://www.skyscanner.es", "es-ES", "EUR"),
@@ -82,7 +88,9 @@ REGIONS: dict[str, RegionConfig] = {
     "IE": RegionConfig("IE", "爱尔兰", "https://www.skyscanner.ie", "en-IE", "EUR"),
     "CH": RegionConfig("CH", "瑞士", "https://www.skyscanner.ch", "de-CH", "CHF"),
     "AT": RegionConfig("AT", "奥地利", "https://www.skyscanner.at", "de-AT", "EUR"),
-    "AU": RegionConfig("AU", "澳大利亚", "https://www.skyscanner.com.au", "en-AU", "AUD"),
+    "AU": RegionConfig(
+        "AU", "澳大利亚", "https://www.skyscanner.com.au", "en-AU", "AUD"
+    ),
     "BR": RegionConfig("BR", "巴西", "https://www.skyscanner.com.br", "pt-BR", "BRL"),
     "CA": RegionConfig("CA", "加拿大", "https://www.skyscanner.ca", "en-CA", "CAD"),
     "IN": RegionConfig("IN", "印度", "https://www.skyscanner.co.in", "en-IN", "INR"),
@@ -90,7 +98,7 @@ REGIONS: dict[str, RegionConfig] = {
     "RU": RegionConfig("RU", "俄罗斯", "https://ru.skyscanner.com", "ru-RU", "RUB"),
 }
 
-BASELINE_REGIONS = ("CN", "HK", "SG", "US", "JP", "KR", "UK")
+BASELINE_REGIONS = ("CN", "HK", "SG", "US", "UK")
 COUNTRY_TO_REGION_CODES: dict[str, tuple[str, ...]] = {
     "CN": ("CN",),
     "HK": ("HK",),
@@ -237,6 +245,22 @@ def parse_date(date_str: str) -> tuple[datetime, str, str]:
     return parsed, parsed.strftime("%Y-%m-%d"), parsed.strftime("%y%m%d")
 
 
+def replace_date_tokens(
+    text: str,
+    target_iso_date: str,
+    target_short_date: str,
+    *,
+    source_iso_date: str | None = None,
+    source_short_date: str | None = None,
+) -> str:
+    if source_iso_date:
+        text = text.replace(source_iso_date, target_iso_date)
+    if source_short_date:
+        text = text.replace(source_short_date, target_short_date)
+    text = re.sub(r"(?<=/)\d{6}(?=/|$)", target_short_date, text)
+    return re.sub(r"\b\d{4}-\d{2}-\d{2}\b", target_iso_date, text)
+
+
 def parse_float(value: Any) -> Optional[float]:
     if isinstance(value, (int, float)):
         return float(value)
@@ -245,11 +269,38 @@ def parse_float(value: Any) -> Optional[float]:
     text = value.strip()
     if not text:
         return None
-    numbers = re.findall(r"\d[\d,]*(?:\.\d+)?", text)
-    if not numbers:
+    cleaned = re.sub(r"[^\d,\.\s\u00a0]", "", text)
+    cleaned = cleaned.replace("\u00a0", " ").strip()
+    if not cleaned:
         return None
+    if "," in cleaned and "." in cleaned:
+        if cleaned.rfind(",") > cleaned.rfind("."):
+            cleaned = cleaned.replace(".", "")
+            cleaned = cleaned.replace(",", ".")
+        else:
+            cleaned = cleaned.replace(",", "")
+    elif "." in cleaned:
+        parts = [part for part in cleaned.split(".") if part]
+        if len(parts) > 1 and len(parts[-1]) in {1, 2}:
+            cleaned = "".join(parts[:-1]) + "." + parts[-1]
+        elif len(parts) > 1 and all(part.isdigit() for part in parts):
+            cleaned = "".join(parts)
+    elif "," in cleaned:
+        parts = [part for part in cleaned.split(",") if part]
+        if len(parts) > 1 and len(parts[-1]) in {1, 2}:
+            cleaned = "".join(parts[:-1]) + "." + parts[-1]
+        else:
+            cleaned = "".join(parts)
+    cleaned = cleaned.replace(" ", "")
+    if cleaned.isdigit():
+        match_text = cleaned
+    else:
+        match = re.search(r"\d+(?:\.\d+)?", cleaned)
+        if not match:
+            return None
+        match_text = match.group(0)
     try:
-        return float(numbers[0].replace(",", ""))
+        return float(match_text)
     except ValueError:
         return None
 
@@ -262,14 +313,195 @@ def first_currency(value: Any) -> Optional[str]:
     return None
 
 
+CURRENCY_TOKENS = (
+    "HK$",
+    "US$",
+    "CA$",
+    "A$",
+    "S$",
+    "€",
+    "£",
+    "¥",
+    "$",
+    "₩",
+    "₹",
+    "₽",
+    "₺",
+    "₫",
+    "CHF",
+    "SEK",
+    "NOK",
+    "DKK",
+    "ISK",
+    "PLN",
+    "CZK",
+    "HUF",
+    "RON",
+    "BGN",
+    "HRK",
+    "RSD",
+    "AED",
+    "QAR",
+    "SAR",
+    "KWD",
+    "BHD",
+    "OMR",
+    "JPY",
+    "CNY",
+    "HKD",
+    "USD",
+    "GBP",
+    "SGD",
+    "KRW",
+    "IDR",
+    "EUR",
+    "AUD",
+    "CAD",
+    "INR",
+    "BRL",
+    "MXN",
+    "RUB",
+    "KZT",
+)
+BEST_LABELS = (
+    "Best",
+    "Best option",
+    "Best flight",
+    "Recommended",
+    "最佳",
+    "最佳选项",
+    "最优",
+    "推荐",
+    "推荐排序",
+    "Bäst",
+    "추천순",
+    "おすすめ",
+    "おすすめ順",
+    "おすすめのフライト",
+    "Am besten",
+    "Mejor",
+    "Migliore",
+    "Melhor",
+    "Beste",
+    "Le meilleur",
+    "Najlepsze",
+    "Cel mai bun",
+    "Лучший",
+    "Лучшее",
+    "Terbaik",
+)
+CHEAPEST_LABELS = (
+    "Cheapest",
+    "最便宜",
+    "Billigast",
+    "최저가",
+    "最安値",
+    "Günstigste",
+    "Más barato",
+    "Più economico",
+    "Mais barato",
+    "Goedkoopste",
+    "Le moins cher",
+    "Najtańsze",
+    "Cel mai ieftin",
+    "Самый дешевый",
+    "Самые дешевые",
+    "Дешевле всего",
+    "Termurah",
+)
+SORT_LABELS = tuple(dict.fromkeys((*BEST_LABELS, *CHEAPEST_LABELS)))
+LABEL_PRICE_SCAN_LINES = 10
+PRICE_PREFIX_HINTS = (
+    "总费用为",
+    "費用總計",
+    "总费用",
+    "價格低至",
+    "价格低至",
+    "最低只要",
+    "起",
+)
+SORT_SECTION_HINTS = (
+    "Visa resultat efter",
+    "搜索结果显示方式",
+    "搜尋結果顯示方式",
+    "검색 결과 표시 기준",
+    "検索結果の表示順",
+    "Show results by",
+    "Display results by",
+    "Mostrar resultados por",
+    "Mostra risultati per",
+    "Afficher les résultats par",
+    "Ergebnisse anzeigen nach",
+    "Показать результаты по",
+    "Tampilkan hasil berdasarkan",
+)
+REGION_BEST_LABELS: dict[str, tuple[str, ...]] = {
+    "SE": ("Bäst",),
+    "KR": ("추천순",),
+    "JP": ("おすすめ", "おすすめ順"),
+    "CN": ("综合最佳", "最优", "最佳"),
+    "HK": ("最優", "最佳"),
+    "SG": ("综合最佳", "最优", "最佳"),
+    "DE": ("Am besten", "Beste"),
+    "FR": ("Le meilleur",),
+    "ES": ("Mejor",),
+    "IT": ("Migliore",),
+    "PT": ("Melhor",),
+    "NL": ("Beste",),
+    "PL": ("Najlepsze",),
+    "RO": ("Cel mai bun",),
+    "ID": ("Terbaik",),
+    "KZ": ("Лучший", "Лучшее"),
+    "RU": ("Лучший", "Лучшее"),
+}
+REGION_CHEAPEST_LABELS: dict[str, tuple[str, ...]] = {
+    "SE": ("Billigast",),
+    "KR": ("최저가",),
+    "JP": ("最安値",),
+    "CN": ("最便宜",),
+    "HK": ("最便宜",),
+    "SG": ("最便宜",),
+    "DE": ("Günstigste",),
+    "FR": ("Le moins cher",),
+    "ES": ("Más barato",),
+    "IT": ("Più economico",),
+    "PT": ("Mais barato",),
+    "NL": ("Goedkoopste",),
+    "PL": ("Najtańsze",),
+    "RO": ("Cel mai ieftin",),
+    "ID": ("Termurah",),
+    "KZ": ("Самый дешевый", "Самые дешевые", "Дешевле всего"),
+    "RU": ("Самый дешевый", "Самые дешевые", "Дешевле всего"),
+}
+
+
 def parse_price_text(text: str) -> Optional[tuple[str, float]]:
-    match = re.search(r"(HK\$|£|¥|\$)\s?([\d,]+(?:\.\d+)?)", text)
-    if not match:
-        return None
-    amount = parse_float(match.group(2))
-    if amount is None:
-        return None
-    return match.group(1), amount
+    token_pattern = "|".join(
+        re.escape(token) for token in sorted(CURRENCY_TOKENS, key=len, reverse=True)
+    )
+    amount_pattern = r"\d[\d\s\u00a0,.]*"
+
+    prefix_match = re.search(
+        rf"({token_pattern})[ \t\u00a0]*({amount_pattern})",
+        text,
+        re.IGNORECASE,
+    )
+    if prefix_match:
+        amount = parse_float(prefix_match.group(2))
+        if amount is not None:
+            return prefix_match.group(1), amount
+
+    suffix_match = re.search(
+        rf"({amount_pattern})[ \t\u00a0]*({token_pattern})",
+        text,
+        re.IGNORECASE,
+    )
+    if suffix_match:
+        amount = parse_float(suffix_match.group(1))
+        if amount is not None:
+            return suffix_match.group(2), amount
+
+    return None
 
 
 def deep_copy_json(value: Any) -> Any:
@@ -489,11 +721,19 @@ def find_candidate_captures(
 
 
 def rewrite_url(url: str, region: RegionConfig, travel_date: str) -> str:
-    parsed, iso_date, short_date = parse_date(travel_date)
-    _ = parsed
+    _, iso_date, short_date = parse_date(travel_date)
     current = urlparse(url)
     target = urlparse(region.domain)
     query = dict(parse_qsl(current.query, keep_blank_values=True))
+
+    source_iso_date = None
+    source_short_date = None
+    iso_match = re.search(r"\b\d{4}-\d{2}-\d{2}\b", url)
+    if iso_match:
+        source_iso_date = iso_match.group(0)
+    short_match = re.search(r"(?<=/)\d{6}(?=/|$)", current.path)
+    if short_match:
+        source_short_date = short_match.group(0)
 
     for key in list(query):
         lower = key.lower()
@@ -505,8 +745,22 @@ def rewrite_url(url: str, region: RegionConfig, travel_date: str) -> str:
             query[key] = region.currency
         elif lower in DATE_PATH_HINTS:
             query[key] = iso_date
+        elif isinstance(query[key], str):
+            query[key] = replace_date_tokens(
+                query[key],
+                iso_date,
+                short_date,
+                source_iso_date=source_iso_date,
+                source_short_date=source_short_date,
+            )
 
-    replaced_path = current.path.replace(short_date, short_date)
+    replaced_path = replace_date_tokens(
+        current.path,
+        iso_date,
+        short_date,
+        source_iso_date=source_iso_date,
+        source_short_date=source_short_date,
+    )
     new_query = urlencode(query, doseq=True)
     return urlunparse(
         (
@@ -532,6 +786,52 @@ def mutate_payload(
 
     body = deep_copy_json(payload)
     parsed_date, iso_date, short_date = parse_date(travel_date)
+
+    source_origin = None
+    source_destination = None
+    source_iso_date = None
+    source_short_date = None
+
+    for legs_path in (["query", "queryLegs"], ["queryLegs"], ["legs"]):
+        legs = nested_get(body, legs_path)
+        if not isinstance(legs, list):
+            continue
+        for leg in legs:
+            if not isinstance(leg, dict):
+                continue
+            if source_origin is None:
+                origin_place = leg.get("originPlaceId")
+                if isinstance(origin_place, dict):
+                    source_origin = str(origin_place.get("iata") or "").upper() or None
+                elif isinstance(leg.get("origin"), str):
+                    source_origin = leg["origin"].upper()
+            if source_destination is None:
+                destination_place = leg.get("destinationPlaceId")
+                if isinstance(destination_place, dict):
+                    source_destination = (
+                        str(destination_place.get("iata") or "").upper() or None
+                    )
+                elif isinstance(leg.get("destination"), str):
+                    source_destination = leg["destination"].upper()
+            if source_iso_date is None:
+                leg_date = leg.get("date")
+                if isinstance(leg_date, dict):
+                    year = leg_date.get("year")
+                    month = leg_date.get("month")
+                    day = leg_date.get("day")
+                    if all(isinstance(part, int) for part in (year, month, day)):
+                        source_iso_date = f"{year:04d}-{month:02d}-{day:02d}"
+                elif isinstance(leg_date, str) and re.fullmatch(
+                    r"\d{4}-\d{2}-\d{2}", leg_date
+                ):
+                    source_iso_date = leg_date
+            if source_origin and source_destination and source_iso_date:
+                break
+        if source_origin and source_destination and source_iso_date:
+            break
+
+    if source_iso_date:
+        _, _, source_short_date = parse_date(source_iso_date)
 
     for path in (
         ["query", "market"],
@@ -577,14 +877,24 @@ def mutate_payload(
                     leg["date"] = iso_date
 
     text = compact_json(body)
-    replacements = {
-        re.compile(r"\bPEK\b", re.IGNORECASE): origin,
-        re.compile(r"\bALA\b", re.IGNORECASE): destination,
-        re.compile(r"\b\d{4}-\d{2}-\d{2}\b"): iso_date,
-        re.compile(r"\b\d{6}\b"): short_date,
-    }
-    for pattern, replacement in replacements.items():
-        text = pattern.sub(replacement, text)
+    if source_origin:
+        text = re.sub(
+            rf"\b{re.escape(source_origin)}\b", origin, text, flags=re.IGNORECASE
+        )
+    if source_destination:
+        text = re.sub(
+            rf"\b{re.escape(source_destination)}\b",
+            destination,
+            text,
+            flags=re.IGNORECASE,
+        )
+    text = replace_date_tokens(
+        text,
+        iso_date,
+        short_date,
+        source_iso_date=source_iso_date,
+        source_short_date=source_short_date,
+    )
 
     return json.loads(text)
 
@@ -832,8 +1142,12 @@ def build_effective_region_codes(
     if origin_country:
         route_regions.extend(COUNTRY_TO_REGION_CODES.get(origin_country.upper(), ()))
     if destination_country:
-        route_regions.extend(COUNTRY_TO_REGION_CODES.get(destination_country.upper(), ()))
-    return dedupe_region_codes([*BASELINE_REGIONS, *route_regions, *manual_region_codes])
+        route_regions.extend(
+            COUNTRY_TO_REGION_CODES.get(destination_country.upper(), ())
+        )
+    return dedupe_region_codes(
+        [*BASELINE_REGIONS, *route_regions, *manual_region_codes]
+    )
 
 
 def quotes_to_dicts(quotes: list[FlightQuote]) -> list[dict[str, Any]]:
@@ -850,6 +1164,10 @@ def quotes_to_dicts(quotes: list[FlightQuote]) -> list[dict[str, Any]]:
             "source_url": quote.source_url,
             "status": quote.status,
             "price_path": quote.price_path,
+            "best_price": quote.best_price,
+            "best_price_path": quote.best_price_path,
+            "cheapest_price": quote.cheapest_price,
+            "cheapest_price_path": quote.cheapest_price_path,
             "error": quote.error,
         }
         for quote in quotes
@@ -905,6 +1223,128 @@ def find_page_hint(page_text: str, hints: tuple[str, ...]) -> Optional[str]:
     return None
 
 
+def get_flight_results_scope(page_text: str) -> str:
+    for hint in SORT_SECTION_HINTS:
+        index = page_text.find(hint)
+        if index >= 0:
+            start = max(index - 120, 0)
+            return page_text[start : start + 3200]
+
+    lower_text = page_text.lower()
+    label_indexes = [
+        index
+        for label in SORT_LABELS
+        for index in [lower_text.find(label.lower())]
+        if index >= 0
+    ]
+    if label_indexes:
+        start = max(min(label_indexes) - 120, 0)
+        return page_text[start : start + 3200]
+
+    return page_text[:6000]
+
+
+def match_sort_label(
+    line_text: str, labels: tuple[str, ...]
+) -> Optional[tuple[str, int]]:
+    stripped = line_text.strip()
+    lowered = stripped.lower()
+    for label in sorted(labels, key=len, reverse=True):
+        label_lower = label.lower()
+        if lowered == label_lower:
+            return label, 3
+        if lowered.startswith(label_lower):
+            return label, 2
+        if lowered.lstrip("•- ").startswith(label_lower):
+            return label, 1
+    return None
+
+
+def extract_labeled_page_price(
+    page_text: str, labels: tuple[str, ...]
+) -> Optional[tuple[float, str, str]]:
+    candidates = extract_labeled_page_price_candidates(page_text, labels)
+    if not candidates:
+        return None
+    price, currency, label = candidates[0]
+    return price, currency, label
+
+
+def extract_labeled_page_price_candidates(
+    page_text: str, labels: tuple[str, ...]
+) -> list[tuple[float, str, str]]:
+    lines = page_text.splitlines()
+    candidates: list[tuple[int, int, int, int, float, str, str]] = []
+
+    for index, raw_line in enumerate(lines):
+        matched = match_sort_label(raw_line, labels)
+        if not matched:
+            continue
+
+        label, score = matched
+        block_parts: list[str] = []
+        suffix = raw_line.strip()[len(label) :].strip(" :-\t")
+        if suffix:
+            block_parts.append(suffix)
+
+        distance = 99
+        hint_score = 0
+        for offset in range(1, LABEL_PRICE_SCAN_LINES + 1):
+            next_index = index + offset
+            if next_index >= len(lines):
+                break
+            next_line = lines[next_index].strip()
+            if not next_line:
+                continue
+            if match_sort_label(next_line, SORT_LABELS):
+                break
+            if next_line in SORT_SECTION_HINTS:
+                continue
+            block_parts.append(next_line)
+            if any(hint in next_line for hint in PRICE_PREFIX_HINTS):
+                hint_score = 1
+            if distance == 99 and parse_price_text(next_line):
+                distance = offset
+                break
+
+        if distance == 99:
+            distance = 0 if suffix and parse_price_text(suffix) else 99
+        if any(hint in part for part in block_parts for hint in PRICE_PREFIX_HINTS):
+            hint_score = 1
+
+        parsed = parse_price_text("\n".join(block_parts))
+        if not parsed:
+            continue
+
+        currency, price = parsed
+        candidates.append((score, hint_score, distance, index, price, currency, label))
+
+    if not candidates:
+        return []
+
+    candidates.sort(key=lambda item: (-item[0], -item[1], item[2], item[3]))
+    return [(price, currency, label) for _, _, _, _, price, currency, label in candidates]
+
+
+def best_candidates_for_region(
+    scoped_text: str, region: RegionConfig
+) -> list[tuple[float, str, str]]:
+    region_labels = REGION_BEST_LABELS.get(region.code, ()) or BEST_LABELS
+    primary = extract_labeled_page_price_candidates(scoped_text, region_labels)
+    if region_labels == BEST_LABELS:
+        return primary
+
+    fallback = extract_labeled_page_price_candidates(scoped_text, BEST_LABELS)
+    merged: list[tuple[float, str, str]] = []
+    seen: set[tuple[float, str, str]] = set()
+    for candidate in [*primary, *fallback]:
+        if candidate in seen:
+            continue
+        seen.add(candidate)
+        merged.append(candidate)
+    return merged
+
+
 def extract_page_quote(
     region: RegionConfig, source_url: str, page_text: str
 ) -> FlightQuote:
@@ -932,28 +1372,85 @@ def extract_page_quote(
             error=f"页面仍在加载结果: {loading_hint}",
         )
 
-    market_match = re.search(
-        r"(United States|United Kingdom|中国|新加坡|香港)\n(?:[^\n]+\n)?([£¥$]|HK\$) ?(USD|GBP|CNY|SGD|HKD)",
-        page_text,
-    )
-    currency = market_match.group(3) if market_match else region.currency
+    currency = region.currency
+    scoped_text = get_flight_results_scope(page_text)
 
-    cheapest_match = re.search(
-        r"(?:Cheapest|最便宜)\s*\n+\s*(HK\$|£|¥|\$)\s?([\d,]+(?:\.\d+)?)",
-        page_text,
-    )
-    if cheapest_match:
+    best_labels = REGION_BEST_LABELS.get(region.code, ()) or BEST_LABELS
+    cheapest_labels = REGION_CHEAPEST_LABELS.get(region.code, ()) or CHEAPEST_LABELS
+    best_candidates = best_candidates_for_region(scoped_text, region)
+    best_match = best_candidates[0] if best_candidates else None
+    if best_match is None and best_labels != BEST_LABELS:
+        best_match = extract_labeled_page_price(scoped_text, BEST_LABELS)
+    cheapest_match = extract_labeled_page_price(scoped_text, cheapest_labels)
+    if cheapest_match is None and cheapest_labels != CHEAPEST_LABELS:
+        cheapest_match = extract_labeled_page_price(scoped_text, CHEAPEST_LABELS)
+    if best_match or cheapest_match:
+        best_price = best_match[0] if best_match else None
+        cheapest_price = cheapest_match[0] if cheapest_match else None
+        best_label = best_match[2] if best_match else None
+        cheapest_label = cheapest_match[2] if cheapest_match else None
+        inconsistency_error = None
+        status = "page_text"
+        if (
+            best_price is not None
+            and cheapest_price is not None
+            and best_price < cheapest_price
+        ):
+            recovered = next(
+                (
+                    candidate
+                    for candidate in best_candidates
+                    if candidate[0] >= cheapest_price
+                ),
+                None,
+            )
+            if recovered is not None:
+                best_price, _, best_label = recovered
+                status = "page_text_recovered_best"
+                inconsistency_error = (
+                    "Best 初始候选低于 Cheapest，已切换到后续 Best 候选"
+                )
+            else:
+                inconsistency_error = (
+                    "Best 价格低于 Cheapest，页面文本匹配可能错位，已忽略 Best"
+                )
+                best_price = None
+                best_label = None
+                status = "page_text_inconsistent"
+        elif best_price is not None and cheapest_price is None:
+            status = "page_text_best_only"
+        elif cheapest_price is not None and best_price is None:
+            status = "page_text_cheapest_only"
+        primary_price = cheapest_price if cheapest_price is not None else best_price
+        primary_label = cheapest_label if cheapest_price is not None else best_label
         return FlightQuote(
             region=region.code,
             domain=region.domain,
-            price=parse_float(cheapest_match.group(2)),
+            price=primary_price,
             currency=currency,
             source_url=source_url,
-            status="page_text",
-            price_path="document.body.innerText -> Cheapest",
+            status=status,
+            price_path=(
+                f"document.body.innerText -> {primary_label}"
+                if primary_label is not None
+                else None
+            ),
+            best_price=best_price,
+            best_price_path=(
+                f"document.body.innerText -> {best_label}"
+                if best_label is not None
+                else None
+            ),
+            cheapest_price=cheapest_price,
+            cheapest_price_path=(
+                f"document.body.innerText -> {cheapest_label}"
+                if cheapest_label is not None
+                else None
+            ),
+            error=inconsistency_error,
         )
 
-    fallback = parse_price_text(page_text)
+    fallback = parse_price_text(scoped_text)
     if fallback:
         return FlightQuote(
             region=region.code,
@@ -963,6 +1460,8 @@ def extract_page_quote(
             source_url=source_url,
             status="page_text_fallback",
             price_path="document.body.innerText -> first price",
+            cheapest_price=fallback[1],
+            cheapest_price_path="document.body.innerText -> first price",
         )
 
     return FlightQuote(
@@ -972,7 +1471,7 @@ def extract_page_quote(
         currency=currency,
         source_url=source_url,
         status="page_parse_failed",
-        error="页面正文未识别到 Cheapest 价格",
+        error="页面正文未识别到 Best/Cheapest 价格",
     )
 
 
@@ -1044,7 +1543,7 @@ async def compare_via_pages(
 
                     payload = await cdp_eval(
                         ws_url,
-                        "({title: document.title, url: location.href, text: document.body.innerText.slice(0, 12000)})",
+                        "({title: document.title, url: location.href, text: (document.body ? document.body.innerText : '').slice(0, 12000)})",
                     )
                     quote = extract_page_quote(
                         region,
@@ -1068,7 +1567,7 @@ async def compare_via_pages(
                             region, args.origin, args.destination, args.date
                         ),
                         status="page_parse_failed",
-                        error="页面正文未识别到 Cheapest 价格",
+                        error="页面正文未识别到 Best/Cheapest 价格",
                     )
                 )
 
