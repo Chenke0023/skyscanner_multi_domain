@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Optional
 
 from app_paths import PROJECT_ROOT, get_reports_dir
+from location_resolver import LocationResolver
 from skyscanner_neo import (
     DEFAULT_REGIONS,
     NeoCli,
@@ -29,54 +30,6 @@ from skyscanner_neo import (
     run_page_scan,
 )
 
-
-AIRPORT_CODES = {
-    "北京": "PEK",
-    "beijing": "PEK",
-    "上海": "PVG",
-    "shanghai": "PVG",
-    "广州": "CAN",
-    "guangzhou": "CAN",
-    "深圳": "SZX",
-    "shenzhen": "SZX",
-    "成都": "CTU",
-    "chengdu": "CTU",
-    "杭州": "HGH",
-    "hangzhou": "HGH",
-    "西安": "XIY",
-    "xian": "XIY",
-    "重庆": "CKG",
-    "chongqing": "CKG",
-    "香港": "HKG",
-    "hong kong": "HKG",
-    "台北": "TPE",
-    "taipei": "TPE",
-    "东京": "NRT",
-    "tokyo": "NRT",
-    "首尔": "ICN",
-    "seoul": "ICN",
-    "新加坡": "SIN",
-    "singapore": "SIN",
-    "阿拉木图": "ALA",
-    "almaty": "ALA",
-    "雅加达": "JKT",
-    "jakarta": "JKT",
-    "伦敦": "LHR",
-    "london": "LHR",
-    "纽约": "JFK",
-    "new york": "JFK",
-}
-
-METRO_CODES = {
-    "北京": "BJSA",
-    "beijing": "BJSA",
-    "上海": "SHAA",
-    "shanghai": "SHAA",
-    "伦敦": "LOND",
-    "london": "LOND",
-    "纽约": "NYCA",
-    "new york": "NYCA",
-}
 
 FX_TO_CNY = {
     "CNY": 1.0,
@@ -97,28 +50,10 @@ SimplifiedQuoteRow = dict[str, str | float]
 class SimpleCLI:
     def __init__(self) -> None:
         self.project_root = PROJECT_ROOT
+        self.location_resolver = LocationResolver()
 
     def normalize_location(self, value: str, prefer_metro: bool) -> str:
-        raw = value.strip()
-        if not raw:
-            raise ValueError("地点不能为空。")
-        upper = raw.upper()
-        if upper in set(METRO_CODES.values()) | set(AIRPORT_CODES.values()):
-            return upper
-        if len(upper) in {3, 4} and upper.isascii() and upper.isalpha():
-            return upper
-        lookup = raw.lower()
-        if prefer_metro and raw in METRO_CODES:
-            return METRO_CODES[raw]
-        if prefer_metro and lookup in METRO_CODES:
-            return METRO_CODES[lookup]
-        if raw in AIRPORT_CODES:
-            return AIRPORT_CODES[raw]
-        if lookup in AIRPORT_CODES:
-            return AIRPORT_CODES[lookup]
-        raise ValueError(
-            f"无法识别地点“{raw}”。请使用常见城市名，或直接输入 IATA/城市代码（例如 PEK、ALA、JKT、BJSA）。"
-        )
+        return self.location_resolver.normalize_location(value, prefer_metro=prefer_metro)
 
     def print_banner(self) -> None:
         print(
