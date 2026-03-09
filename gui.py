@@ -22,6 +22,7 @@ from location_resolver import LocationRecord
 from skyscanner_neo import (
     DEFAULT_REGIONS,
     NeoCli,
+    build_effective_region_codes,
     ensure_cdp_ready,
     quotes_to_dicts,
     run_page_scan,
@@ -47,12 +48,13 @@ class App:
         self.origin_var = tk.StringVar(value="北京")
         self.destination_var = tk.StringVar(value="阿拉木图")
         self.date_var = tk.StringVar(value=default_date)
-        self.regions_var = tk.StringVar(value=",".join(DEFAULT_REGIONS))
+        self.regions_var = tk.StringVar(value="")
         self.wait_var = tk.StringVar(value="10")
         self.exact_airport_var = tk.BooleanVar(value=False)
         self.status_var = tk.StringVar(value="就绪")
         self.origin_hint_var = tk.StringVar(value="")
         self.destination_hint_var = tk.StringVar(value="")
+        self.regions_hint_var = tk.StringVar(value="")
         self.location_entries: dict[str, ttk.Entry] = {}
         self.location_listboxes: dict[str, tk.Listbox] = {}
         self.location_hint_labels: dict[str, ttk.Label] = {}
@@ -66,6 +68,7 @@ class App:
         self.destination_var.trace_add("write", self._refresh_location_hints)
         self.origin_var.trace_add("write", self._refresh_origin_suggestions)
         self.destination_var.trace_add("write", self._refresh_destination_suggestions)
+        self.regions_var.trace_add("write", self._refresh_location_hints)
         self.exact_airport_var.trace_add("write", self._refresh_location_hints)
         self.exact_airport_var.trace_add("write", self._refresh_origin_suggestions)
         self._refresh_location_hints()
@@ -109,7 +112,15 @@ class App:
             location_field="destination",
         )
         self._add_labeled_entry(form, "日期", self.date_var, 0, 2)
-        self._add_labeled_entry(form, "地区代码", self.regions_var, 1, 0, colspan=2)
+        self._add_labeled_entry(
+            form,
+            "额外地区代码",
+            self.regions_var,
+            1,
+            0,
+            colspan=2,
+            hint_var=self.regions_hint_var,
+        )
         self._add_labeled_entry(form, "等待秒数", self.wait_var, 1, 2)
 
         ttk.Checkbutton(
@@ -136,14 +147,33 @@ class App:
         results = ttk.LabelFrame(outer, text="结果", padding=12)
         results.pack(fill=tk.BOTH, expand=True, pady=(12, 0))
 
-        columns = ("region", "price_cny", "link")
+        columns = (
+            "region",
+            "best_native",
+            "best_cny",
+            "cheapest_native",
+            "cheapest_cny",
+            "status",
+            "error",
+            "link",
+        )
         self.tree = ttk.Treeview(results, columns=columns, show="headings", height=10)
         self.tree.heading("region", text="地区")
-        self.tree.heading("price_cny", text="价格（人民币）")
+        self.tree.heading("best_native", text="最佳（原币）")
+        self.tree.heading("best_cny", text="最佳（人民币）")
+        self.tree.heading("cheapest_native", text="最低价（原币）")
+        self.tree.heading("cheapest_cny", text="最低价（人民币）")
+        self.tree.heading("status", text="状态")
+        self.tree.heading("error", text="错误")
         self.tree.heading("link", text="链接")
-        self.tree.column("region", width=120, anchor="w")
-        self.tree.column("price_cny", width=140, anchor="e")
-        self.tree.column("link", width=520, anchor="w")
+        self.tree.column("region", width=110, anchor="w")
+        self.tree.column("best_native", width=120, anchor="e")
+        self.tree.column("best_cny", width=120, anchor="e")
+        self.tree.column("cheapest_native", width=120, anchor="e")
+        self.tree.column("cheapest_cny", width=120, anchor="e")
+        self.tree.column("status", width=100, anchor="w")
+        self.tree.column("error", width=220, anchor="w")
+        self.tree.column("link", width=240, anchor="w")
         self.tree.pack(fill=tk.BOTH, expand=True)
 
         actions = ttk.Frame(results)
@@ -364,6 +394,25 @@ class App:
         except ValueError as exc:
             hint_var.set(str(exc))
 
+    def _compute_effective_regions(self) -> list[str]:
+        manual_regions = [
+            code.strip().upper() for code in self.regions_var.get().split(",") if code.strip()
+        ]
+        try:
+            origin = self.cli.resolve_location(
+                self.origin_var.get(), prefer_metro=not self.exact_airport_var.get()
+            )
+            destination = self.cli.resolve_location(
+                self.destination_var.get(), prefer_metro=False
+            )
+        except ValueError:
+            return build_effective_region_codes(manual_region_codes=manual_regions)
+        return build_effective_region_codes(
+            origin_country=origin.country,
+            destination_country=destination.country,
+            manual_region_codes=manual_regions,
+        )
+
     def _refresh_location_hints(self, *args: object) -> None:
         self._set_location_hint(
             self.origin_hint_var,
@@ -376,6 +425,10 @@ class App:
             "目的地",
             self.destination_var.get(),
             prefer_metro=False,
+        )
+        effective_regions = self._compute_effective_regions()
+        self.regions_hint_var.set(
+            f"默认包含 {','.join(DEFAULT_REGIONS)}；本次实际地区: {', '.join(effective_regions)}"
         )
 
     def log(self, message: str) -> None:
@@ -419,7 +472,7 @@ class App:
         origin = self.origin_var.get().strip()
         destination = self.destination_var.get().strip()
         date = self.date_var.get().strip()
-        regions = [
+        manual_regions = [
             code.strip().upper()
             for code in self.regions_var.get().split(",")
             if code.strip()
@@ -435,10 +488,6 @@ class App:
             messagebox.showerror("日期格式错误", "日期必须是 YYYY-MM-DD。")
             return
 
-        if not regions:
-            messagebox.showerror("地区为空", "请至少填写一个地区代码。")
-            return
-
         try:
             wait_seconds = int(self.wait_var.get() or "10")
         except ValueError:
@@ -446,14 +495,23 @@ class App:
             return
 
         try:
-            origin_code = self.cli.normalize_location(
+            origin_resolved = self.cli.resolve_location(
                 origin, prefer_metro=not self.exact_airport_var.get()
             )
-            destination_code = self.cli.normalize_location(
+            destination_resolved = self.cli.resolve_location(
                 destination, prefer_metro=False
             )
         except ValueError as exc:
             messagebox.showerror("地点无法识别", str(exc))
+            return
+
+        regions = build_effective_region_codes(
+            origin_country=origin_resolved.country,
+            destination_country=destination_resolved.country,
+            manual_region_codes=manual_regions,
+        )
+        if not regions:
+            messagebox.showerror("地区为空", "无法生成可用地区代码。")
             return
 
         self.clear_results()
@@ -461,12 +519,12 @@ class App:
         self.status_var.set("正在运行...")
         self.log(
             f"开始比价: {origin} -> {destination}, {date}, 地区: {', '.join(regions)} "
-            f"(实际代码 {origin_code} -> {destination_code})"
+            f"(实际代码 {origin_resolved.code} -> {destination_resolved.code})"
         )
 
         thread = threading.Thread(
             target=self._run_scan_worker,
-            args=(origin_code, destination_code, date, regions, wait_seconds),
+            args=(origin_resolved.code, destination_resolved.code, date, regions, wait_seconds),
             daemon=True,
         )
         thread.start()
@@ -527,23 +585,51 @@ class App:
         rows = self.cli.simplify_quotes(quotes)
         self.clear_results()
         for row in rows:
+            best_cny_text = (
+                f"¥{row['best_cny_price']:,.2f}"
+                if isinstance(row.get("best_cny_price"), (int, float))
+                else "-"
+            )
+            cheapest_cny_text = (
+                f"¥{row['cheapest_cny_price']:,.2f}"
+                if isinstance(row.get("cheapest_cny_price"), (int, float))
+                else "-"
+            )
             self.tree.insert(
                 "",
                 tk.END,
                 values=(
                     row["region_name"],
-                    f"¥{row['cny_price']:,.2f}",
+                    row.get("best_display_price") or "-",
+                    best_cny_text,
+                    row.get("cheapest_display_price") or "-",
+                    cheapest_cny_text,
+                    row.get("status") or "-",
+                    row.get("error") or "-",
                     row["link"],
                 ),
             )
 
-        winner = rows[0] if rows else None
-        if winner:
+        best_winner = next(
+            (row for row in rows if isinstance(row.get("best_cny_price"), (int, float))),
+            None,
+        )
+        cheapest_winner = next(
+            (row for row in rows if isinstance(row.get("cheapest_cny_price"), (int, float))),
+            None,
+        )
+        if best_winner:
             self.log(
-                f"最低价: ¥{winner['cny_price']:,.2f} 来自 {winner['region_name']}"
+                f"最佳: ¥{best_winner['best_cny_price']:,.2f} 来自 {best_winner['region_name']}"
             )
+        if cheapest_winner:
+            self.log(
+                f"最低价: ¥{cheapest_winner['cheapest_cny_price']:,.2f} 来自 {cheapest_winner['region_name']}"
+            )
+        elif rows:
+            self.log("已提取市场价格，但人民币换算暂不可用。")
         else:
-            self.log("没有可展示的人民币价格结果。")
+            self.log("没有可展示的市场结果。")
         self.log(f"结果已保存: {self.current_output}")
 
     def _handle_error(self, message: str) -> None:
