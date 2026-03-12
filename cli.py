@@ -402,6 +402,7 @@ class SimpleCLI:
                 region_codes=regions,
                 page_wait=args.wait,
                 timeout=args.timeout,
+                transport=args.transport,
             )
             if not quotes:
                 print("没有返回任何结果。检查地区代码或 Edge/CDP 环境。")
@@ -488,6 +489,7 @@ class SimpleCLI:
             save=True,
             date_window=int(date_window_raw) if date_window_raw else 3,
             exact_airport=False,
+            transport="scrapling",
         )
         return asyncio.run(self.run_page_command(args))
 
@@ -533,6 +535,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     page.add_argument("--wait", type=int, default=10, help="打开结果页后的等待秒数")
     page.add_argument("--timeout", type=int, default=30, help="HTTP/CDP 超时")
+    page.add_argument(
+        "--transport",
+        choices=["scrapling", "page"],
+        default="scrapling",
+        help="scrapling: 直接抓取页面文本；page: 通过 Edge CDP 读取结果页",
+    )
     page.add_argument(
         "--exact-airport",
         action="store_true",
