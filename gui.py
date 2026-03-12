@@ -17,7 +17,8 @@ from tkinter import messagebox, ttk
 from typing import Any
 
 from app_paths import get_reports_dir
-from cli import SimpleCLI
+from cli import CombinedQuoteRow, SimpleCLI
+from date_window import build_date_window
 from location_resolver import LocationRecord
 from skyscanner_neo import (
     DEFAULT_REGIONS,
@@ -50,7 +51,9 @@ class App:
         self.date_var = tk.StringVar(value=default_date)
         self.regions_var = tk.StringVar(value="")
         self.wait_var = tk.StringVar(value="10")
+        self.date_window_var = tk.StringVar(value="3")
         self.exact_airport_var = tk.BooleanVar(value=False)
+        self.combined_summary_var = tk.BooleanVar(value=True)
         self.status_var = tk.StringVar(value="就绪")
         self.origin_hint_var = tk.StringVar(value="")
         self.destination_hint_var = tk.StringVar(value="")
@@ -122,15 +125,22 @@ class App:
             hint_var=self.regions_hint_var,
         )
         self._add_labeled_entry(form, "等待秒数", self.wait_var, 1, 2)
+        self._add_labeled_entry(form, "±天数", self.date_window_var, 2, 0)
+
+        ttk.Checkbutton(
+            form,
+            text="保存多日期汇总",
+            variable=self.combined_summary_var,
+        ).grid(row=2, column=1, sticky="w", pady=(8, 0))
 
         ttk.Checkbutton(
             form,
             text="严格机场代码（例如北京不自动转成 BJSA）",
             variable=self.exact_airport_var,
-        ).grid(row=2, column=0, columnspan=2, sticky="w", pady=(8, 0))
+        ).grid(row=3, column=0, columnspan=2, sticky="w", pady=(8, 0))
 
         button_row = ttk.Frame(form)
-        button_row.grid(row=2, column=2, sticky="e")
+        button_row.grid(row=3, column=2, sticky="e")
         self.doctor_button = ttk.Button(
             button_row, text="检查环境", command=self.check_environment
         )
@@ -148,6 +158,7 @@ class App:
         results.pack(fill=tk.BOTH, expand=True, pady=(12, 0))
 
         columns = (
+            "date",
             "region",
             "best_native",
             "best_cny",
@@ -158,6 +169,7 @@ class App:
             "link",
         )
         self.tree = ttk.Treeview(results, columns=columns, show="headings", height=10)
+        self.tree.heading("date", text="日期")
         self.tree.heading("region", text="地区")
         self.tree.heading("best_native", text="最佳（原币）")
         self.tree.heading("best_cny", text="最佳（人民币）")
@@ -166,6 +178,7 @@ class App:
         self.tree.heading("status", text="状态")
         self.tree.heading("error", text="错误")
         self.tree.heading("link", text="链接")
+        self.tree.column("date", width=100, anchor="w")
         self.tree.column("region", width=110, anchor="w")
         self.tree.column("best_native", width=120, anchor="e")
         self.tree.column("best_cny", width=120, anchor="e")
@@ -213,29 +226,41 @@ class App:
         entry.pack(fill=tk.X, expand=True)
         if location_field is not None:
             self.location_entries[location_field] = entry
-            listbox = tk.Listbox(cell, height=0, activestyle="none", exportselection=False)
+            listbox = tk.Listbox(
+                cell, height=0, activestyle="none", exportselection=False
+            )
             listbox.pack(fill=tk.X, expand=True, pady=(4, 0))
             listbox.pack_forget()
             listbox.bind(
                 "<ButtonRelease-1>",
-                lambda event, field=location_field: self._select_location_suggestion(field),
+                lambda event, field=location_field: self._select_location_suggestion(
+                    field
+                ),
             )
             listbox.bind(
                 "<Return>",
-                lambda event, field=location_field: self._select_location_suggestion(field) or "break",
+                lambda event, field=location_field: self._select_location_suggestion(
+                    field
+                )
+                or "break",
             )
             listbox.bind(
                 "<Double-Button-1>",
-                lambda event, field=location_field: self._select_location_suggestion(field),
+                lambda event, field=location_field: self._select_location_suggestion(
+                    field
+                ),
             )
             self.location_listboxes[location_field] = listbox
             entry.bind(
                 "<Down>",
-                lambda event, field=location_field: self._focus_location_suggestions(field),
+                lambda event, field=location_field: self._focus_location_suggestions(
+                    field
+                ),
             )
             entry.bind(
                 "<Return>",
-                lambda event, field=location_field: self._accept_first_location_suggestion(field),
+                lambda event,
+                field=location_field: self._accept_first_location_suggestion(field),
             )
             entry.bind(
                 "<FocusOut>",
@@ -245,15 +270,21 @@ class App:
             )
             listbox.bind(
                 "<Up>",
-                lambda event, field=location_field: self._move_location_selection(field, -1),
+                lambda event, field=location_field: self._move_location_selection(
+                    field, -1
+                ),
             )
             listbox.bind(
                 "<Down>",
-                lambda event, field=location_field: self._move_location_selection(field, 1),
+                lambda event, field=location_field: self._move_location_selection(
+                    field, 1
+                ),
             )
             listbox.bind(
                 "<Escape>",
-                lambda event, field=location_field: self._close_location_suggestions(field),
+                lambda event, field=location_field: self._close_location_suggestions(
+                    field
+                ),
             )
         if hint_var is not None:
             hint_label = ttk.Label(cell, textvariable=hint_var, foreground="#666666")
@@ -295,7 +326,11 @@ class App:
         listbox.selection_set(0)
         listbox.activate(0)
         if not listbox.winfo_ismapped():
-            pack_kwargs: dict[str, object] = {"fill": tk.X, "expand": True, "pady": (4, 0)}
+            pack_kwargs: dict[str, Any] = {
+                "fill": tk.X,
+                "expand": True,
+                "pady": (4, 0),
+            }
             hint_label = self.location_hint_labels.get(field)
             if hint_label is not None:
                 pack_kwargs["before"] = hint_label
@@ -396,7 +431,9 @@ class App:
 
     def _compute_effective_regions(self) -> list[str]:
         manual_regions = [
-            code.strip().upper() for code in self.regions_var.get().split(",") if code.strip()
+            code.strip().upper()
+            for code in self.regions_var.get().split(",")
+            if code.strip()
         ]
         try:
             origin = self.cli.resolve_location(
@@ -495,6 +532,15 @@ class App:
             return
 
         try:
+            date_window_days = int(self.date_window_var.get() or "0")
+        except ValueError:
+            messagebox.showerror("±天数错误", "±天数必须是非负整数。")
+            return
+        if date_window_days < 0:
+            messagebox.showerror("±天数错误", "±天数必须是非负整数。")
+            return
+
+        try:
             origin_resolved = self.cli.resolve_location(
                 origin, prefer_metro=not self.exact_airport_var.get()
             )
@@ -518,13 +564,22 @@ class App:
         self.set_busy(True)
         self.status_var.set("正在运行...")
         self.log(
-            f"开始比价: {origin} -> {destination}, {date}, 地区: {', '.join(regions)} "
+            f"开始比价: {origin} -> {destination}, {date} (±{date_window_days} 天), "
+            f"地区: {', '.join(regions)} "
             f"(实际代码 {origin_resolved.code} -> {destination_resolved.code})"
         )
 
         thread = threading.Thread(
             target=self._run_scan_worker,
-            args=(origin_resolved.code, destination_resolved.code, date, regions, wait_seconds),
+            args=(
+                origin_resolved.code,
+                destination_resolved.code,
+                date,
+                regions,
+                wait_seconds,
+                date_window_days,
+                self.combined_summary_var.get(),
+            ),
             daemon=True,
         )
         thread.start()
@@ -536,29 +591,58 @@ class App:
         date: str,
         regions: list[str],
         wait_seconds: int,
+        date_window_days: int,
+        save_combined: bool,
     ) -> None:
         try:
-            quotes = asyncio.run(
-                run_page_scan(
-                    origin=origin_code,
-                    destination=destination_code,
-                    date=date,
-                    region_codes=regions,
-                    page_wait=wait_seconds,
-                    timeout=30,
+            date_list = build_date_window(date, date_window_days)
+            rows_by_date: list[tuple[str, list[dict[str, str | float | None]]]] = []
+            outputs: list[Path] = []
+
+            for current_date in date_list:
+                self.queue.put(("status", f"正在扫描 {current_date}..."))
+                self.queue.put(("log", f"开始扫描日期 {current_date}。"))
+                quotes = asyncio.run(
+                    run_page_scan(
+                        origin=origin_code,
+                        destination=destination_code,
+                        date=current_date,
+                        region_codes=regions,
+                        page_wait=wait_seconds,
+                        timeout=30,
+                    )
                 )
-            )
-            quote_dicts = quotes_to_dicts(quotes)
-            output = self.cli.save_results(
-                quote_dicts, origin_code, destination_code, date
-            )
+                if not quotes:
+                    rows_by_date.append((current_date, []))
+                    self.queue.put(
+                        ("log", f"日期 {current_date} 未返回结果，请检查地区或环境。")
+                    )
+                    continue
+
+                quote_dicts = quotes_to_dicts(quotes)
+                output = self.cli.save_results(
+                    quote_dicts, origin_code, destination_code, current_date
+                )
+                outputs.append(output)
+                rows = self.cli.simplify_quotes(quote_dicts)
+                rows_by_date.append((current_date, rows))
+
+            combined_output = None
+            if save_combined and rows_by_date:
+                start_date = date_list[0]
+                end_date = date_list[-1]
+                combined_output = self.cli.save_window_results(
+                    rows_by_date, origin_code, destination_code, start_date, end_date
+                )
             self.queue.put(
                 (
                     "scan_done",
                     {
-                        "quotes": quote_dicts,
-                        "output": output,
+                        "rows_by_date": rows_by_date,
+                        "outputs": outputs,
+                        "combined_output": combined_output,
                         "origin_code": origin_code,
+                        "date_window_days": date_window_days,
                     },
                 )
             )
@@ -573,64 +657,114 @@ class App:
                     self._handle_scan_done(payload)
                 elif kind == "error":
                     self._handle_error(str(payload))
+                elif kind == "log":
+                    self.log(str(payload))
+                elif kind == "status":
+                    self.status_var.set(str(payload))
         except queue.Empty:
             pass
         self.root.after(200, self._poll_queue)
 
     def _handle_scan_done(self, payload: dict[str, Any]) -> None:
         self.set_busy(False)
-        self.current_output = payload["output"]
-        self.status_var.set("完成")
-        quotes = payload["quotes"]
-        rows = self.cli.simplify_quotes(quotes)
-        self.clear_results()
-        for row in rows:
-            best_cny_text = (
-                f"¥{row['best_cny_price']:,.2f}"
-                if isinstance(row.get("best_cny_price"), (int, float))
-                else "-"
-            )
-            cheapest_cny_text = (
-                f"¥{row['cheapest_cny_price']:,.2f}"
-                if isinstance(row.get("cheapest_cny_price"), (int, float))
-                else "-"
-            )
-            self.tree.insert(
-                "",
-                tk.END,
-                values=(
-                    row["region_name"],
-                    row.get("best_display_price") or "-",
-                    best_cny_text,
-                    row.get("cheapest_display_price") or "-",
-                    cheapest_cny_text,
-                    row.get("status") or "-",
-                    row.get("error") or "-",
-                    row["link"],
-                ),
-            )
-
-        best_winner = next(
-            (row for row in rows if isinstance(row.get("best_cny_price"), (int, float))),
-            None,
+        outputs: list[Path] = payload.get("outputs") or []
+        self.current_output = payload.get("combined_output") or (
+            outputs[-1] if outputs else None
         )
-        cheapest_winner = next(
-            (row for row in rows if isinstance(row.get("cheapest_cny_price"), (int, float))),
-            None,
+        self.status_var.set("完成")
+        self.clear_results()
+        rows_by_date: list[tuple[str, list[dict[str, str | float | None]]]] = payload[
+            "rows_by_date"
+        ]
+        combined_rows: list[CombinedQuoteRow] = []
+        for row_date, rows in rows_by_date:
+            for row in rows:
+                combined_rows.append({"date": row_date, **row})
+                best_cny_text = (
+                    f"¥{row['best_cny_price']:,.2f}"
+                    if isinstance(row.get("best_cny_price"), (int, float))
+                    else "-"
+                )
+                cheapest_cny_text = (
+                    f"¥{row['cheapest_cny_price']:,.2f}"
+                    if isinstance(row.get("cheapest_cny_price"), (int, float))
+                    else "-"
+                )
+                self.tree.insert(
+                    "",
+                    tk.END,
+                    values=(
+                        row_date,
+                        row["region_name"],
+                        row.get("best_display_price") or "-",
+                        best_cny_text,
+                        row.get("cheapest_display_price") or "-",
+                        cheapest_cny_text,
+                        row.get("status") or "-",
+                        row.get("error") or "-",
+                        row["link"],
+                    ),
+                )
+
+        best_candidates = [
+            row
+            for row in combined_rows
+            if isinstance(row.get("best_cny_price"), (int, float))
+        ]
+        cheapest_candidates = [
+            row
+            for row in combined_rows
+            if isinstance(row.get("cheapest_cny_price"), (int, float))
+        ]
+
+        def _price_value(row: CombinedQuoteRow, key: str) -> float:
+            value = row.get(key)
+            return float(value) if isinstance(value, (int, float)) else float("inf")
+
+        best_winner = (
+            min(best_candidates, key=lambda row: _price_value(row, "best_cny_price"))
+            if best_candidates
+            else None
+        )
+        cheapest_winner = (
+            min(
+                cheapest_candidates,
+                key=lambda row: _price_value(row, "cheapest_cny_price"),
+            )
+            if cheapest_candidates
+            else None
         )
         if best_winner:
-            self.log(
-                f"最佳: ¥{best_winner['best_cny_price']:,.2f} 来自 {best_winner['region_name']}"
-            )
+            best_price = best_winner.get("best_cny_price")
+            if isinstance(best_price, (int, float)):
+                self.log(
+                    "最佳: ¥{price:,.2f} 来自 {region} ({date})".format(
+                        price=float(best_price),
+                        region=best_winner["region_name"],
+                        date=best_winner.get("date") or "-",
+                    )
+                )
         if cheapest_winner:
-            self.log(
-                f"最低价: ¥{cheapest_winner['cheapest_cny_price']:,.2f} 来自 {cheapest_winner['region_name']}"
-            )
-        elif rows:
+            cheapest_price = cheapest_winner.get("cheapest_cny_price")
+            if isinstance(cheapest_price, (int, float)):
+                self.log(
+                    "最低价: ¥{price:,.2f} 来自 {region} ({date})".format(
+                        price=float(cheapest_price),
+                        region=cheapest_winner["region_name"],
+                        date=cheapest_winner.get("date") or "-",
+                    )
+                )
+        elif combined_rows:
             self.log("已提取市场价格，但人民币换算暂不可用。")
         else:
             self.log("没有可展示的市场结果。")
-        self.log(f"结果已保存: {self.current_output}")
+        if outputs:
+            self.log(f"单日结果已保存: {len(outputs)} 份。")
+        combined_output = payload.get("combined_output")
+        if combined_output:
+            self.log(f"汇总结果已保存: {combined_output}")
+        if self.current_output:
+            self.log(f"最新结果文件: {self.current_output}")
 
     def _handle_error(self, message: str) -> None:
         self.set_busy(False)

@@ -19,8 +19,9 @@ from pathlib import Path
 from typing import Optional
 
 from app_paths import PROJECT_ROOT, get_reports_dir
+from date_window import build_date_window
 from fx_rates import FxRateService
-from location_resolver import LocationResolver
+from location_resolver import LocationResolver, ResolvedLocation
 from skyscanner_neo import (
     DEFAULT_REGIONS,
     NeoCli,
@@ -35,6 +36,7 @@ from skyscanner_neo import (
 
 QuoteRow = dict[str, object]
 SimplifiedQuoteRow = dict[str, str | float | None]
+CombinedQuoteRow = dict[str, str | float | None]
 
 
 BEST_LABEL = "最佳"
@@ -48,9 +50,11 @@ class SimpleCLI:
         self.fx_rates = FxRateService()
 
     def normalize_location(self, value: str, prefer_metro: bool) -> str:
-        return self.location_resolver.normalize_location(value, prefer_metro=prefer_metro)
+        return self.location_resolver.normalize_location(
+            value, prefer_metro=prefer_metro
+        )
 
-    def resolve_location(self, value: str, prefer_metro: bool):
+    def resolve_location(self, value: str, prefer_metro: bool) -> ResolvedLocation:
         return self.location_resolver.resolve_location(value, prefer_metro=prefer_metro)
 
     def build_effective_regions(
@@ -60,7 +64,7 @@ class SimpleCLI:
         *,
         prefer_origin_metro: bool,
         manual_region_codes: list[str] | None = None,
-    ) -> tuple[object, object, list[str]]:
+    ) -> tuple[ResolvedLocation, ResolvedLocation, list[str]]:
         origin = self.resolve_location(origin_value, prefer_metro=prefer_origin_metro)
         destination = self.resolve_location(destination_value, prefer_metro=False)
         regions = build_effective_region_codes(
@@ -101,13 +105,17 @@ class SimpleCLI:
 
             if best_price is not None and not isinstance(best_price, (int, float)):
                 continue
-            if cheapest_price is not None and not isinstance(cheapest_price, (int, float)):
+            if cheapest_price is not None and not isinstance(
+                cheapest_price, (int, float)
+            ):
                 continue
             if best_price is None and cheapest_price is None:
                 continue
 
             best_numeric = float(best_price) if best_price is not None else None
-            cheapest_numeric = float(cheapest_price) if cheapest_price is not None else None
+            cheapest_numeric = (
+                float(cheapest_price) if cheapest_price is not None else None
+            )
             best_cny = self.to_cny(best_numeric, currency) if currency else None
             cheapest_cny = self.to_cny(cheapest_numeric, currency) if currency else None
 
@@ -187,11 +195,117 @@ class SimpleCLI:
             )
         return "\n".join(lines) + "\n"
 
+    def build_combined_markdown_table(
+        self,
+        rows: list[CombinedQuoteRow],
+        origin: str,
+        destination: str,
+    ) -> str:
+        dates: list[str] = [
+            date for row in rows if isinstance(date := row.get("date"), str)
+        ]
+        date_range = f"{min(dates)} ~ {max(dates)}" if dates and all(dates) else "-"
+        lines = [
+            "# Skyscanner 比价结果（多日期）",
+            "",
+            f"- 航线: `{origin} -> {destination}`",
+            f"- 日期范围: `{date_range}`",
+            f"- 生成时间: `{datetime.now().isoformat(timespec='seconds')}`",
+            "",
+        ]
+        if not rows:
+            lines.append("暂无可用价格结果。")
+            return "\n".join(lines) + "\n"
+
+        lines.extend(
+            [
+                "| 日期 | 地区 | 最佳（原币） | 最佳（人民币） | 最低价（原币） | 最低价（人民币） | 状态 | 错误 | 链接 |",
+                "| --- | --- | ---: | ---: | ---: | ---: | --- | --- | --- |",
+            ]
+        )
+        for row in rows:
+            best_cny_text = (
+                f"¥{row['best_cny_price']:,.2f}"
+                if isinstance(row.get("best_cny_price"), (int, float))
+                else "-"
+            )
+            cheapest_cny_text = (
+                f"¥{row['cheapest_cny_price']:,.2f}"
+                if isinstance(row.get("cheapest_cny_price"), (int, float))
+                else "-"
+            )
+            link = row.get("link") or "-"
+            link_cell = f"[打开结果页]({link})" if link != "-" else "-"
+            lines.append(
+                "| "
+                + " | ".join(
+                    [
+                        str(row.get("date") or "-"),
+                        str(row.get("region_name") or "-"),
+                        str(row.get("best_display_price") or "-"),
+                        best_cny_text,
+                        str(row.get("cheapest_display_price") or "-"),
+                        cheapest_cny_text,
+                        str(row.get("status") or "-"),
+                        str(row.get("error") or "-"),
+                        link_cell,
+                    ]
+                )
+                + " |"
+            )
+        return "\n".join(lines) + "\n"
+
+    def build_window_markdown_table(
+        self,
+        rows_by_date: list[tuple[str, list[SimplifiedQuoteRow]]],
+        origin: str,
+        destination: str,
+        start_date: str,
+        end_date: str,
+    ) -> str:
+        lines = [
+            "# Skyscanner 比价结果（日期窗口）",
+            "",
+            f"- 航线: `{origin} -> {destination}`",
+            f"- 日期窗口: `{start_date}` ~ `{end_date}`",
+            f"- 生成时间: `{datetime.now().isoformat(timespec='seconds')}`",
+            "",
+        ]
+        total_rows = sum(len(rows) for _, rows in rows_by_date)
+        if total_rows == 0:
+            lines.append("暂无可用价格结果。")
+            return "\n".join(lines) + "\n"
+
+        lines.extend(
+            [
+                "| 日期 | 地区 | 最佳（原币） | 最佳（人民币） | 最低价（原币） | 最低价（人民币） | 状态 | 错误 | 链接 |",
+                "| --- | --- | ---: | ---: | ---: | ---: | --- | --- | --- |",
+            ]
+        )
+        for date, rows in rows_by_date:
+            for row in rows:
+                best_cny_text = (
+                    f"¥{row['best_cny_price']:,.2f}"
+                    if isinstance(row.get("best_cny_price"), (int, float))
+                    else "-"
+                )
+                cheapest_cny_text = (
+                    f"¥{row['cheapest_cny_price']:,.2f}"
+                    if isinstance(row.get("cheapest_cny_price"), (int, float))
+                    else "-"
+                )
+                lines.append(
+                    f"| {date} | {row['region_name']} | {row.get('best_display_price') or '-'} | {best_cny_text} | {row.get('cheapest_display_price') or '-'} | {cheapest_cny_text} | {row.get('status') or '-'} | {row.get('error') or '-'} | [打开结果页]({row['link']}) |"
+                )
+        return "\n".join(lines) + "\n"
+
     def print_quotes(self, rows: list[SimplifiedQuoteRow]) -> None:
         if not rows:
             print("\n暂无可用价格结果。")
             return
-        print("\n| 地区 | 最佳（原币） | 最佳（人民币） | 最低价（原币） | 最低价（人民币） | 状态 | 错误 | 链接 |")
+        print(
+            "\n| 地区 | 最佳（原币） | 最佳（人民币） | 最低价（原币） | 最低价（人民币） | 状态 | 错误 | 链接 |"
+        )
         print("| --- | ---: | ---: | ---: | ---: | --- | --- | --- |")
         for row in rows:
             best_cny_text = (
@@ -224,6 +338,43 @@ class SimpleCLI:
         filename.write_text(payload, encoding="utf-8")
         return filename
 
+    def save_combined_results(
+        self,
+        rows: list[CombinedQuoteRow],
+        origin: str,
+        destination: str,
+        date: str,
+    ) -> Path:
+        output_dir = get_reports_dir()
+        filename = (
+            output_dir
+            / f"edge_page_{origin}_{destination}_{date.replace('-', '')}_combined.md"
+        )
+        payload = self.build_combined_markdown_table(rows, origin, destination)
+        filename.write_text(payload, encoding="utf-8")
+        return filename
+
+    def save_window_results(
+        self,
+        rows_by_date: list[tuple[str, list[SimplifiedQuoteRow]]],
+        origin: str,
+        destination: str,
+        start_date: str,
+        end_date: str,
+    ) -> Path:
+        output_dir = get_reports_dir()
+        start_stamp = start_date.replace("-", "")
+        end_stamp = end_date.replace("-", "")
+        filename = (
+            output_dir
+            / f"edge_page_{origin}_{destination}_{start_stamp}_{end_stamp}_summary.md"
+        )
+        payload = self.build_window_markdown_table(
+            rows_by_date, origin, destination, start_date, end_date
+        )
+        filename.write_text(payload, encoding="utf-8")
+        return filename
+
     async def run_page_command(self, args: argparse.Namespace) -> int:
         manual_regions = [
             code.strip().upper() for code in args.regions.split(",") if code.strip()
@@ -236,52 +387,87 @@ class SimpleCLI:
         )
         print(f"本次实际地区: {', '.join(regions)}")
 
-        quotes = await run_page_scan(
-            origin=origin.code,
-            destination=destination.code,
-            date=args.date,
-            region_codes=regions,
-            page_wait=args.wait,
-            timeout=args.timeout,
-        )
-        if not quotes:
-            print("没有返回任何结果。检查地区代码或 Edge/CDP 环境。")
-            return 1
+        date_window_days = max(int(getattr(args, "date_window", 0)), 0)
+        date_list = build_date_window(args.date, date_window_days)
+        rows_by_date: list[tuple[str, list[SimplifiedQuoteRow]]] = []
+        any_rows = False
+        any_winner = False
 
-        quote_dicts = quotes_to_dicts(quotes)
-        rows = self.simplify_quotes(quote_dicts)
-        self.print_quotes(rows)
-
-        best_winner = next(
-            (row for row in rows if isinstance(row.get("best_cny_price"), (int, float))),
-            None,
-        )
-        cheapest_winner = next(
-            (row for row in rows if isinstance(row.get("cheapest_cny_price"), (int, float))),
-            None,
-        )
-        if best_winner:
-            print(
-                f"\n最佳: ¥{best_winner['best_cny_price']:,.2f} 来自 {best_winner['region_name']}"
+        for date in date_list:
+            print(f"\n日期: {date}")
+            quotes = await run_page_scan(
+                origin=origin.code,
+                destination=destination.code,
+                date=date,
+                region_codes=regions,
+                page_wait=args.wait,
+                timeout=args.timeout,
             )
-        if cheapest_winner:
-            print(
-                f"最低价: ¥{cheapest_winner['cheapest_cny_price']:,.2f} 来自 {cheapest_winner['region_name']}"
-            )
-        elif rows:
-            print("\n已提取市场价格，但人民币换算暂不可用。")
-        else:
-            print("\n未能成功提取任何市场价格。")
+            if not quotes:
+                print("没有返回任何结果。检查地区代码或 Edge/CDP 环境。")
+                rows_by_date.append((date, []))
+                continue
 
-        if args.save:
-            saved = self.save_results(quote_dicts, origin.code, destination.code, args.date)
-            print(f"结果已保存到: {saved}")
+            quote_dicts = quotes_to_dicts(quotes)
+            rows = self.simplify_quotes(quote_dicts)
+            rows_by_date.append((date, rows))
+            if rows:
+                any_rows = True
+
+            self.print_quotes(rows)
+
+            best_winner = next(
+                (
+                    row
+                    for row in rows
+                    if isinstance(row.get("best_cny_price"), (int, float))
+                ),
+                None,
+            )
+            cheapest_winner = next(
+                (
+                    row
+                    for row in rows
+                    if isinstance(row.get("cheapest_cny_price"), (int, float))
+                ),
+                None,
+            )
+            if best_winner:
+                any_winner = True
+                print(
+                    f"最佳: ¥{best_winner['best_cny_price']:,.2f} 来自 {best_winner['region_name']}"
+                )
+            if cheapest_winner:
+                any_winner = True
+                print(
+                    f"最低价: ¥{cheapest_winner['cheapest_cny_price']:,.2f} 来自 {cheapest_winner['region_name']}"
+                )
+            elif rows:
+                print("已提取市场价格，但人民币换算暂不可用。")
+            else:
+                print("未能成功提取任何市场价格。")
+
+            if args.save:
+                saved = self.save_results(
+                    quote_dicts, origin.code, destination.code, date
+                )
+                print(f"结果已保存到: {saved}")
+
+        if args.save and rows_by_date:
+            start_date = date_list[0]
+            end_date = date_list[-1]
+            summary_path = self.save_window_results(
+                rows_by_date, origin.code, destination.code, start_date, end_date
+            )
+            print(f"窗口汇总已保存到: {summary_path}")
 
         if not args.exact_airport and args.origin in {"北京", "beijing", "BEIJING"}:
             print(
                 "提示: 本次默认使用 BJSA（北京任意机场）。如需严格 PEK，请加 --exact-airport 或直接传 PEK。"
             )
-        return 0 if best_winner or cheapest_winner else 2
+        if not any_rows:
+            return 1
+        return 0 if any_winner else 2
 
     def interactive_page(self) -> int:
         self.print_banner()
@@ -299,6 +485,7 @@ class SimpleCLI:
             wait=10,
             timeout=30,
             save=True,
+            date_window=3,
             exact_airport=False,
         )
         return asyncio.run(self.run_page_command(args))
@@ -331,7 +518,16 @@ def build_parser() -> argparse.ArgumentParser:
     )
     page.add_argument("-t", "--date", required=True, help="出发日期 YYYY-MM-DD")
     page.add_argument(
-        "-r", "--regions", default="", help="额外地区代码，逗号分隔，会叠加到智能默认地区上"
+        "--date-window",
+        type=int,
+        default=3,
+        help="日期前后扫窗天数（默认 ±3 天）",
+    )
+    page.add_argument(
+        "-r",
+        "--regions",
+        default="",
+        help="额外地区代码，逗号分隔，会叠加到智能默认地区上",
     )
     page.add_argument("--wait", type=int, default=10, help="打开结果页后的等待秒数")
     page.add_argument("--timeout", type=int, default=30, help="HTTP/CDP 超时")

@@ -1,257 +1,257 @@
 # AI Agent Handoff
 
-Last updated: 2026-03-08
+Last updated: 2026-03-09
 Project root: `skyscanner_multi_domain`
 
 ## 1. Project Purpose
 
-This project is now a focused Skyscanner multi-market comparison tool.
+This project is a Skyscanner multi-market comparison tool based on real Edge result pages.
 
-Current supported workflow:
+Current workflow:
 
-1. Launch a dedicated Edge instance with CDP on port `9222`
+1. Connect to local Edge CDP on port `9222`
 2. Open multiple Skyscanner market result pages for the same route/date
-3. Read page text from the rendered page via CDP
-4. Extract the lowest visible price
-5. Normalize prices to CNY
-6. Save a simplified Markdown comparison table
-
-The project no longer keeps older experimental implementations such as Playwright/Patchright/API-only variants.
+3. Read `document.body.innerText` from the rendered page
+4. Extract both:
+   - Best / 最佳
+   - Cheapest / 最低价
+5. Convert prices to CNY when FX is available
+6. Save a Markdown comparison report
 
 ## 2. Active Entry Points
 
 - `gui.py`
-  - Main user-facing GUI for non-technical users
+  - Main UI for non-technical users
   - Tkinter app
-  - Launchable directly with `python3 gui.py`
+  - Launch with `python3 gui.py`
 - `cli.py`
-  - Simplified CLI wrapper around the same page-scan flow
-  - Handles location normalization, CNY conversion, Markdown output
+  - CLI wrapper around the same page-scan flow
+  - Handles location resolution, effective market calculation, CNY conversion, Markdown output
 - `skyscanner_neo.py`
-  - Core runtime logic
-  - Browser/CDP detection
-  - Edge auto-launch
-  - browser profile cache pruning
-  - page polling and extraction
-- `Skyscanner 多市场比价.app`
-  - macOS app bundle wrapper
-  - Launches `gui.py` from the project root
-- `scripts/build_macos_app.sh`
-  - Rebuilds the macOS `.app`
+  - Core runtime and parser
+  - Region config, Edge/CDP logic, page extraction, label matching, market defaults
 
-## 3. Key Runtime Behavior
+## 3. Current Output Contract
 
-### Browser / CDP
+Saved report path:
 
-- Uses a dedicated Edge profile at:
-  - `data/browser-profiles/edge-cdp-profile`
-- If an older profile still exists under `outputs/edge-cdp-profile`, the runtime now attempts a one-time move into `data/browser-profiles/`
-- CDP endpoint:
-  - `http://localhost:9222`
-- If CDP is unavailable, the app attempts to auto-launch Edge
-- Before auto-launch, cache-like directories in the dedicated profile are pruned to reduce disk usage while preserving session state
+- `outputs/reports/edge_page_<origin>_<destination>_<yyyymmdd>.md`
 
-### Why the dedicated profile exists
+Current Markdown table columns:
 
-It isolates this tool from the user's daily browser and preserves:
+- 地区
+- 最佳（原币）
+- 最佳（人民币）
+- 最低价（原币）
+- 最低价（人民币）
+- 状态
+- 错误
+- 链接
 
-- cookies
-- local/session storage
-- Skyscanner anti-bot / human-verification state
+GUI table is aligned with the same fields.
+CLI console output also prints both Best and Cheapest summaries.
 
-It intentionally does **not** preserve all cache files. Cache cleanup is part of the runtime now.
+## 4. Important Current Behavior
 
-## 4. Output Contract
+### Smart effective regions
 
-Current output is intentionally minimal.
+Region selection is no longer just a fixed manual default.
 
-Saved format:
+`cli.py` and `gui.py` now use `build_effective_region_codes(...)` from `skyscanner_neo.py`.
+That means effective regions are built from:
 
-- Markdown file in `outputs/`
-- Markdown file in `outputs/reports/`
-- Example:
-  - `outputs/reports/edge_page_BJSA_ALA_20260429.md`
+- baseline defaults
+- origin country
+- destination country
+- user-provided extra region codes
 
-Table columns:
+### Current baseline default regions
 
-- Region
-- Price in CNY
-- Link
-
-The output intentionally omits:
-
-- original source currency
-- verbose status/debug fields
-- JSON result dumps
-
-GUI display is aligned with this simplified output.
-
-## 5. Current File Layout
-
-Expected important files/directories:
-
-- `README.md`
-- `AI_AGENT_HANDOFF.md`
-- `gui.py`
-- `cli.py`
-- `skyscanner_neo.py`
-- `requirements.txt`
-- `scripts/build_macos_app.sh`
-- `Skyscanner 多市场比价.app`
-- `vendor/neo/`
-- `outputs/`
-- `outputs/reports/`
-- `logs/`
-- `data/browser-profiles/`
-
-Likely present but non-essential:
-
-- `__pycache__/`
-- old `outputs/gui_app.log` from before the log path cleanup
-
-## 6. Major Decisions Already Made
-
-### Decision A: Keep only the current working path
-
-The repository was aggressively cleaned.
-
-Removed:
-
-- old experimental scripts
-- screenshots
-- old JSON outputs
-- old reports/guides
-- legacy `src/` and `utils/` tree
-
-Reason:
-
-- the project had too many stale entry points
-- only the current GUI/CLI + CDP page-read path is maintained
-
-### Decision B: Prefer real browser page text over old request replay attempts
-
-Current extraction uses real page rendering and CDP page text.
-
-Reason:
-
-- site anti-bot behavior made older approaches brittle
-- the GUI workflow benefits from a real browser that a human can interact with when required
-
-### Decision C: Preserve verification state, prune caches
-
-Profile pruning now targets cache-heavy directories only.
-
-Reason:
-
-- full profile deletion wastes solved verification state
-- full retention made the profile grow too large
-
-## 7. Known Constraints
-
-### Anti-bot / human verification
-
-Skyscanner may still present human verification.
-
-Current behavior:
-
-- the scanner polls instead of finishing immediately after a fixed delay
-- challenge/loading pages are explicitly distinguished from ordinary parse failures
-- if the user completes the challenge in Edge before timeout, extraction can continue
-
-### Location normalization
-
-User-facing inputs are normalized before scan.
-
-Examples already mapped:
-
-- `北京` -> `BJSA` by default unless strict airport mode is enabled
-- `阿拉木图` -> `ALA`
-- `雅加达` / `Jakarta` -> `JKT`
-
-If an input cannot be normalized, GUI/CLI fail early with a clear error instead of opening a broken URL.
-
-### Markets
-
-The current default market list remains:
+Current baseline defaults are:
 
 - `CN`
+- `HK`
+- `SG`
 - `US`
 - `UK`
-- `SG`
-- `HK`
-- `KZ`
 
-Behavior can still differ by redirect and anti-bot state.
+Important:
 
-## 8. Important Implementation Notes
+- `JP` and `KR` were explicitly removed from default baseline regions by user request
+- they can still be added manually
 
-### `cli.py`
+### GUI region input semantics
 
-Owns:
+GUI field is now “额外地区代码”, not “全部地区代码”.
+The hint line shows:
 
-- location normalization
-- FX conversion to CNY
-- simplified output rows
-- Markdown table generation
+- default included regions
+- actual effective regions for the current route
 
-If changing the output format, start here first.
+### CLI region input semantics
 
-### `gui.py`
+CLI `-r/--regions` now means extra regions to append to smart defaults, not replace them.
 
-Owns:
+## 5. Parsing Fixes That Matter
 
-- visible app layout
-- input validation
-- real-time input-to-code hints
-- simplified result grid
+The recent work focused on fixing incorrect Best vs Cheapest extraction.
 
-The app currently favors clarity over rich UX.
+### Main issue
+
+Many markets were returning suspicious results where:
+
+- Best == Cheapest too often, or
+- Best was lower than Cheapest, or
+- parser matched non-flight content such as hotel modules
+
+### Root cause
+
+Generic label matching was too loose in some locales.
+Some pages contain unrelated modules that include words like “最佳”, which caused false Best matches.
+
+### Important fixes now in place
+
+#### A. Region-specific best/cheapest labels
+
+Key region-specific labels include:
+
+- `CN`: Best uses `综合最佳`, `最优`, `最佳`; Cheapest uses `最便宜`
+- `HK`: Best uses `最優`, `最佳`; Cheapest uses `最便宜`
+- `SG`: Best uses `综合最佳`, `最优`, `最佳`; Cheapest uses `最便宜`
+- `SE`: Best `Bäst`, Cheapest `Billigast`
+- `KR`: Best `추천순`, Cheapest `최저가`
+- `JP`: Best `おすすめ`, `おすすめ順`; Cheapest `最安値`
+
+#### B. Candidate ranking uses price hints
+
+The parser now prefers labeled blocks that look like real flight price sections.
+Hints include phrases such as:
+
+- `总费用为`
+- `費用總計`
+- `价格低至`
+- `價格低至`
+- `最低只要`
+- `起`
+
+This reduces contamination from unrelated modules.
+
+#### C. Best-candidate recovery logic
+
+If the first Best candidate is lower than Cheapest, parser does not blindly accept it.
+It attempts to recover by picking a later Best candidate that is >= Cheapest.
+If no valid candidate exists, Best is dropped and status becomes inconsistent.
+
+#### D. Null-body protection in CDP page reads
+
+Page reads now tolerate temporary `document.body == null` instead of crashing.
+
+## 6. Files Most Relevant To Future Work
 
 ### `skyscanner_neo.py`
 
-Owns:
+Most important file for extraction correctness.
+Key areas:
 
-- Edge/Chrome detection
-- CDP readiness checks
-- browser auto-launch
-- cache pruning
-- page polling
-- quote extraction
+- `BASELINE_REGIONS`
+- `build_effective_region_codes(...)`
+- `REGION_BEST_LABELS`
+- `REGION_CHEAPEST_LABELS`
+- `get_flight_results_scope(...)`
+- `extract_labeled_page_price_candidates(...)`
+- `best_candidates_for_region(...)`
+- `extract_page_quote(...)`
+- `run_page_scan(...)`
 
-If changing browser behavior, start here first.
+If Best/Cheapest parsing breaks again, start here first.
 
-## 9. Verified Status As Of Last Update
+### `cli.py`
 
-Verified recently:
+Important responsibilities:
 
-- `gui.py`, `cli.py`, `skyscanner_neo.py` compile successfully
-- GUI initializes successfully
-- location hints resolve correctly for known cities
-- Markdown output is generated correctly
-- cache pruning previously reduced `outputs/edge-cdp-profile` from roughly `454M` to roughly `208M`; active runtime location is now `data/browser-profiles/edge-cdp-profile`
+- location resolution
+- effective region calculation
+- FX conversion via `FxRateService`
+- report rendering
+- CLI summary output
 
-## 10. Remaining Improvement Ideas
+### `gui.py`
 
-These are not yet implemented:
+Important responsibilities:
 
-- GUI market checkboxes instead of free-text region entry
-- explicit GUI notice when the browser is waiting on human verification
-- clickable link opening directly from the GUI table
-- a GUI button for manual browser-cache cleanup
-- richer city-code suggestions / autocomplete
+- UI inputs
+- effective region hinting
+- route/city resolution
+- displaying Best/Cheapest columns
+- running the same scan flow in a worker thread
 
-## 11. Safe Next Steps For Another Agent
+## 7. Verified Recent Result Pattern
 
-If continuing work, recommended order:
+A recent generated report for `BJSA -> CDG` on `2026-04-28` showed:
 
-1. Read `README.md`
-2. Read this file
-3. Inspect `gui.py`, `cli.py`, `skyscanner_neo.py`
-4. Preserve the dedicated Edge profile approach unless deliberately redesigning the runtime
-5. Avoid reintroducing deleted legacy variants unless there is a strong reason
+- FR, HK, CN, UK, US, SG returning both Best and Cheapest
+- JP returning Cheapest-only in that run
+- after CN/HK/SG fixes, those markets no longer defaulted to obviously wrong identical values
 
-## 12. Things To Avoid
+This report path was used during validation:
 
-- Do not delete `data/browser-profiles/edge-cdp-profile` casually unless the user explicitly accepts losing verification/browser state
-- Do not re-expand the project with multiple stale prototype entry points
-- Do not switch the saved output back to verbose JSON unless the user asks for debugging-oriented output
+- `outputs/reports/edge_page_BJSA_CDG_20260428.md`
+
+## 8. Known Remaining Constraints
+
+### Anti-bot / challenge pages
+
+Skyscanner may still show challenge or loading pages.
+Current code distinguishes:
+
+- challenge
+- loading
+- parse failure
+- cheapest-only / best-only / inconsistent cases
+
+### JP can still be partial
+
+JP has been observed returning Cheapest-only in some runs.
+That is a known limitation, not fully solved.
+
+### Live page text can vary by session
+
+Because extraction depends on rendered text in a real browser, results may change with:
+
+- locale redirects
+- challenge state
+- logged-in / cookie state
+- timing of page readiness
+
+## 9. Recent Git / Merge Context
+
+A clean Skyscanner parsing fix commit was created in a worktree and then merged into local `main`.
+Local `main` had unrelated dirty changes at the time, so the safe flow used was:
+
+1. stash existing `main` changes
+2. cherry-pick the clean Skyscanner fix commit
+3. restore stashed changes
+4. resolve the remaining conflict in `skyscanner_neo.py`
+
+Result:
+
+- Skyscanner fix exists on local `main`
+- prior unrelated local changes were preserved
+
+## 10. Safe Next Steps For Another Agent
+
+Recommended order:
+
+1. Read this file
+2. Read `cli.py`, `gui.py`, `skyscanner_neo.py`
+3. If debugging extraction, inspect a saved report first
+4. If needed, validate against live Edge page text before changing parsing rules
+5. Keep JP/KR out of baseline defaults unless the user asks otherwise
+
+## 11. Things To Avoid
+
+- Do not change region defaults casually; user explicitly requested JP/KR be excluded by default
+- Do not reduce the output back to a single price column
+- Do not remove GUI/CLI effective-region hinting without request
+- Do not trust generic Best labels in CN/HK/SG without scoped/labeled validation
+- Do not overwrite existing local uncommitted work on `main`

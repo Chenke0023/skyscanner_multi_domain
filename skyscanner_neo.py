@@ -96,6 +96,9 @@ REGIONS: dict[str, RegionConfig] = {
     "IN": RegionConfig("IN", "印度", "https://www.skyscanner.co.in", "en-IN", "INR"),
     "MX": RegionConfig("MX", "墨西哥", "https://www.skyscanner.com.mx", "es-MX", "MXN"),
     "RU": RegionConfig("RU", "俄罗斯", "https://ru.skyscanner.com", "ru-RU", "RUB"),
+    "AE": RegionConfig("AE", "阿联酋", "https://www.skyscanner.ae", "en-AE", "AED"),
+    "QA": RegionConfig("QA", "卡塔尔", "https://www.skyscanner.com.qa", "en-QA", "QAR"),
+    "TR": RegionConfig("TR", "土耳其", "https://www.skyscanner.com.tr", "tr-TR", "TRY"),
 }
 
 BASELINE_REGIONS = ("CN", "HK", "SG", "US", "UK")
@@ -125,6 +128,9 @@ COUNTRY_TO_REGION_CODES: dict[str, tuple[str, ...]] = {
     "IN": ("IN",),
     "MX": ("MX",),
     "RU": ("RU",),
+    "AE": ("AE",),
+    "QA": ("QA",),
+    "TR": ("TR",),
 }
 DEFAULT_REGIONS = list(BASELINE_REGIONS)
 DEFAULT_DATE = "2026-04-29"
@@ -1133,6 +1139,25 @@ def dedupe_region_codes(region_codes: Iterable[str]) -> list[str]:
     return ordered
 
 
+ASIA = {"CN", "JP", "KR", "TW", "HK", "SG", "MY", "TH", "ID", "IN", "VN", "PH"}
+EUROPE = {"GB", "UK", "FR", "DE", "IT", "ES", "NL", "IE", "CH", "AT", "SE", "PT", "RU"}
+NORTH_AMERICA = {"US", "CA", "MX"}
+
+
+def _infer_transit_regions(origin_country: str, dest_country: str) -> list[str]:
+    origin_country = origin_country.upper()
+    dest_country = dest_country.upper()
+    if (origin_country in ASIA and dest_country in EUROPE) or (
+        origin_country in EUROPE and dest_country in ASIA
+    ):
+        return ["AE", "QA", "TR"]
+    if (origin_country in ASIA and dest_country in NORTH_AMERICA) or (
+        origin_country in NORTH_AMERICA and dest_country in ASIA
+    ):
+        return ["JP", "KR"]
+    return []
+
+
 def build_effective_region_codes(
     origin_country: str = "",
     destination_country: str = "",
@@ -1145,8 +1170,9 @@ def build_effective_region_codes(
         route_regions.extend(
             COUNTRY_TO_REGION_CODES.get(destination_country.upper(), ())
         )
+    transit_regions = _infer_transit_regions(origin_country, destination_country)
     return dedupe_region_codes(
-        [*BASELINE_REGIONS, *route_regions, *manual_region_codes]
+        [*BASELINE_REGIONS, *route_regions, *transit_regions, *manual_region_codes]
     )
 
 
@@ -1481,9 +1507,15 @@ async def compare_via_pages(
     total_wait = max(args.timeout, args.page_wait + 60, 45)
     timeout = aiohttp.ClientTimeout(total=total_wait + 15)
     async with aiohttp.ClientSession(timeout=timeout) as session:
-        for region in selected_regions:
-            url = build_search_url(region, args.origin, args.destination, args.date)
-            await cdp_open_tab(session, url)
+        BATCH_SIZE = 3
+        for i in range(0, len(selected_regions), BATCH_SIZE):
+            batch = selected_regions[i:i + BATCH_SIZE]
+            for region in batch:
+                url = build_search_url(region, args.origin, args.destination, args.date)
+                await cdp_open_tab(session, url)
+            
+            if i + BATCH_SIZE < len(selected_regions):
+                await asyncio.sleep(2.0)
 
         await asyncio.sleep(args.page_wait)
         deadline = time.monotonic() + max(total_wait - args.page_wait, 10)

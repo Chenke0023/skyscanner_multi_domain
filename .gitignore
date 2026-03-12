@@ -4,13 +4,15 @@ __pycache__/
 
 .ruff_cache/
 
+# Runtime directories
 logs/
 data/browser-profiles/
 outputs/reports/
 
+# Legacy runtime files
+data/fx_rates_cache.json
 outputs/gui_app.log
 outputs/*-cdp-profile/
+outputs/*.md
 
 Skyscanner 多市场比价.app/
-
-data/airport-codes.csv
