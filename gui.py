@@ -610,6 +610,7 @@ class App:
                         region_codes=regions,
                         page_wait=wait_seconds,
                         timeout=30,
+                        transport="scrapling",
                     )
                 )
                 if not quotes:

@@ -3,6 +3,48 @@
 Last updated: 2026-03-12
 Project root: `skyscanner_multi_domain`
 
+## 0. Current Development Status (branch: `feat/scrapling-transport`)
+
+### Completed changes in this branch
+
+- Added a new transport path: `--transport scrapling` in CLI `page` command.
+- `run_page_scan(...)` now supports transport routing:
+  - `scrapling` (default)
+  - `page` (Edge CDP fallback)
+- Implemented `compare_via_scrapling(...)` in `skyscanner_neo.py` with:
+  - lazy import and graceful `scrapling_unavailable` handling
+  - primary `StealthyFetcher.fetch(...)`
+  - fallback `Fetcher.get(...)`
+- Added Scrapling text extraction helper to avoid relying on `str(page)`:
+  - prefer CSS text extraction (`body *::text`, `body::text`)
+  - fallback to `body` bytes decode
+  - then `text/html/content`
+  - if still empty -> `scrapling_parse_failed`
+- GUI call path updated to pass `transport="scrapling"` explicitly.
+- Dependencies updated:
+  - `requirements.txt` includes `scrapling[fetchers]>=0.3.0`.
+
+### Verified results (latest)
+
+- Syntax check: passed
+- Unit tests: passed (`11/11` in `test_skyscanner_neo.py`)
+- E2E comparison (same route/date):
+  - `--transport page`: returns valid Best/Cheapest prices for tested regions
+  - `--transport scrapling`: still returns no usable price rows in latest run
+
+### Current known issue
+
+`scrapling` transport is functional at pipeline level (no crash, outputs still generated), but page content quality is not stable enough on Skyscanner result pages, so parser often gets challenge/loading/insufficient text and yields no final prices.
+
+### Next implementation target (not yet merged)
+
+- Upgrade Scrapling strategy from single-shot fetch to staged retry flow:
+  1. Stealthy fetch
+  2. wait-selector + longer wait retry on loading/parse-failed
+  3. session-based HTTP fallback
+- Prefer reusing local CDP browser context when available (`cdp_url`) for higher parity with `page` transport.
+- Add clearer per-attempt diagnostics into failed `error` messages.
+
 ## 1. Project Purpose
 
 This project compares Skyscanner prices across multiple markets by reading real result pages from a local Edge instance over CDP.
