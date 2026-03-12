@@ -1,0 +1,3 @@
+[submodule "vendor/ohmycaptcha"]
+	path = vendor/ohmycaptcha
+	url = https://github.com/Chenke0023/ohmycaptcha.git
