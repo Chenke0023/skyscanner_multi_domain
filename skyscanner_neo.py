@@ -867,6 +867,235 @@ def build_page_text_capture_expression(
     )
 
 
+def _extract_scrapling_page_text(page: Any) -> str:
+    """Extract parser-friendly page text from Scrapling response."""
+    css_method = getattr(page, "css", None)
+    if callable(css_method):
+        for selector in ("body *::text", "body::text"):
+            try:
+                nodes = css_method(selector)
+                getall = getattr(nodes, "getall", None)
+                if callable(getall):
+                    texts = [
+                        str(item).strip() for item in getall() if str(item).strip()
+                    ]
+                    if texts:
+                        return "\n".join(texts)
+            except Exception:
+                continue
+
+    body = getattr(page, "body", None)
+    if isinstance(body, (bytes, bytearray)):
+        decoded = body.decode("utf-8", errors="ignore").strip()
+        if decoded:
+            return decoded
+
+    for attr_name in ("text", "html", "content"):
+        value = getattr(page, attr_name, None)
+        if callable(value):
+            try:
+                value = value()
+            except Exception:
+                value = None
+        if isinstance(value, (bytes, bytearray)):
+            value = value.decode("utf-8", errors="ignore")
+        if isinstance(value, str):
+            normalized = value.strip()
+            if normalized:
+                return normalized
+
+    return ""
+
+
+def _check_captcha_in_page(page_text: str) -> tuple[bool, str]:
+    """Check if page contains captcha indicators.
+
+    Returns:
+        (has_captcha, captcha_type)
+    """
+    captcha_indicators = {
+        "cloudflare": ["cf-turnstile", "cloudflare", "turnstile", "cf.challenge"],
+        "recaptcha": ["g-recaptcha", "recaptcha", "google recaptcha"],
+        "hcaptcha": ["h-captcha", "hcaptcha"],
+        "generic": ["captcha", "verify you are human", "human verification"],
+    }
+
+    text_lower = page_text.lower()
+    for captcha_type, indicators in captcha_indicators.items():
+        for indicator in indicators:
+            if indicator in text_lower:
+                return True, captcha_type
+    return False, ""
+
+
+async def compare_via_scrapling(
+    args: argparse.Namespace, selected_regions: list[RegionConfig]
+) -> list[FlightQuote]:
+    try:
+        from scrapling import Fetcher, StealthyFetcher
+    except ImportError:
+        install_hint = '未安装 Scrapling，请先执行: pip install "scrapling[fetchers]"'
+        return [
+            FlightQuote(
+                region=region.code,
+                domain=region.domain,
+                price=None,
+                currency=region.currency,
+                source_url=build_search_url(
+                    region, args.origin, args.destination, args.date
+                ),
+                status="scrapling_unavailable",
+                error=install_hint,
+            )
+            for region in selected_regions
+        ]
+
+    # Import captcha solver client
+    try:
+        from captcha_solver import CaptchaSolverClient, CaptchaSolverError
+    except ImportError:
+        CaptchaSolverClient = None
+        CaptchaSolverError = Exception
+
+    quotes: list[FlightQuote] = []
+    timeout_ms = max(int(getattr(args, "timeout", 30) * 1000), 10000)
+    wait_ms = max(int(getattr(args, "page_wait", 8) * 1000), 3000)
+
+    for region in selected_regions:
+        url = build_search_url(region, args.origin, args.destination, args.date)
+        try:
+            page = await asyncio.to_thread(
+                StealthyFetcher.fetch,
+                url,
+                headless=True,
+                network_idle=True,
+                timeout=timeout_ms,
+                wait=wait_ms,
+                solve_cloudflare=True,
+                google_search=False,
+                locale=region.locale,
+                extra_headers={
+                    "accept-language": region.locale,
+                    "referer": region.domain,
+                },
+            )
+        except Exception:
+            try:
+                page = await asyncio.to_thread(
+                    Fetcher.get,
+                    url,
+                    timeout=max(int(getattr(args, "timeout", 30)), 10),
+                    stealthy_headers=True,
+                    follow_redirects=True,
+                )
+            except Exception as exc:
+                quotes.append(
+                    FlightQuote(
+                        region=region.code,
+                        domain=region.domain,
+                        price=None,
+                        currency=region.currency,
+                        source_url=url,
+                        status="scrapling_failed",
+                        error=f"Scrapling 抓取失败: {exc}",
+                    )
+                )
+                continue
+
+        page_text = _extract_scrapling_page_text(page)
+        if not page_text:
+            quotes.append(
+                FlightQuote(
+                    region=region.code,
+                    domain=region.domain,
+                    price=None,
+                    currency=region.currency,
+                    source_url=url,
+                    status="scrapling_parse_failed",
+                    error="Scrapling 返回内容为空，未提取到可解析文本",
+                )
+            )
+            continue
+
+        # Check if page contains captcha and try to solve it
+        has_captcha, captcha_type = _check_captcha_in_page(page_text)
+        if has_captcha and CaptchaSolverClient is not None:
+            try:
+                captcha_solver = CaptchaSolverClient()
+                health = await captcha_solver.health_check()
+                if health.get("status") == "healthy":
+                    # Attempt to solve captcha based on type
+                    token = None
+                    if captcha_type == "cloudflare":
+                        # Extract site key from page
+                        site_key_match = re.search(
+                            r'data-sitekey=["\']([^"\']+)["\']', page_text
+                        )
+                        site_key = site_key_match.group(1) if site_key_match else ""
+                        if site_key:
+                            token = await captcha_solver.solve_turnstile(url, site_key)
+                    elif captcha_type == "recaptcha":
+                        site_key_match = re.search(
+                            r'data-sitekey=["\']([^"\']+)["\']', page_text
+                        )
+                        site_key = site_key_match.group(1) if site_key_match else ""
+                        if site_key:
+                            token = await captcha_solver.solve_recaptcha_v2(
+                                url, site_key
+                            )
+                    elif captcha_type == "hcaptcha":
+                        site_key_match = re.search(
+                            r'data-sitekey=["\']([^"\']+)["\']', page_text
+                        )
+                        site_key = site_key_match.group(1) if site_key_match else ""
+                        if site_key:
+                            token = await captcha_solver.solve_hcaptcha(url, site_key)
+
+                    if token:
+                        # Retry with captcha token
+                        try:
+                            page = await asyncio.to_thread(
+                                StealthyFetcher.fetch,
+                                url,
+                                headless=True,
+                                network_idle=True,
+                                timeout=timeout_ms,
+                                wait=wait_ms,
+                                solve_cloudflare=True,
+                                google_search=False,
+                                locale=region.locale,
+                                extra_headers={
+                                    "accept-language": region.locale,
+                                    "referer": region.domain,
+                                    "X-Captcha-Token": token,
+                                },
+                            )
+                            page_text = _extract_scrapling_page_text(page)
+                        except Exception:
+                            pass
+                await captcha_solver.close()
+            except CaptchaSolverError as exc:
+                quotes.append(
+                    FlightQuote(
+                        region=region.code,
+                        domain=region.domain,
+                        price=None,
+                        currency=region.currency,
+                        source_url=url,
+                        status="captcha_solve_failed",
+                        error=f"Captcha解决失败 ({captcha_type}): {exc}",
+                    )
+                )
+                continue
+            except Exception:
+                pass
+
+        quote = extract_page_quote(region, url, page_text)
+        quotes.append(quote)
+
+    return quotes
+
+
 async def compare_via_pages(
     args: argparse.Namespace, selected_regions: list[RegionConfig]
 ) -> list[FlightQuote]:
@@ -989,13 +1218,18 @@ async def run_page_scan(
     region_codes: list[str],
     page_wait: int = 8,
     timeout: int = 30,
+    transport: str = "scrapling",
 ) -> list[FlightQuote]:
     selected_regions = get_selected_regions(region_codes)
     if not selected_regions:
         return []
-    ensure_cdp_ready(
-        start_url=build_search_url(selected_regions[0], origin, destination, date)
-    )
+
+    normalized_transport = (transport or "scrapling").lower()
+    if normalized_transport == "page":
+        ensure_cdp_ready(
+            start_url=build_search_url(selected_regions[0], origin, destination, date)
+        )
+
     args = argparse.Namespace(
         origin=origin,
         destination=destination,
@@ -1003,7 +1237,25 @@ async def run_page_scan(
         page_wait=page_wait,
         timeout=timeout,
     )
-    quotes = await compare_via_pages(args, selected_regions)
+
+    if normalized_transport == "page":
+        quotes = await compare_via_pages(args, selected_regions)
+    elif normalized_transport == "scrapling":
+        quotes = await compare_via_scrapling(args, selected_regions)
+    else:
+        quotes = [
+            FlightQuote(
+                region=region.code,
+                domain=region.domain,
+                price=None,
+                currency=region.currency,
+                source_url=build_search_url(region, origin, destination, date),
+                status="invalid_transport",
+                error=f"未知 transport: {transport}（可选: scrapling, page）",
+            )
+            for region in selected_regions
+        ]
+
     quotes.sort(key=lambda item: (item.price is None, item.price or float("inf")))
     return quotes
 
