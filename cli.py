@@ -474,6 +474,7 @@ class SimpleCLI:
         origin = input("出发地（如 北京 / PEK）: ").strip()
         destination = input("目的地（如 阿拉木图 / ALA）: ").strip()
         date = input("日期（YYYY-MM-DD）: ").strip()
+        date_window_raw = input("日期窗口 ±天数（默认 3）: ").strip()
         regions = input(
             f"额外地区代码（默认会自动包含 {','.join(DEFAULT_REGIONS)}）: "
         ).strip()
@@ -485,7 +486,7 @@ class SimpleCLI:
             wait=10,
             timeout=30,
             save=True,
-            date_window=3,
+            date_window=int(date_window_raw) if date_window_raw else 3,
             exact_airport=False,
         )
         return asyncio.run(self.run_page_command(args))
@@ -499,6 +500,7 @@ def build_parser() -> argparse.ArgumentParser:
 示例:
   python cli.py doctor
   python cli.py page -o 北京 -d 阿拉木图 -t 2026-04-29
+  python cli.py page -o 北京 -d 阿拉木图 -t 2026-04-29 --date-window 0
   python cli.py page -o PEK -d ALA -t 2026-04-29 --exact-airport
   python cli.py page -o 北京 -d 阿拉木图 -t 2026-04-29 -r CN,US,UK,SG,HK
         """,
@@ -537,10 +539,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="关闭城市 metro code 映射，例如北京不再转成 BJSA",
     )
     page.add_argument(
-        "--save", dest="save", action="store_true", default=True, help="保存 JSON 结果"
+        "--save",
+        dest="save",
+        action="store_true",
+        default=True,
+        help="保存 Markdown 结果",
     )
     page.add_argument(
-        "--no-save", dest="save", action="store_false", help="不保存 JSON 结果"
+        "--no-save", dest="save", action="store_false", help="不保存 Markdown 结果"
     )
 
     return parser
