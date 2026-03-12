@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import shutil
 from pathlib import Path
 
@@ -9,13 +10,15 @@ OUTPUTS_DIR = PROJECT_ROOT / "outputs"
 REPORTS_DIR = OUTPUTS_DIR / "reports"
 LOGS_DIR = PROJECT_ROOT / "logs"
 DATA_DIR = PROJECT_ROOT / "data"
-BROWSER_PROFILES_DIR = DATA_DIR / "browser-profiles"
+RUNTIME_DIR = Path(os.environ.get("XDG_STATE_HOME", Path.home() / ".local" / "state")) / "skyscanner_multi_domain"
+BROWSER_PROFILES_DIR = RUNTIME_DIR / "browser-profiles"
 LEGACY_BROWSER_PROFILES_ROOT = OUTPUTS_DIR
 
 
 def ensure_runtime_dirs() -> None:
     REPORTS_DIR.mkdir(parents=True, exist_ok=True)
     LOGS_DIR.mkdir(parents=True, exist_ok=True)
+    RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
     BROWSER_PROFILES_DIR.mkdir(parents=True, exist_ok=True)
 
 
@@ -27,6 +30,11 @@ def get_reports_dir() -> Path:
 def get_log_file(name: str) -> Path:
     ensure_runtime_dirs()
     return LOGS_DIR / name
+
+
+def get_fx_cache_file() -> Path:
+    ensure_runtime_dirs()
+    return RUNTIME_DIR / "fx_rates_cache.json"
 
 
 def get_browser_profile_dir(browser_name: str) -> Path:
