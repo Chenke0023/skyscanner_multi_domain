@@ -27,9 +27,28 @@
 当前项目进展：
 
 - Scrapling 主方案已合入 `main`
+- `skyscanner_neo.py` 拆分成果已合入 `main`，当前保留四模块结构：
+  - `scan_orchestrator.py`
+  - `transport_scrapling.py`
+  - `transport_cdp.py`
+  - `skyscanner_neo.py`（兼容层 + re-export）
 - CLI 默认路径已完成真实取价验证
 - GUI 当前也默认走 Scrapling
 - Scrapling 失败市场会自动 fallback 到 `page`
+
+## 仓库整理状态（2026-03-13）
+
+本次已完成分支整理：
+
+- `refactor/split-skyscanner-neo` 已合并进 `main`
+- `876ac14`（README / AI_AGENT_HANDOFF 更新到四模块结构）已随上述分支进入 `main`
+- 历史分支 `codex/restore-date-window-and-split-parser` 已保留合并记录
+- 历史分支 `worktree/skyscanner-multi-domain` 已保留合并记录
+- 文档分支 `docs/update-progress-cancel-links` 已清理
+- 已发布功能分支 `feat/gui-progress-cancel-links` 已清理
+- 已发布功能分支 `feat/scrapling-transport` 已清理
+
+当前仓库主线以 `main` 为准；上述分支对应成果已保留在 `main` 历史中，分支本身已清理。
 
 ## 启动方式
 

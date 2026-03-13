@@ -3,7 +3,7 @@
 Last updated: 2026-03-13
 Project root: `skyscanner_multi_domain`
 
-## 0. Current Development Status (branch: `refactor/split-skyscanner-neo`)
+## 0. Current Development Status (branch: `main`)
 
 ### Completed changes (latest)
 
@@ -15,6 +15,8 @@ Project root: `skyscanner_multi_domain`
 - All existing imports from `skyscanner_neo` continue to work via re-exports
 - Test mock targets updated from `skyscanner_neo.*` to actual source modules (`transport_cdp.*`, `transport_scrapling.*`)
 - All 15 tests pass; `cli.py` and `gui.py` imports verified
+- The refactor branch has already been merged into `main`
+- Historical local/remote feature branches have been cleaned up; `main` is now the only active branch to continue from
 
 ### Previously completed (in `main`)
 
@@ -68,10 +70,21 @@ Project root: `skyscanner_multi_domain`
   - `--transport page`: returns valid Best/Cheapest prices for tested regions
   - `--transport scrapling`: returns valid Best/Cheapest prices for default regions (`CN, HK, SG, US, UK, KZ`) on `BJSA -> ALA`, `2026-04-29`
 - Main branch status:
-  - PR merged into `main`
+  - Refactor + transport split work merged into `main`
   - `scrapling` is now the default production path in both CLI and GUI
   - failed markets under Scrapling now auto-fallback to `page` on a per-market basis
   - latest GUI live run can be treated as successful under the current assumption
+
+### Repository housekeeping completed on 2026-03-13
+
+- Merged `refactor/split-skyscanner-neo` into `main`
+- Commit `876ac14` ("docs: update README and AI_AGENT_HANDOFF for module split") is already included in `main`
+- Recorded historical merges for:
+  - `codex/restore-date-window-and-split-parser`
+  - `worktree/skyscanner-multi-domain`
+- Removed merged local branches
+- Removed no-longer-needed remote branches
+- The four-module NEO split remains intact in `main`; it was not reverted or deleted
 
 ### Current status
 
