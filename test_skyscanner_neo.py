@@ -1,10 +1,39 @@
 import unittest
 
-from skyscanner_neo import PAGE_TEXT_CAPTURE_LIMIT, REGIONS, extract_page_quote
+from skyscanner_neo import (
+    PAGE_TEXT_CAPTURE_LIMIT,
+    REGIONS,
+    _extract_scrapling_page_text,
+    extract_page_quote,
+)
 from skyscanner_page_parser import slice_page_text_for_scan
 
 
 class ExtractPageQuoteTests(unittest.TestCase):
+    def test_extract_scrapling_page_text_ignores_script_payloads(self) -> None:
+        class FakePage:
+            html = """
+                <html>
+                  <body>
+                    <script>window.__internal = {"state":"loading"};</script>
+                    <div>显示结果依据</div>
+                    <div>综合最佳</div>
+                    <div>¥3,215</div>
+                    <div>最便宜</div>
+                    <div>¥2,184</div>
+                  </body>
+                </html>
+            """
+
+        page_text = _extract_scrapling_page_text(FakePage())
+        quote = extract_page_quote(REGIONS["CN"], "https://example.com", page_text)
+
+        self.assertNotIn("window.__internal", page_text)
+        self.assertNotIn("loading", page_text.lower())
+        self.assertEqual(quote.status, "page_text")
+        self.assertEqual(quote.best_price, 3215.0)
+        self.assertEqual(quote.cheapest_price, 2184.0)
+
     def test_best_label_allows_extra_text_on_same_line(self) -> None:
         page_text = "\n".join(
             [
@@ -20,6 +49,25 @@ class ExtractPageQuoteTests(unittest.TestCase):
 
         self.assertEqual(quote.best_price, 123.0)
         self.assertEqual(quote.cheapest_price, 111.0)
+
+    def test_loading_hint_does_not_hide_real_prices(self) -> None:
+        page_text = "\n".join(
+            [
+                "Flights",
+                "Loading results...",
+                "Show results by",
+                "Best",
+                "US$345",
+                "Cheapest",
+                "US$222",
+            ]
+        )
+
+        quote = extract_page_quote(REGIONS["US"], "https://example.com", page_text)
+
+        self.assertEqual(quote.status, "page_text")
+        self.assertEqual(quote.best_price, 345.0)
+        self.assertEqual(quote.cheapest_price, 222.0)
 
     def test_scope_can_find_labels_when_sort_section_is_not_near_top(self) -> None:
         page_text = ("header\n" * 1400) + "\n".join(

@@ -435,8 +435,11 @@ def extract_page_quote(
 ) -> FlightQuote:
     page_text = slice_page_text_for_scan(page_text)
 
+    currency = region.currency
+    scoped_text = get_flight_results_scope(page_text)
+
     challenge_hint = find_page_hint(page_text, CHALLENGE_HINTS)
-    if challenge_hint:
+    if challenge_hint and not parse_price_text(scoped_text):
         return FlightQuote(
             region=region.code,
             domain=region.domain,
@@ -446,21 +449,6 @@ def extract_page_quote(
             status="page_challenge",
             error=f"页面仍停留在人机验证/安全检查: {challenge_hint}",
         )
-
-    loading_hint = find_page_hint(page_text, LOADING_HINTS)
-    if loading_hint:
-        return FlightQuote(
-            region=region.code,
-            domain=region.domain,
-            price=None,
-            currency=region.currency,
-            source_url=source_url,
-            status="page_loading",
-            error=f"页面仍在加载结果: {loading_hint}",
-        )
-
-    currency = region.currency
-    scoped_text = get_flight_results_scope(page_text)
 
     best_labels = REGION_BEST_LABELS.get(region.code, ()) or BEST_LABELS
     cheapest_labels = REGION_CHEAPEST_LABELS.get(region.code, ()) or CHEAPEST_LABELS
@@ -549,6 +537,18 @@ def extract_page_quote(
             price_path="document.body.innerText -> first price",
             cheapest_price=fallback[1],
             cheapest_price_path="document.body.innerText -> first price",
+        )
+
+    loading_hint = find_page_hint(page_text, LOADING_HINTS)
+    if loading_hint:
+        return FlightQuote(
+            region=region.code,
+            domain=region.domain,
+            price=None,
+            currency=currency,
+            source_url=source_url,
+            status="page_loading",
+            error=f"页面仍在加载结果: {loading_hint}",
         )
 
     return FlightQuote(
