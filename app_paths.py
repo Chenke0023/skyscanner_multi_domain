@@ -32,6 +32,12 @@ def get_log_file(name: str) -> Path:
     return LOGS_DIR / name
 
 
+def get_failure_log_file(name: str) -> Path:
+    d = LOGS_DIR / "failures"
+    d.mkdir(parents=True, exist_ok=True)
+    return d / name
+
+
 def get_fx_cache_file() -> Path:
     ensure_runtime_dirs()
     return RUNTIME_DIR / "fx_rates_cache.json"
