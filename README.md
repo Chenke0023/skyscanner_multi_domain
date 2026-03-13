@@ -6,7 +6,10 @@
 
 - GUI 入口：`gui.py`
 - CLI 入口：`cli.py`
-- 扫描编排：`skyscanner_neo.py`
+- 扫描编排：`scan_orchestrator.py`
+- Scrapling 传输：`transport_scrapling.py`
+- CDP 传输：`transport_cdp.py`
+- Neo 兼容层：`skyscanner_neo.py`
 - 地区配置：`skyscanner_regions.py`
 - 页面解析：`skyscanner_page_parser.py`
 - 数据模型：`skyscanner_models.py`
