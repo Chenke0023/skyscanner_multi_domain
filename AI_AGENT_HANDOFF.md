@@ -3,9 +3,20 @@
 Last updated: 2026-03-13
 Project root: `skyscanner_multi_domain`
 
-## 0. Current Development Status (branch: `main`)
+## 0. Current Development Status (branch: `refactor/split-skyscanner-neo`)
 
-### Completed changes now in `main`
+### Completed changes (latest)
+
+- Refactored `skyscanner_neo.py` (1664 lines) into four focused modules:
+  - `transport_scrapling.py` (330 lines): Scrapling fetch, captcha detection, `compare_via_scrapling`
+  - `transport_cdp.py` (376 lines): CDP browser management, page transport, `compare_via_pages`
+  - `scan_orchestrator.py` (226 lines): `run_page_scan`, fallback routing, failure logging, output formatting
+  - `skyscanner_neo.py` (890 lines): Neo CLI, capture replay, URL rewriting, backward-compat re-exports
+- All existing imports from `skyscanner_neo` continue to work via re-exports
+- Test mock targets updated from `skyscanner_neo.*` to actual source modules (`transport_cdp.*`, `transport_scrapling.*`)
+- All 15 tests pass; `cli.py` and `gui.py` imports verified
+
+### Previously completed (in `main`)
 
 - Added a new transport path: `--transport scrapling` in CLI `page` command.
 - `run_page_scan(...)` now supports transport routing:
@@ -37,11 +48,22 @@ Project root: `skyscanner_multi_domain`
   - price columns sort numerically; text columns sort lexicographically
   - repeated click toggles ascending ↑ / descending ↓
   - sort state resets on new scan
+- Added GUI per-region progress bar and status:
+  - `ttk.Progressbar` shows overall scan progress
+  - status text updates per-region: `正在扫描 2026-04-29 [中国] (3/49)`
+  - `run_page_scan` and `compare_via_scrapling` accept `on_region_start` callback
+- Added GUI cancel button:
+  - "取消" button appears in status bar during scanning
+  - uses `threading.Event` to signal worker thread to exit between dates/regions
+  - GUI resets to ready state on cancel
+- Added clickable links in GUI result table:
+  - double-click the "链接" column to open the Skyscanner result page in default browser
+  - uses `webbrowser.open()`
 
 ### Verified results (latest)
 
 - Syntax check: passed
-- Unit tests: passed (`18/18` across `test_skyscanner_neo.py` and `test_date_window.py`)
+- Unit tests: passed (`15/15` in `test_skyscanner_neo.py`, plus `test_date_window.py`)
 - E2E comparison (same route/date):
   - `--transport page`: returns valid Best/Cheapest prices for tested regions
   - `--transport scrapling`: returns valid Best/Cheapest prices for default regions (`CN, HK, SG, US, UK, KZ`) on `BJSA -> ALA`, `2026-04-29`
@@ -84,13 +106,24 @@ Current workflow:
   - Main UI for non-technical users
   - Tkinter app
   - Supports column-header click-to-sort across all dates
+  - Per-region progress bar with cancel support
+  - Double-click link column to open in browser
 - `cli.py`
   - CLI wrapper around the same scan flow
   - Handles location resolution, smart effective regions, FX conversion, and Markdown output
 - `skyscanner_neo.py`
-  - Scan orchestrator
-  - Scrapling transport, optional browser/CDP fallback, and scan routing
-  - Neo compatibility path
+  - Neo compatibility layer: NeoCli wrapper, capture replay, URL rewriting, payload mutation
+  - Re-exports all moved symbols for backward compatibility
+  - Legacy `doctor` / `compare` CLI subcommands
+- `scan_orchestrator.py`
+  - Scan routing and fallback logic (`run_page_scan`)
+  - Failure logging, output formatting (`print_quotes`, `quotes_to_dicts`)
+- `transport_scrapling.py`
+  - Scrapling fetch with staged retries, captcha detection
+  - `compare_via_scrapling`
+- `transport_cdp.py`
+  - Browser detection, CDP management, page text capture
+  - `compare_via_pages`
 - `skyscanner_regions.py`
   - Region config and smart region selection
 - `skyscanner_page_parser.py`
@@ -246,12 +279,18 @@ It now prefers valid parsed prices over transient loading text when both appear 
   - start here for Best/Cheapest extraction bugs
 - `skyscanner_regions.py`
   - start here for market defaults and host aliases
+- `scan_orchestrator.py`
+  - start here for scan routing, fallback logic, and `run_page_scan`
+- `transport_scrapling.py`
+  - start here for Scrapling transport behavior, retry logic, and captcha detection
+- `transport_cdp.py`
+  - start here for CDP browser management, page text capture, and `compare_via_pages`
 - `skyscanner_neo.py`
-  - start here for Scrapling transport behavior, retry logic, and optional `page` fallback
+  - start here for Neo CLI, capture replay, URL rewriting; also holds backward-compat re-exports
 - `cli.py`
   - start here for output rendering, date-window scanning, and CLI summary behavior
 - `gui.py`
-  - start here for UI behavior, date-window controls, and scan-thread orchestration
+  - start here for UI behavior, date-window controls, scan-thread orchestration, progress/cancel, and link opening
 - `date_window.py`
   - start here for date-range generation behavior
 
@@ -280,7 +319,7 @@ Recommended order:
 
 1. Read this file
 2. Read `README.md`
-3. Inspect `skyscanner_page_parser.py`, `skyscanner_regions.py`, and `skyscanner_neo.py`
+3. Inspect `skyscanner_page_parser.py`, `skyscanner_regions.py`, `scan_orchestrator.py`, `transport_scrapling.py`, and `transport_cdp.py`
 4. Validate parser changes with `python3 -m pytest -q test_skyscanner_neo.py`
 5. Validate date-window behavior with `python3 -m pytest -q test_date_window.py`
 6. Validate live Scrapling behavior first; use `--transport page` only if you need to compare against the browser-based fallback

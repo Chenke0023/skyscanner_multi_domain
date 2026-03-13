@@ -1,14 +1,16 @@
 """
-Skyscanner multi-domain comparison and transport orchestration.
+Skyscanner Neo compatibility layer and legacy capture-based tooling.
 
-Current primary path:
-1. Use Scrapling to fetch market result pages.
-2. Extract visible page text and parse Best / Cheapest prices.
-3. If a market fails in Scrapling, retry only that market through the local Edge CDP `page` transport.
+Primary scan paths (Scrapling + CDP fallback) have moved to:
+- transport_scrapling.py
+- transport_cdp.py
+- scan_orchestrator.py
 
-Legacy compatibility path:
-- keep Neo-based doctor / compare tooling available for capture-driven debugging
-- allow `neo` / `raw` / `page` workflows for lower-level investigation when needed
+This module retains:
+- NeoCli wrapper and Neo-based request execution
+- Capture file loading, URL rewriting, payload mutation
+- doctor / compare CLI subcommands
+- Re-exports for backward compatibility
 """
 
 from __future__ import annotations
@@ -24,33 +26,53 @@ import sys
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Iterable, Optional
-from urllib.error import URLError
-from urllib.request import urlopen
 from urllib.parse import parse_qsl, quote, urlencode, urlparse, urlunparse
-import time
 
 import aiohttp
-from bs4 import BeautifulSoup
 
-from app_paths import PROJECT_ROOT, get_browser_profile_dir, get_failure_log_file
+from app_paths import PROJECT_ROOT
 from skyscanner_models import FlightQuote, RegionConfig
 from skyscanner_page_parser import (
-    PAGE_TEXT_CAPTURE_CONTEXT,
     PAGE_TEXT_CAPTURE_LIMIT,
-    SORT_LABELS,
-    SORT_SECTION_HINTS,
     extract_page_quote,
     first_currency,
     parse_float,
 )
 from skyscanner_regions import (
     DEFAULT_REGIONS,
-    REGION_HOST_ALIASES,
     REGIONS,
     build_effective_region_codes,
     get_selected_regions,
 )
 
+# ---------------------------------------------------------------------------
+# Re-exports for backward compatibility
+# ---------------------------------------------------------------------------
+from scan_orchestrator import (  # noqa: F401
+    build_search_url,
+    print_quotes,
+    quotes_to_dicts,
+    run_page_scan,
+)
+# PLACEHOLDER_REEXPORT_TAIL
+from scan_orchestrator import _persist_failure_log  # noqa: F401
+from transport_cdp import (  # noqa: F401
+    detect_browsers,
+    detect_cdp_version,
+    ensure_cdp_ready,
+    launch_browser_with_cdp,
+    prune_browser_profile,
+    wait_for_cdp,
+)
+from transport_scrapling import (  # noqa: F401
+    _check_captcha_in_page,
+    _extract_scrapling_page_text,
+    compare_via_scrapling,
+)
+
+# ---------------------------------------------------------------------------
+# Constants
+# ---------------------------------------------------------------------------
 
 DEFAULT_DATE = "2026-04-29"
 DATE_PATH_HINTS = {"date", "outbounddate", "departdate", "departuredate"}
@@ -84,29 +106,10 @@ DROP_HEADERS = {
     "sec-fetch-site",
 }
 
-CDP_HTTP = "http://localhost:9222"
-PROFILE_CACHE_PATHS = (
-    "BrowserMetrics",
-    "component_crx_cache",
-    "GraphiteDawnCache",
-    "GrShaderCache",
-    "ShaderCache",
-    "Default/Cache",
-    "Default/Code Cache",
-    "Default/GPUCache",
-    "Default/DawnGraphiteCache",
-    "Default/DawnWebGPUCache",
-    "Default/blob_storage",
-)
-FAILURE_LOG_TEXT_LIMIT = 12000
-SCRAPLING_FALLBACK_STATUSES = {
-    "page_challenge",
-    "page_loading",
-    "page_parse_failed",
-    "scrapling_failed",
-    "scrapling_parse_failed",
-    "captcha_solve_failed",
-}
+
+# ---------------------------------------------------------------------------
+# JSON / nested helpers
+# ---------------------------------------------------------------------------
 
 
 def compact_json(value: Any) -> str:
@@ -170,6 +173,11 @@ def deep_copy_json(value: Any) -> Any:
     return json.loads(json.dumps(value))
 
 
+# ---------------------------------------------------------------------------
+# NeoCli
+# ---------------------------------------------------------------------------
+
+
 class NeoCli:
     def __init__(self, project_root: Path):
         self.project_root = project_root
@@ -210,115 +218,12 @@ class NeoCli:
         )
 
 
-def detect_browsers() -> dict[str, Path]:
-    candidates = {
-        "chrome": Path("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"),
-        "edge": Path("/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge"),
-    }
-    return {name: path for name, path in candidates.items() if path.exists()}
+# --- PLACEHOLDER_NEO_TAIL ---
 
 
-def profile_dir_for(browser_name: str) -> Path:
-    return get_browser_profile_dir(browser_name)
-
-
-def detect_cdp_version(port: int = 9222) -> Optional[dict[str, Any]]:
-    try:
-        with urlopen(f"http://localhost:{port}/json/version", timeout=2) as response:
-            return json.loads(response.read().decode("utf-8"))
-    except (URLError, OSError, json.JSONDecodeError, TimeoutError):
-        return None
-
-
-def wait_for_cdp(
-    port: int = 9222, timeout: float = 12.0, interval: float = 0.5
-) -> Optional[dict[str, Any]]:
-    deadline = time.time() + timeout
-    while time.time() < deadline:
-        info = detect_cdp_version(port)
-        if info:
-            return info
-        time.sleep(interval)
-    return None
-
-
-def prune_browser_profile(profile_dir: Path) -> tuple[int, list[str]]:
-    removed: list[str] = []
-    for rel_path in PROFILE_CACHE_PATHS:
-        target = profile_dir / rel_path
-        if not target.exists():
-            continue
-        try:
-            if target.is_dir():
-                shutil.rmtree(target)
-            else:
-                target.unlink()
-            removed.append(rel_path)
-        except OSError:
-            continue
-    return len(removed), removed
-
-
-def launch_browser_with_cdp(
-    port: int = 9222, start_url: str = "https://www.skyscanner.com"
-) -> str:
-    browsers = detect_browsers()
-    for browser_name in ("edge", "chrome"):
-        binary = browsers.get(browser_name)
-        if not binary:
-            continue
-
-        profile_dir = profile_dir_for(browser_name)
-        profile_dir.mkdir(parents=True, exist_ok=True)
-        removed_count, _ = prune_browser_profile(profile_dir)
-        command = [
-            str(binary),
-            f"--remote-debugging-port={port}",
-            f"--user-data-dir={profile_dir}",
-            "--no-first-run",
-            "--no-default-browser-check",
-            "--new-window",
-            start_url,
-        ]
-        try:
-            subprocess.Popen(
-                command,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                stdin=subprocess.DEVNULL,
-                start_new_session=True,
-            )
-            if removed_count:
-                return f"已清理 {removed_count} 处缓存并自动启动 {browser_name.capitalize()}，调试端口 {port}"
-            return f"已尝试自动启动 {browser_name.capitalize()}，调试端口 {port}"
-        except OSError as exc:
-            return f"找到 {browser_name.capitalize()}，但启动失败: {exc}"
-
-    return "没有找到可自动启动的 Edge 或 Chrome"
-
-
-def ensure_cdp_ready(
-    port: int = 9222,
-    auto_launch: bool = True,
-    wait_timeout: float = 12.0,
-    start_url: str = "https://www.skyscanner.com",
-) -> dict[str, Any]:
-    cdp_info = detect_cdp_version(port)
-    if cdp_info:
-        return cdp_info
-
-    launch_note = None
-    if auto_launch:
-        launch_note = launch_browser_with_cdp(port=port, start_url=start_url)
-        cdp_info = wait_for_cdp(port=port, timeout=wait_timeout)
-        if cdp_info:
-            return cdp_info
-
-    raise RuntimeError(
-        "未检测到 Edge 调试端口 9222。"
-        + (f" {launch_note}。" if launch_note else "")
-        + " 请关闭已打开的浏览器后重试，或手动启动带 --remote-debugging-port=9222 的 Edge。"
-    )
+# ---------------------------------------------------------------------------
+# Capture file & URL rewriting
+# ---------------------------------------------------------------------------
 
 
 def load_capture_file(path: Path) -> list[dict[str, Any]]:
@@ -328,17 +233,6 @@ def load_capture_file(path: Path) -> list[dict[str, Any]]:
     if isinstance(data, dict):
         return [data]
     raise ValueError("Capture file must contain a JSON object or array")
-
-
-def build_search_url(
-    region: RegionConfig, origin: str, destination: str, travel_date: str
-) -> str:
-    _, _, short_date = parse_date(travel_date)
-    return (
-        f"{region.domain}/transport/flights/{origin.lower()}/{destination.lower()}/{short_date}/"
-        "?adultsv2=1&cabinclass=economy&childrenv2=&ref=home&rtn=0"
-        "&preferdirects=false&outboundaltsenabled=false&inboundaltsenabled=false"
-    )
 
 
 def find_candidate_captures(
@@ -434,6 +328,9 @@ def rewrite_url(url: str, region: RegionConfig, travel_date: str) -> str:
             current.fragment,
         )
     )
+
+
+# --- PLACEHOLDER_MUTATE ---
 
 
 def mutate_payload(
@@ -561,6 +458,9 @@ def mutate_payload(
     return json.loads(text)
 
 
+# --- PLACEHOLDER_HEADERS ---
+
+
 def prepare_headers(
     capture_headers: dict[str, Any],
     region: RegionConfig,
@@ -674,6 +574,9 @@ def extract_quote(
     )
 
 
+# --- PLACEHOLDER_EXEC ---
+
+
 async def execute_raw_request(
     session: aiohttp.ClientSession,
     region: RegionConfig,
@@ -757,693 +660,7 @@ def execute_neo_request(
     return extract_quote(region, url, body_text, status_code)
 
 
-def print_quotes(quotes: list[FlightQuote]) -> None:
-    print("\n" + "=" * 96)
-    print(f"{'地区':<8}{'价格':<14}{'货币':<8}{'状态':<18}{'来源':<48}")
-    print("-" * 96)
-    for quote in quotes:
-        region_name = REGIONS.get(
-            quote.region, RegionConfig(quote.region, quote.region, quote.domain, "", "")
-        ).name
-        price_text = f"{quote.price:,.2f}" if quote.price is not None else "-"
-        print(
-            f"{region_name:<8}{price_text:<14}{(quote.currency or '-'): <8}"
-            f"{quote.status:<18}{quote.source_url[:48]:<48}"
-        )
-    print("=" * 96)
-
-    failures = [quote for quote in quotes if quote.price is None]
-    if failures:
-        print("\n失败详情:")
-        for quote in failures:
-            print(f"[{quote.region}] {quote.error or quote.status}")
-
-
-def quotes_to_dicts(quotes: list[FlightQuote]) -> list[dict[str, Any]]:
-    return [
-        {
-            "region": quote.region,
-            "region_name": REGIONS.get(
-                quote.region,
-                RegionConfig(quote.region, quote.region, quote.domain, "", ""),
-            ).name,
-            "domain": quote.domain,
-            "price": quote.price,
-            "currency": quote.currency,
-            "source_url": quote.source_url,
-            "status": quote.status,
-            "price_path": quote.price_path,
-            "best_price": quote.best_price,
-            "best_price_path": quote.best_price_path,
-            "cheapest_price": quote.cheapest_price,
-            "cheapest_price_path": quote.cheapest_price_path,
-            "error": quote.error,
-        }
-        for quote in quotes
-    ]
-
-
-async def cdp_open_tab(session: aiohttp.ClientSession, url: str) -> dict[str, Any]:
-    target_url = f"{CDP_HTTP}/json/new?{quote(url, safe=':/?&=%')}"
-    async with session.put(target_url) as response:
-        response.raise_for_status()
-        return await response.json()
-
-
-async def cdp_list_tabs(session: aiohttp.ClientSession) -> list[dict[str, Any]]:
-    async with session.get(f"{CDP_HTTP}/json/list") as response:
-        response.raise_for_status()
-        return await response.json()
-
-
-async def cdp_eval(ws_url: str, expression: str) -> Any:
-    timeout = aiohttp.ClientTimeout(total=20)
-    async with aiohttp.ClientSession(timeout=timeout) as session:
-        async with session.ws_connect(ws_url) as ws:
-            await ws.send_json(
-                {
-                    "id": 1,
-                    "method": "Runtime.evaluate",
-                    "params": {
-                        "expression": expression,
-                        "returnByValue": True,
-                        "awaitPromise": True,
-                    },
-                }
-            )
-            async for message in ws:
-                if message.type != aiohttp.WSMsgType.TEXT:
-                    continue
-                payload = json.loads(message.data)
-                if payload.get("id") != 1:
-                    continue
-                result = payload.get("result", {}).get("result", {})
-                if "value" in result:
-                    return result["value"]
-                raise RuntimeError(json.dumps(payload, ensure_ascii=False))
-    raise RuntimeError("CDP evaluate failed")
-
-
-def build_page_text_capture_expression(
-    *,
-    max_chars: int = PAGE_TEXT_CAPTURE_LIMIT,
-    context_chars: int = PAGE_TEXT_CAPTURE_CONTEXT,
-) -> str:
-    markers = tuple(dict.fromkeys((*SORT_SECTION_HINTS, *SORT_LABELS)))
-    return (
-        "(() => {"
-        "const text = document.body ? document.body.innerText : '';"
-        f"const maxChars = {max_chars};"
-        f"const contextChars = {context_chars};"
-        "const title = document.title;"
-        "const url = location.href;"
-        "if (text.length <= maxChars) { return {title, url, text}; }"
-        f"const markers = {json.dumps(markers, ensure_ascii=False)};"
-        "const lower = text.toLowerCase();"
-        "let index = -1;"
-        "for (const marker of markers) {"
-        "  const markerIndex = lower.indexOf(String(marker).toLowerCase());"
-        "  if (markerIndex !== -1) { index = markerIndex; break; }"
-        "}"
-        "const start = index === -1 ? 0 : Math.max(0, index - contextChars);"
-        "return {title, url, text: text.slice(start, start + maxChars)};"
-        "})()"
-    )
-
-
-def _extract_scrapling_page_text(page: Any) -> str:
-    """Extract parser-friendly page text from Scrapling response."""
-    html_value = None
-    for attr_name in ("html", "content", "body"):
-        value = getattr(page, attr_name, None)
-        if callable(value):
-            try:
-                value = value()
-            except Exception:
-                value = None
-        if isinstance(value, (bytes, bytearray)):
-            value = value.decode("utf-8", errors="ignore")
-        if isinstance(value, str) and value.strip():
-            html_value = value
-            break
-
-    if html_value:
-        try:
-            soup = BeautifulSoup(html_value, "lxml")
-            for tag in soup(["script", "style", "noscript", "svg", "template"]):
-                tag.decompose()
-            visible_lines = [
-                line.strip() for line in soup.get_text("\n").splitlines() if line.strip()
-            ]
-            if visible_lines:
-                return "\n".join(visible_lines)
-        except Exception:
-            pass
-
-    css_method = getattr(page, "css", None)
-    if callable(css_method):
-        for selector in (
-            "body :not(script):not(style):not(noscript):not(template)::text",
-            "body *::text",
-            "body::text",
-        ):
-            try:
-                nodes = css_method(selector)
-                getall = getattr(nodes, "getall", None)
-                if callable(getall):
-                    texts = [
-                        str(item).strip() for item in getall() if str(item).strip()
-                    ]
-                    if texts:
-                        return "\n".join(texts)
-            except Exception:
-                continue
-
-    body = getattr(page, "body", None)
-    if isinstance(body, (bytes, bytearray)):
-        decoded = body.decode("utf-8", errors="ignore").strip()
-        if decoded:
-            return decoded
-
-    for attr_name in ("text", "html", "content"):
-        value = getattr(page, attr_name, None)
-        if callable(value):
-            try:
-                value = value()
-            except Exception:
-                value = None
-        if isinstance(value, (bytes, bytearray)):
-            value = value.decode("utf-8", errors="ignore")
-        if isinstance(value, str):
-            normalized = value.strip()
-            if normalized:
-                return normalized
-
-    return ""
-
-
-def _check_captcha_in_page(page_text: str) -> tuple[bool, str]:
-    """Check if page contains captcha indicators.
-
-    Returns:
-        (has_captcha, captcha_type)
-    """
-    captcha_indicators = {
-        "cloudflare": ["cf-turnstile", "cloudflare", "turnstile", "cf.challenge"],
-        "recaptcha": ["g-recaptcha", "recaptcha", "google recaptcha"],
-        "hcaptcha": ["h-captcha", "hcaptcha"],
-        "generic": ["captcha", "verify you are human", "human verification"],
-    }
-
-    text_lower = page_text.lower()
-    for captcha_type, indicators in captcha_indicators.items():
-        for indicator in indicators:
-            if indicator in text_lower:
-                return True, captcha_type
-    return False, ""
-
-
-def _safe_failure_token(value: str) -> str:
-    normalized = re.sub(r"[^A-Za-z0-9._-]+", "-", value.strip())
-    normalized = normalized.strip("-._")
-    return normalized or "unknown"
-
-
-def _persist_failure_log(
-    quote: FlightQuote,
-    *,
-    transport: str,
-    route_key: str,
-    page_text: str = "",
-    extra: Optional[dict[str, Any]] = None,
-    log_path: Optional[Path] = None,
-) -> FlightQuote:
-    if quote.price is not None:
-        return quote
-    if quote.debug_log_path:
-        return quote
-
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    filename = (
-        f"{timestamp}_{_safe_failure_token(route_key)}_{_safe_failure_token(quote.region)}_"
-        f"{_safe_failure_token(transport)}_{_safe_failure_token(quote.status)}.log"
-    )
-    target = log_path or get_failure_log_file(filename)
-    excerpt = (page_text or "").strip()
-    if len(excerpt) > FAILURE_LOG_TEXT_LIMIT:
-        excerpt = excerpt[:FAILURE_LOG_TEXT_LIMIT] + "\n...[truncated]"
-
-    sections = [
-        f"timestamp: {datetime.now().isoformat(timespec='seconds')}",
-        f"transport: {transport}",
-        f"route: {route_key}",
-        f"region: {quote.region}",
-        f"domain: {quote.domain}",
-        f"status: {quote.status}",
-        f"error: {quote.error or '-'}",
-        f"source_url: {quote.source_url}",
-    ]
-    if extra:
-        sections.append("extra: " + json.dumps(extra, ensure_ascii=False, sort_keys=True))
-    sections.append("")
-    sections.append("--- page_text_excerpt ---")
-    sections.append(excerpt or "(empty)")
-    target.write_text("\n".join(sections) + "\n", encoding="utf-8")
-    quote.debug_log_path = str(target)
-    return quote
-
-
-async def compare_via_scrapling(
-    args: argparse.Namespace,
-    selected_regions: list[RegionConfig],
-    *,
-    persist_failures: bool = True,
-    on_region_start: Callable[[RegionConfig], None] | None = None,
-) -> list[FlightQuote]:
-    try:
-        from scrapling import Fetcher, StealthyFetcher
-    except ImportError:
-        install_hint = '未安装 Scrapling，请先执行: pip install "scrapling[fetchers]"'
-        return [
-            FlightQuote(
-                region=region.code,
-                domain=region.domain,
-                price=None,
-                currency=region.currency,
-                source_url=build_search_url(
-                    region, args.origin, args.destination, args.date
-                ),
-                status="scrapling_unavailable",
-                error=install_hint,
-            )
-            for region in selected_regions
-        ]
-
-    # Import captcha solver client
-    try:
-        from captcha_solver import CaptchaSolverClient, CaptchaSolverError
-    except ImportError:
-        CaptchaSolverClient = None
-        CaptchaSolverError = Exception
-
-    quotes: list[FlightQuote] = []
-    timeout_ms = max(int(getattr(args, "timeout", 30) * 1000), 10000)
-    wait_ms = max(int(getattr(args, "page_wait", 8) * 1000), 3000)
-    timeout_seconds = max(int(getattr(args, "timeout", 30)), 10)
-    route_key = f"{args.origin}_{args.destination}_{args.date.replace('-', '')}"
-
-    async def fetch_with_stealth(
-        url: str,
-        region: RegionConfig,
-        *,
-        solve_cloudflare: bool,
-        wait_override_ms: int | None = None,
-    ) -> Any:
-        return await asyncio.to_thread(
-            StealthyFetcher.fetch,
-            url,
-            headless=True,
-            network_idle=True,
-            timeout=timeout_ms,
-            wait=wait_override_ms or wait_ms,
-            solve_cloudflare=solve_cloudflare,
-            google_search=False,
-            locale=region.locale,
-            extra_headers={
-                "accept-language": region.locale,
-                "referer": region.domain,
-            },
-        )
-
-    for region in selected_regions:
-        if on_region_start is not None:
-            on_region_start(region)
-        url = build_search_url(region, args.origin, args.destination, args.date)
-        page_text = ""
-        latest_quote: FlightQuote | None = None
-        latest_error: str | None = None
-        stealth_attempts = (
-            {"solve_cloudflare": False, "wait_ms": wait_ms},
-            {"solve_cloudflare": True, "wait_ms": max(wait_ms, 8000)},
-            {"solve_cloudflare": True, "wait_ms": max(wait_ms * 2, 15000)},
-        )
-
-        for attempt in stealth_attempts:
-            try:
-                page = await fetch_with_stealth(
-                    url,
-                    region,
-                    solve_cloudflare=attempt["solve_cloudflare"],
-                    wait_override_ms=attempt["wait_ms"],
-                )
-            except Exception as exc:
-                latest_error = f"Scrapling 抓取失败: {exc}"
-                continue
-
-            page_text = _extract_scrapling_page_text(page)
-            if not page_text:
-                latest_quote = FlightQuote(
-                    region=region.code,
-                    domain=region.domain,
-                    price=None,
-                    currency=region.currency,
-                    source_url=url,
-                    status="scrapling_parse_failed",
-                    error="Scrapling 返回内容为空，未提取到可解析文本",
-                )
-                continue
-
-            latest_quote = extract_page_quote(region, url, page_text)
-            if latest_quote.price is not None:
-                break
-
-            if latest_quote.status not in {
-                "page_challenge",
-                "page_loading",
-                "page_parse_failed",
-            }:
-                break
-
-        if latest_quote is not None and latest_quote.price is not None:
-            quotes.append(latest_quote)
-            continue
-
-        # Check if page contains captcha and try to solve it
-        has_captcha, captcha_type = _check_captcha_in_page(page_text)
-        if (
-            has_captcha
-            and latest_quote is not None
-            and latest_quote.price is None
-            and CaptchaSolverClient is not None
-        ):
-            try:
-                captcha_solver = CaptchaSolverClient()
-                health = await captcha_solver.health_check()
-                if health.get("status") == "healthy":
-                    token = None
-                    site_key_match = re.search(
-                        r'data-sitekey=["\']([^"\']+)["\']', page_text
-                    )
-                    site_key = site_key_match.group(1) if site_key_match else ""
-                    if site_key:
-                        if captcha_type == "cloudflare":
-                            token = await captcha_solver.solve_turnstile(url, site_key)
-                        elif captcha_type == "recaptcha":
-                            token = await captcha_solver.solve_recaptcha_v2(url, site_key)
-                        elif captcha_type == "hcaptcha":
-                            token = await captcha_solver.solve_hcaptcha(url, site_key)
-
-                    if token:
-                        page = await fetch_with_stealth(
-                            url,
-                            region,
-                            solve_cloudflare=True,
-                            wait_override_ms=max(wait_ms * 2, 15000),
-                        )
-                        page_text = _extract_scrapling_page_text(page)
-                        if page_text:
-                            latest_quote = extract_page_quote(region, url, page_text)
-                await captcha_solver.close()
-            except CaptchaSolverError as exc:
-                latest_quote = FlightQuote(
-                    region=region.code,
-                    domain=region.domain,
-                    price=None,
-                    currency=region.currency,
-                    source_url=url,
-                    status="captcha_solve_failed",
-                    error=f"Captcha解决失败 ({captcha_type}): {exc}",
-                )
-            except Exception:
-                pass
-
-        if latest_quote is None or latest_quote.price is None:
-            try:
-                page = await asyncio.to_thread(
-                    Fetcher.get,
-                    url,
-                    timeout=timeout_seconds,
-                    stealthy_headers=True,
-                    follow_redirects=True,
-                )
-                page_text = _extract_scrapling_page_text(page)
-                if page_text:
-                    latest_quote = extract_page_quote(region, url, page_text)
-                elif latest_quote is None:
-                    latest_quote = FlightQuote(
-                        region=region.code,
-                        domain=region.domain,
-                        price=None,
-                        currency=region.currency,
-                        source_url=url,
-                        status="scrapling_parse_failed",
-                        error="Scrapling 返回内容为空，未提取到可解析文本",
-                    )
-            except Exception as exc:
-                latest_error = latest_error or f"Scrapling 抓取失败: {exc}"
-
-        if latest_quote is None:
-            latest_quote = FlightQuote(
-                region=region.code,
-                domain=region.domain,
-                price=None,
-                currency=region.currency,
-                source_url=url,
-                status="scrapling_failed",
-                error=latest_error or "Scrapling 抓取失败",
-            )
-        elif latest_quote.price is None and latest_error and not latest_quote.error:
-            latest_quote.error = latest_error
-
-        if persist_failures and latest_quote.price is None:
-            _persist_failure_log(
-                latest_quote,
-                transport="scrapling",
-                route_key=route_key,
-                page_text=page_text,
-                extra={"locale": region.locale},
-            )
-
-        quotes.append(latest_quote)
-
-    return quotes
-
-
-async def compare_via_pages(
-    args: argparse.Namespace,
-    selected_regions: list[RegionConfig],
-    *,
-    persist_failures: bool = True,
-) -> list[FlightQuote]:
-    route_key = f"{args.origin}_{args.destination}_{args.date.replace('-', '')}"
-    total_wait = max(args.timeout, args.page_wait + 60, 45)
-    timeout = aiohttp.ClientTimeout(total=total_wait + 15)
-    async with aiohttp.ClientSession(timeout=timeout) as session:
-        for region in selected_regions:
-            url = build_search_url(region, args.origin, args.destination, args.date)
-            await cdp_open_tab(session, url)
-
-        await asyncio.sleep(args.page_wait)
-        deadline = time.monotonic() + max(total_wait - args.page_wait, 10)
-        poll_interval = 2.0
-        latest_quotes: dict[str, FlightQuote] = {}
-        pending_regions = {region.code: region for region in selected_regions}
-
-        while pending_regions:
-            tabs = await cdp_list_tabs(session)
-            next_pending: dict[str, RegionConfig] = {}
-
-            for region in pending_regions.values():
-                expected_path = urlparse(
-                    build_search_url(region, args.origin, args.destination, args.date)
-                ).path
-                allowed_hosts = REGION_HOST_ALIASES.get(
-                    region.code, {urlparse(region.domain).netloc}
-                )
-                candidates = [
-                    tab
-                    for tab in tabs
-                    if tab.get("type") == "page"
-                    and urlparse(str(tab.get("url", ""))).netloc in allowed_hosts
-                    and urlparse(str(tab.get("url", ""))).path == expected_path
-                ]
-                if not candidates:
-                    latest_quotes[region.code] = FlightQuote(
-                        region=region.code,
-                        domain=region.domain,
-                        price=None,
-                        currency=region.currency,
-                        source_url=build_search_url(
-                            region, args.origin, args.destination, args.date
-                        ),
-                        status="page_missing",
-                        error="CDP 列表中未找到对应结果页",
-                    )
-                    if time.monotonic() < deadline:
-                        next_pending[region.code] = region
-                    continue
-
-                parsed_quote: Optional[FlightQuote] = None
-                last_error: Optional[FlightQuote] = None
-                last_page_text = ""
-                for page in candidates:
-                    ws_url = str(page.get("webSocketDebuggerUrl", ""))
-                    if not ws_url:
-                        last_error = FlightQuote(
-                            region=region.code,
-                            domain=region.domain,
-                            price=None,
-                            currency=region.currency,
-                            source_url=str(page.get("url", "")),
-                            status="page_missing_ws",
-                            error="结果页没有 webSocketDebuggerUrl",
-                        )
-                        continue
-
-                    payload = await cdp_eval(
-                        ws_url,
-                        build_page_text_capture_expression(),
-                    )
-                    quote = extract_page_quote(
-                        region,
-                        payload.get("url", str(page.get("url", ""))),
-                        payload.get("text", ""),
-                    )
-                    last_page_text = str(payload.get("text", ""))
-                    if quote.price is not None:
-                        parsed_quote = quote
-                        break
-                    last_error = quote
-
-                final_quote = (
-                    parsed_quote
-                    or last_error
-                    or FlightQuote(
-                        region=region.code,
-                        domain=region.domain,
-                        price=None,
-                        currency=region.currency,
-                        source_url=build_search_url(
-                            region, args.origin, args.destination, args.date
-                        ),
-                        status="page_parse_failed",
-                        error="页面正文未识别到 Best/Cheapest 价格",
-                    )
-                )
-                if persist_failures and final_quote.price is None:
-                    _persist_failure_log(
-                        final_quote,
-                        transport="page",
-                        route_key=route_key,
-                        page_text=last_page_text,
-                        extra={"expected_path": expected_path},
-                    )
-                latest_quotes[region.code] = final_quote
-
-                if (
-                    latest_quotes[region.code].price is None
-                    and time.monotonic() < deadline
-                ):
-                    next_pending[region.code] = region
-
-            if not next_pending:
-                break
-            pending_regions = next_pending
-            await asyncio.sleep(poll_interval)
-
-    ordered_quotes: list[FlightQuote] = []
-    for region in selected_regions:
-        quote = latest_quotes.get(region.code)
-        if quote is not None:
-            ordered_quotes.append(quote)
-    return ordered_quotes
-
-
-async def run_page_scan(
-    origin: str,
-    destination: str,
-    date: str,
-    region_codes: list[str],
-    page_wait: int = 8,
-    timeout: int = 30,
-    transport: str = "scrapling",
-    on_region_start: Callable[[RegionConfig], None] | None = None,
-) -> list[FlightQuote]:
-    selected_regions = get_selected_regions(region_codes)
-    if not selected_regions:
-        return []
-
-    normalized_transport = (transport or "scrapling").lower()
-    if normalized_transport == "page":
-        ensure_cdp_ready(
-            start_url=build_search_url(selected_regions[0], origin, destination, date)
-        )
-
-    args = argparse.Namespace(
-        origin=origin,
-        destination=destination,
-        date=date,
-        page_wait=page_wait,
-        timeout=timeout,
-    )
-
-    if normalized_transport == "page":
-        quotes = await compare_via_pages(args, selected_regions)
-    elif normalized_transport == "scrapling":
-        quotes = await compare_via_scrapling(
-            args, selected_regions, persist_failures=False,
-            on_region_start=on_region_start,
-        )
-        fallback_regions = [
-            region
-            for region, quote in zip(selected_regions, quotes)
-            if quote.price is None and quote.status in SCRAPLING_FALLBACK_STATUSES
-        ]
-        if fallback_regions:
-            ensure_cdp_ready(
-                start_url=build_search_url(
-                    fallback_regions[0], origin, destination, date
-                )
-            )
-            fallback_quotes = await compare_via_pages(
-                args, fallback_regions, persist_failures=False
-            )
-            fallback_by_region = {
-                quote.region: quote for quote in fallback_quotes if quote is not None
-            }
-            merged_quotes: list[FlightQuote] = []
-            for quote in quotes:
-                fallback_quote = fallback_by_region.get(quote.region)
-                if fallback_quote and fallback_quote.price is not None:
-                    merged_quotes.append(fallback_quote)
-                else:
-                    merged_quotes.append(quote)
-            quotes = merged_quotes
-    else:
-        quotes = [
-            FlightQuote(
-                region=region.code,
-                domain=region.domain,
-                price=None,
-                currency=region.currency,
-                source_url=build_search_url(region, origin, destination, date),
-                status="invalid_transport",
-                error=f"未知 transport: {transport}（可选: scrapling, page）",
-            )
-            for region in selected_regions
-        ]
-
-    route_key = f"{origin}_{destination}_{date.replace('-', '')}"
-    for quote in quotes:
-        if quote.price is None and not quote.debug_log_path:
-            _persist_failure_log(
-                quote,
-                transport=normalized_transport,
-                route_key=route_key,
-            )
-
-    quotes.sort(key=lambda item: (item.price is None, item.price or float("inf")))
-    return quotes
+# --- PLACEHOLDER_DOCTOR ---
 
 
 def print_doctor(neo: NeoCli, capture_file: Optional[Path]) -> None:
@@ -1484,6 +701,8 @@ def print_doctor(neo: NeoCli, capture_file: Optional[Path]) -> None:
 
 
 async def compare_prices(args: argparse.Namespace) -> int:
+    from transport_cdp import compare_via_pages
+
     project_root = PROJECT_ROOT
     neo = NeoCli(project_root)
     region_codes = [
@@ -1607,6 +826,9 @@ async def compare_prices(args: argparse.Namespace) -> int:
         "\n没有成功提取到任何价格。建议先用 --transport neo，并确保 capture 来自同一路线搜索。"
     )
     return 2
+
+
+# --- PLACEHOLDER_CLI ---
 
 
 def build_parser() -> argparse.ArgumentParser:
