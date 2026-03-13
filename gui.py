@@ -11,6 +11,7 @@ import asyncio
 import queue
 import re
 import threading
+import webbrowser
 from datetime import datetime, timedelta
 from pathlib import Path
 import tkinter as tk
@@ -56,6 +57,7 @@ class App:
 
         self.cli = SimpleCLI()
         self.queue: queue.Queue[tuple[str, Any]] = queue.Queue()
+        self._cancel_event = threading.Event()
         self.current_output: Path | None = None
         self._sort_state: dict[str, bool] = {}
 
@@ -167,7 +169,17 @@ class App:
 
         status = ttk.LabelFrame(outer, text="状态", padding=12)
         status.pack(fill=tk.X, pady=(12, 0))
-        ttk.Label(status, textvariable=self.status_var).pack(anchor="w")
+        status_top = ttk.Frame(status)
+        status_top.pack(fill=tk.X)
+        ttk.Label(status_top, textvariable=self.status_var).pack(anchor="w", side=tk.LEFT)
+        self.cancel_button = ttk.Button(
+            status_top, text="取消", command=self._cancel_scan
+        )
+        self.cancel_button.pack(side=tk.RIGHT)
+        self.cancel_button.pack_forget()
+        self.progress_bar = ttk.Progressbar(status, mode="determinate", length=400)
+        self.progress_bar.pack(fill=tk.X, pady=(6, 0))
+        self.progress_bar.pack_forget()
 
         results = ttk.LabelFrame(outer, text="结果", padding=12)
         results.pack(fill=tk.BOTH, expand=True, pady=(12, 0))
@@ -198,6 +210,7 @@ class App:
         self.tree.column("error", width=220, anchor="w")
         self.tree.column("link", width=240, anchor="w")
         self.tree.pack(fill=tk.BOTH, expand=True)
+        self.tree.bind("<Double-1>", self._on_tree_double_click)
 
         actions = ttk.Frame(results)
         actions.pack(fill=tk.X, pady=(8, 0))
@@ -526,6 +539,33 @@ class App:
         state = tk.DISABLED if busy else tk.NORMAL
         self.run_button.config(state=state)
         self.doctor_button.config(state=state)
+        if busy:
+            self.cancel_button.pack(side=tk.RIGHT)
+            self.progress_bar.pack(fill=tk.X, pady=(6, 0))
+        else:
+            self.cancel_button.pack_forget()
+            self.progress_bar.pack_forget()
+            self.progress_bar["value"] = 0
+
+    def _cancel_scan(self) -> None:
+        self._cancel_event.set()
+        self.status_var.set("正在取消...")
+        self.cancel_button.config(state=tk.DISABLED)
+
+    def _on_tree_double_click(self, event: tk.Event) -> None:
+        col_id = self.tree.identify_column(event.x)
+        item = self.tree.identify_row(event.y)
+        if not item:
+            return
+        col_index = int(col_id.replace("#", "")) - 1
+        columns = ("date", "region", "best_native", "best_cny",
+                    "cheapest_native", "cheapest_cny", "status", "error", "link")
+        if col_index < 0 or col_index >= len(columns):
+            return
+        if columns[col_index] == "link":
+            url = self.tree.set(item, "link")
+            if url and url.startswith("http"):
+                webbrowser.open(url)
 
     def check_environment(self) -> None:
         neo = NeoCli(self.cli.project_root)
@@ -606,6 +646,7 @@ class App:
             return
 
         self.clear_results()
+        self._cancel_event.clear()
         self.set_busy(True)
         self.status_var.set("正在运行...")
         self.log(
@@ -641,11 +682,31 @@ class App:
     ) -> None:
         try:
             date_list = build_date_window(date, date_window_days)
+            total_steps = len(date_list) * len(regions)
+            step = 0
             rows_by_date: list[tuple[str, list[dict[str, str | float | None]]]] = []
             outputs: list[Path] = []
 
-            for current_date in date_list:
-                self.queue.put(("status", f"正在扫描 {current_date}..."))
+            self.queue.put(("progress_init", total_steps))
+
+            for date_idx, current_date in enumerate(date_list):
+                if self._cancel_event.is_set():
+                    self.queue.put(("cancelled", None))
+                    return
+
+                def on_region_start(region: Any, _date: str = current_date, _di: int = date_idx) -> None:
+                    nonlocal step
+                    step += 1
+                    self.queue.put((
+                        "progress",
+                        {
+                            "step": step,
+                            "total": total_steps,
+                            "date": _date,
+                            "region_name": region.name,
+                        },
+                    ))
+
                 self.queue.put(("log", f"开始扫描日期 {current_date}。"))
                 quotes = asyncio.run(
                     run_page_scan(
@@ -656,8 +717,14 @@ class App:
                         page_wait=wait_seconds,
                         timeout=30,
                         transport="scrapling",
+                        on_region_start=on_region_start,
                     )
                 )
+
+                if self._cancel_event.is_set():
+                    self.queue.put(("cancelled", None))
+                    return
+
                 if not quotes:
                     rows_by_date.append((current_date, []))
                     self.queue.put(
@@ -707,6 +774,19 @@ class App:
                     self.log(str(payload))
                 elif kind == "status":
                     self.status_var.set(str(payload))
+                elif kind == "progress_init":
+                    self.progress_bar["maximum"] = int(payload)
+                    self.progress_bar["value"] = 0
+                elif kind == "progress":
+                    p = payload
+                    self.progress_bar["value"] = p["step"]
+                    self.status_var.set(
+                        f"正在扫描 {p['date']} [{p['region_name']}] ({p['step']}/{p['total']})"
+                    )
+                elif kind == "cancelled":
+                    self.set_busy(False)
+                    self.status_var.set("已取消")
+                    self.log("扫描已被用户取消。")
         except queue.Empty:
             pass
         self.root.after(200, self._poll_queue)
