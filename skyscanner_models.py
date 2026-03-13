@@ -27,3 +27,4 @@ class FlightQuote:
     cheapest_price: Optional[float] = None
     cheapest_price_path: Optional[str] = None
     error: Optional[str] = None
+    debug_log_path: Optional[str] = None
