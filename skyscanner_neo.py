@@ -1,20 +1,14 @@
 """
-Skyscanner multi-domain comparison powered by Neo captures.
+Skyscanner multi-domain comparison and transport orchestration.
 
-This script does two related jobs:
-1. Validate whether Neo is available and whether this machine is ready to use it.
-2. Reuse a captured Skyscanner search request, rewrite market/locale/currency
-   for multiple regions, then compare the best and cheapest prices returned by each region.
+Current primary path:
+1. Use Scrapling to fetch market result pages.
+2. Extract visible page text and parse Best / Cheapest prices.
+3. If a market fails in Scrapling, retry only that market through the local Edge CDP `page` transport.
 
-Recommended workflow:
-1. Install Neo and load its Chrome extension.
-2. Open a real Skyscanner page in Chrome and manually search the same route once.
-3. Export captures with auth:
-      neo capture export --include-auth > skyscanner-captures.json
-4. Run:
-      python skyscanner_neo.py compare --capture-file skyscanner-captures.json
-
-If Neo is connected to Chrome, the script can also call `neo exec` directly.
+Legacy compatibility path:
+- keep Neo-based doctor / compare tooling available for capture-driven debugging
+- allow `neo` / `raw` / `page` workflows for lower-level investigation when needed
 """
 
 from __future__ import annotations
@@ -29,7 +23,7 @@ import subprocess
 import sys
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Iterable, Optional
+from typing import Any, Callable, Iterable, Optional
 from urllib.error import URLError
 from urllib.request import urlopen
 from urllib.parse import parse_qsl, quote, urlencode, urlparse, urlunparse
@@ -38,7 +32,7 @@ import time
 import aiohttp
 from bs4 import BeautifulSoup
 
-from app_paths import PROJECT_ROOT, get_browser_profile_dir
+from app_paths import PROJECT_ROOT, get_browser_profile_dir, get_failure_log_file
 from skyscanner_models import FlightQuote, RegionConfig
 from skyscanner_page_parser import (
     PAGE_TEXT_CAPTURE_CONTEXT,
@@ -104,6 +98,15 @@ PROFILE_CACHE_PATHS = (
     "Default/DawnWebGPUCache",
     "Default/blob_storage",
 )
+FAILURE_LOG_TEXT_LIMIT = 12000
+SCRAPLING_FALLBACK_STATUSES = {
+    "page_challenge",
+    "page_loading",
+    "page_parse_failed",
+    "scrapling_failed",
+    "scrapling_parse_failed",
+    "captcha_solve_failed",
+}
 
 
 def compact_json(value: Any) -> str:
@@ -960,8 +963,62 @@ def _check_captcha_in_page(page_text: str) -> tuple[bool, str]:
     return False, ""
 
 
+def _safe_failure_token(value: str) -> str:
+    normalized = re.sub(r"[^A-Za-z0-9._-]+", "-", value.strip())
+    normalized = normalized.strip("-._")
+    return normalized or "unknown"
+
+
+def _persist_failure_log(
+    quote: FlightQuote,
+    *,
+    transport: str,
+    route_key: str,
+    page_text: str = "",
+    extra: Optional[dict[str, Any]] = None,
+    log_path: Optional[Path] = None,
+) -> FlightQuote:
+    if quote.price is not None:
+        return quote
+    if quote.debug_log_path:
+        return quote
+
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    filename = (
+        f"{timestamp}_{_safe_failure_token(route_key)}_{_safe_failure_token(quote.region)}_"
+        f"{_safe_failure_token(transport)}_{_safe_failure_token(quote.status)}.log"
+    )
+    target = log_path or get_failure_log_file(filename)
+    excerpt = (page_text or "").strip()
+    if len(excerpt) > FAILURE_LOG_TEXT_LIMIT:
+        excerpt = excerpt[:FAILURE_LOG_TEXT_LIMIT] + "\n...[truncated]"
+
+    sections = [
+        f"timestamp: {datetime.now().isoformat(timespec='seconds')}",
+        f"transport: {transport}",
+        f"route: {route_key}",
+        f"region: {quote.region}",
+        f"domain: {quote.domain}",
+        f"status: {quote.status}",
+        f"error: {quote.error or '-'}",
+        f"source_url: {quote.source_url}",
+    ]
+    if extra:
+        sections.append("extra: " + json.dumps(extra, ensure_ascii=False, sort_keys=True))
+    sections.append("")
+    sections.append("--- page_text_excerpt ---")
+    sections.append(excerpt or "(empty)")
+    target.write_text("\n".join(sections) + "\n", encoding="utf-8")
+    quote.debug_log_path = str(target)
+    return quote
+
+
 async def compare_via_scrapling(
-    args: argparse.Namespace, selected_regions: list[RegionConfig]
+    args: argparse.Namespace,
+    selected_regions: list[RegionConfig],
+    *,
+    persist_failures: bool = True,
+    on_region_start: Callable[[RegionConfig], None] | None = None,
 ) -> list[FlightQuote]:
     try:
         from scrapling import Fetcher, StealthyFetcher
@@ -993,6 +1050,7 @@ async def compare_via_scrapling(
     timeout_ms = max(int(getattr(args, "timeout", 30) * 1000), 10000)
     wait_ms = max(int(getattr(args, "page_wait", 8) * 1000), 3000)
     timeout_seconds = max(int(getattr(args, "timeout", 30)), 10)
+    route_key = f"{args.origin}_{args.destination}_{args.date.replace('-', '')}"
 
     async def fetch_with_stealth(
         url: str,
@@ -1018,6 +1076,8 @@ async def compare_via_scrapling(
         )
 
     for region in selected_regions:
+        if on_region_start is not None:
+            on_region_start(region)
         url = build_search_url(region, args.origin, args.destination, args.date)
         page_text = ""
         latest_quote: FlightQuote | None = None
@@ -1155,14 +1215,27 @@ async def compare_via_scrapling(
         elif latest_quote.price is None and latest_error and not latest_quote.error:
             latest_quote.error = latest_error
 
+        if persist_failures and latest_quote.price is None:
+            _persist_failure_log(
+                latest_quote,
+                transport="scrapling",
+                route_key=route_key,
+                page_text=page_text,
+                extra={"locale": region.locale},
+            )
+
         quotes.append(latest_quote)
 
     return quotes
 
 
 async def compare_via_pages(
-    args: argparse.Namespace, selected_regions: list[RegionConfig]
+    args: argparse.Namespace,
+    selected_regions: list[RegionConfig],
+    *,
+    persist_failures: bool = True,
 ) -> list[FlightQuote]:
+    route_key = f"{args.origin}_{args.destination}_{args.date.replace('-', '')}"
     total_wait = max(args.timeout, args.page_wait + 60, 45)
     timeout = aiohttp.ClientTimeout(total=total_wait + 15)
     async with aiohttp.ClientSession(timeout=timeout) as session:
@@ -1212,6 +1285,7 @@ async def compare_via_pages(
 
                 parsed_quote: Optional[FlightQuote] = None
                 last_error: Optional[FlightQuote] = None
+                last_page_text = ""
                 for page in candidates:
                     ws_url = str(page.get("webSocketDebuggerUrl", ""))
                     if not ws_url:
@@ -1235,12 +1309,13 @@ async def compare_via_pages(
                         payload.get("url", str(page.get("url", ""))),
                         payload.get("text", ""),
                     )
+                    last_page_text = str(payload.get("text", ""))
                     if quote.price is not None:
                         parsed_quote = quote
                         break
                     last_error = quote
 
-                latest_quotes[region.code] = (
+                final_quote = (
                     parsed_quote
                     or last_error
                     or FlightQuote(
@@ -1255,6 +1330,15 @@ async def compare_via_pages(
                         error="页面正文未识别到 Best/Cheapest 价格",
                     )
                 )
+                if persist_failures and final_quote.price is None:
+                    _persist_failure_log(
+                        final_quote,
+                        transport="page",
+                        route_key=route_key,
+                        page_text=last_page_text,
+                        extra={"expected_path": expected_path},
+                    )
+                latest_quotes[region.code] = final_quote
 
                 if (
                     latest_quotes[region.code].price is None
@@ -1283,6 +1367,7 @@ async def run_page_scan(
     page_wait: int = 8,
     timeout: int = 30,
     transport: str = "scrapling",
+    on_region_start: Callable[[RegionConfig], None] | None = None,
 ) -> list[FlightQuote]:
     selected_regions = get_selected_regions(region_codes)
     if not selected_regions:
@@ -1305,7 +1390,35 @@ async def run_page_scan(
     if normalized_transport == "page":
         quotes = await compare_via_pages(args, selected_regions)
     elif normalized_transport == "scrapling":
-        quotes = await compare_via_scrapling(args, selected_regions)
+        quotes = await compare_via_scrapling(
+            args, selected_regions, persist_failures=False,
+            on_region_start=on_region_start,
+        )
+        fallback_regions = [
+            region
+            for region, quote in zip(selected_regions, quotes)
+            if quote.price is None and quote.status in SCRAPLING_FALLBACK_STATUSES
+        ]
+        if fallback_regions:
+            ensure_cdp_ready(
+                start_url=build_search_url(
+                    fallback_regions[0], origin, destination, date
+                )
+            )
+            fallback_quotes = await compare_via_pages(
+                args, fallback_regions, persist_failures=False
+            )
+            fallback_by_region = {
+                quote.region: quote for quote in fallback_quotes if quote is not None
+            }
+            merged_quotes: list[FlightQuote] = []
+            for quote in quotes:
+                fallback_quote = fallback_by_region.get(quote.region)
+                if fallback_quote and fallback_quote.price is not None:
+                    merged_quotes.append(fallback_quote)
+                else:
+                    merged_quotes.append(quote)
+            quotes = merged_quotes
     else:
         quotes = [
             FlightQuote(
@@ -1319,6 +1432,15 @@ async def run_page_scan(
             )
             for region in selected_regions
         ]
+
+    route_key = f"{origin}_{destination}_{date.replace('-', '')}"
+    for quote in quotes:
+        if quote.price is None and not quote.debug_log_path:
+            _persist_failure_log(
+                quote,
+                transport=normalized_transport,
+                route_key=route_key,
+            )
 
     quotes.sort(key=lambda item: (item.price is None, item.price or float("inf")))
     return quotes
@@ -1489,7 +1611,7 @@ async def compare_prices(args: argparse.Namespace) -> int:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Use Neo captures to compare Skyscanner prices across markets.",
+        description="Compare Skyscanner prices across markets (Scrapling/page primary flow + legacy Neo tools).",
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
