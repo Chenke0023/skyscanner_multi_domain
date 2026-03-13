@@ -37,6 +37,17 @@ Project root: `skyscanner_multi_domain`
   - price columns sort numerically; text columns sort lexicographically
   - repeated click toggles ascending ↑ / descending ↓
   - sort state resets on new scan
+- Added GUI per-region progress bar and status:
+  - `ttk.Progressbar` shows overall scan progress
+  - status text updates per-region: `正在扫描 2026-04-29 [中国] (3/49)`
+  - `run_page_scan` and `compare_via_scrapling` accept `on_region_start` callback
+- Added GUI cancel button:
+  - "取消" button appears in status bar during scanning
+  - uses `threading.Event` to signal worker thread to exit between dates/regions
+  - GUI resets to ready state on cancel
+- Added clickable links in GUI result table:
+  - double-click the "链接" column to open the Skyscanner result page in default browser
+  - uses `webbrowser.open()`
 
 ### Verified results (latest)
 
@@ -84,6 +95,8 @@ Current workflow:
   - Main UI for non-technical users
   - Tkinter app
   - Supports column-header click-to-sort across all dates
+  - Per-region progress bar with cancel support
+  - Double-click link column to open in browser
 - `cli.py`
   - CLI wrapper around the same scan flow
   - Handles location resolution, smart effective regions, FX conversion, and Markdown output
@@ -247,11 +260,11 @@ It now prefers valid parsed prices over transient loading text when both appear 
 - `skyscanner_regions.py`
   - start here for market defaults and host aliases
 - `skyscanner_neo.py`
-  - start here for Scrapling transport behavior, retry logic, and optional `page` fallback
+  - start here for Scrapling transport behavior, retry logic, optional `page` fallback, and `on_region_start` progress callback
 - `cli.py`
   - start here for output rendering, date-window scanning, and CLI summary behavior
 - `gui.py`
-  - start here for UI behavior, date-window controls, and scan-thread orchestration
+  - start here for UI behavior, date-window controls, scan-thread orchestration, progress/cancel, and link opening
 - `date_window.py`
   - start here for date-range generation behavior
 
