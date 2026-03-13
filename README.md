@@ -21,6 +21,13 @@
 
 当前推荐优先使用 Scrapling 获取页面正文并解析 Best / Cheapest 价格；仅在需要排查兼容性问题时再切换到 `page`。
 
+当前项目进展：
+
+- Scrapling 主方案已合入 `main`
+- CLI 默认路径已完成真实取价验证
+- GUI 当前也默认走 Scrapling
+- Scrapling 失败市场会自动 fallback 到 `page`
+
 ## 启动方式
 
 GUI：
@@ -42,6 +49,7 @@ python3 cli.py page -o 北京 -d 阿拉木图 -t 2026-04-29 --transport page
 ## 当前功能
 
 - 默认通过 Scrapling 抓取结果页可见正文
+- 当单个市场在 Scrapling 下仍失败时，自动回退到 `page` 方案重试该市场
 - 在需要时可切换到 `page` 方案，自动连接或拉起带 `9222` 调试端口的 Edge
 - 按路线智能拼出实际比较地区（基线地区 + 出发/目的地所属市场 + 手动追加地区）
 - 支持日期窗口扫描（默认 `±3` 天，`--date-window 0` 表示只扫单日）
@@ -49,6 +57,7 @@ python3 cli.py page -o 北京 -d 阿拉木图 -t 2026-04-29 --transport page
 - 同时提取 Best / Cheapest
 - 按汇率统一换算为人民币
 - 保存 Markdown 报告，便于直接对比
+- GUI 结果表格支持点击列头排序（价格列按数值排序，支持升序/降序切换）
 
 ## 输出与运行时路径
 
@@ -56,11 +65,14 @@ python3 cli.py page -o 北京 -d 阿拉木图 -t 2026-04-29 --transport page
 
 - 报告：`outputs/reports/`
 - 日志：`logs/`
+- 失败样本：`logs/failures/`
 
 运行时状态目录：
 
 - 浏览器 profile（`page` 方案使用）：`$XDG_STATE_HOME/skyscanner_multi_domain/browser-profiles/`
 - 汇率缓存：`$XDG_STATE_HOME/skyscanner_multi_domain/fx_rates_cache.json`
+
+当某个市场抓取失败时，程序会把失败摘要和页面正文摘录写入 `logs/failures/`，便于排查 loading / challenge / parse failed 等问题。
 
 如果没有设置 `XDG_STATE_HOME`，默认会落到：
 

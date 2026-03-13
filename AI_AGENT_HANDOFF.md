@@ -3,9 +3,9 @@
 Last updated: 2026-03-13
 Project root: `skyscanner_multi_domain`
 
-## 0. Current Development Status (branch: `feat/scrapling-transport`)
+## 0. Current Development Status (branch: `main`)
 
-### Completed changes in this branch
+### Completed changes now in `main`
 
 - Added a new transport path: `--transport scrapling` in CLI `page` command.
 - `run_page_scan(...)` now supports transport routing:
@@ -23,28 +23,45 @@ Project root: `skyscanner_multi_domain`
 - Dependencies updated:
   - `requirements.txt` includes `scrapling[fetchers]>=0.3.0`.
 - Parser updated so loading/challenge hints no longer mask valid Best / Cheapest prices when real price text is already present.
+- Added failure artifact persistence:
+  - final market-level failures are written to `logs/failures/`
+  - logs include route, transport, region, status, error, URL, and page-text excerpt
+- Added per-market automatic fallback:
+  - when Scrapling ends in retryable failure states, only the failed market is retried via `page`
 - Added regression tests for:
   - script payload pollution in Scrapling text extraction
   - loading text coexisting with valid price blocks
+  - Scrapling -> page per-market fallback routing
+- Added GUI table column-header sorting:
+  - click any column header to sort all rows across all dates
+  - price columns sort numerically; text columns sort lexicographically
+  - repeated click toggles ascending ↑ / descending ↓
+  - sort state resets on new scan
 
 ### Verified results (latest)
 
 - Syntax check: passed
-- Unit tests: passed (`16/16` across `test_skyscanner_neo.py` and `test_date_window.py`)
+- Unit tests: passed (`18/18` across `test_skyscanner_neo.py` and `test_date_window.py`)
 - E2E comparison (same route/date):
   - `--transport page`: returns valid Best/Cheapest prices for tested regions
   - `--transport scrapling`: returns valid Best/Cheapest prices for default regions (`CN, HK, SG, US, UK, KZ`) on `BJSA -> ALA`, `2026-04-29`
+- Main branch status:
+  - PR merged into `main`
+  - `scrapling` is now the default production path in both CLI and GUI
+  - failed markets under Scrapling now auto-fallback to `page` on a per-market basis
+  - latest GUI live run can be treated as successful under the current assumption
 
 ### Current status
 
-`scrapling` is now the primary transport and has been verified as the default CLI path for the tested route/date/regions above.
+`scrapling` is now the primary transport and has been verified as the default CLI path for the tested route/date/regions above. The same transport is also the default GUI path.
+
+When a market still ends in a final Scrapling failure state (`page_loading`, `page_parse_failed`, challenge-like states, etc.), runtime now automatically retries just that market through the `page` transport instead of failing the whole scan path immediately.
 
 The `page` transport remains in the codebase as a compatibility fallback and debugging path, but it is no longer the recommended default.
 
 ### Next implementation target (optional future work)
 
 - Add richer per-attempt diagnostics into failed Scrapling `error` messages
-- Consider an automatic `scrapling -> page` fallback only if future live runs show material regressions
 - Expand live validation to more routes / markets before considering removal of the `page` path
 
 ## 1. Project Purpose
@@ -59,13 +76,14 @@ Current workflow:
 4. Parse both Best and Cheapest prices from the sort/results section
 5. Convert prices to CNY when FX is available
 6. Save per-day Markdown reports plus an optional window summary
-7. Use local Edge CDP only when the `page` transport is explicitly selected
+7. Automatically retry only failed markets via local Edge CDP when Scrapling hits retryable final states
 
 ## 2. Active Entry Points
 
 - `gui.py`
   - Main UI for non-technical users
   - Tkinter app
+  - Supports column-header click-to-sort across all dates
 - `cli.py`
   - CLI wrapper around the same scan flow
   - Handles location resolution, smart effective regions, FX conversion, and Markdown output
@@ -115,6 +133,7 @@ Project-local outputs:
 
 - reports: `outputs/reports/`
 - logs: `logs/`
+- failure samples: `logs/failures/`
 
 State directory:
 
@@ -128,6 +147,11 @@ Fallback when `XDG_STATE_HOME` is not set:
 Legacy behavior still supported:
 
 - if an old profile exists under `outputs/*-cdp-profile`, runtime attempts a one-time move into the state directory
+
+Failure logging behavior:
+
+- any final market-level failure now persists a debug artifact under `logs/failures/`
+- the log includes route, transport, region, status, error, source URL, and a page-text excerpt when available
 
 ## 5. Important Current Behavior
 

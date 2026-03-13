@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import queue
+import re
 import threading
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -32,6 +33,19 @@ from skyscanner_neo import (
 
 MAX_LOCATION_SUGGESTIONS = 8
 
+_COLUMN_LABELS = {
+    "date": "日期",
+    "region": "地区",
+    "best_native": "最佳（原币）",
+    "best_cny": "最佳（人民币）",
+    "cheapest_native": "最低价（原币）",
+    "cheapest_cny": "最低价（人民币）",
+    "status": "状态",
+    "error": "错误",
+    "link": "链接",
+}
+_PRICE_COLUMNS = {"best_native", "best_cny", "cheapest_native", "cheapest_cny"}
+
 
 class App:
     def __init__(self, root: tk.Tk) -> None:
@@ -43,6 +57,7 @@ class App:
         self.cli = SimpleCLI()
         self.queue: queue.Queue[tuple[str, Any]] = queue.Queue()
         self.current_output: Path | None = None
+        self._sort_state: dict[str, bool] = {}
 
         default_date = (datetime.now() + timedelta(days=30)).strftime("%Y-%m-%d")
 
@@ -169,15 +184,10 @@ class App:
             "link",
         )
         self.tree = ttk.Treeview(results, columns=columns, show="headings", height=10)
-        self.tree.heading("date", text="日期")
-        self.tree.heading("region", text="地区")
-        self.tree.heading("best_native", text="最佳（原币）")
-        self.tree.heading("best_cny", text="最佳（人民币）")
-        self.tree.heading("cheapest_native", text="最低价（原币）")
-        self.tree.heading("cheapest_cny", text="最低价（人民币）")
-        self.tree.heading("status", text="状态")
-        self.tree.heading("error", text="错误")
-        self.tree.heading("link", text="链接")
+        for col, label in _COLUMN_LABELS.items():
+            self.tree.heading(
+                col, text=label, command=lambda c=col: self._sort_column(c)
+            )
         self.tree.column("date", width=100, anchor="w")
         self.tree.column("region", width=110, anchor="w")
         self.tree.column("best_native", width=120, anchor="e")
@@ -476,6 +486,41 @@ class App:
     def clear_results(self) -> None:
         for item in self.tree.get_children():
             self.tree.delete(item)
+        self._sort_state.clear()
+        for col, label in _COLUMN_LABELS.items():
+            self.tree.heading(col, text=label)
+
+    def _sort_column(self, col: str) -> None:
+        """Sort treeview rows by *col*, toggling asc/desc on repeated clicks."""
+        reverse = self._sort_state.get(col, False)
+        items = [(self.tree.set(iid, col), iid) for iid in self.tree.get_children()]
+
+        if col in _PRICE_COLUMNS:
+            items.sort(key=lambda p: self._parse_price(p[0]), reverse=reverse)
+        else:
+            items.sort(key=lambda p: p[0], reverse=reverse)
+
+        for index, (_, iid) in enumerate(items):
+            self.tree.move(iid, "", index)
+
+        self._sort_state[col] = not reverse
+        arrow = " ↑" if not reverse else " ↓"
+        for c, label in _COLUMN_LABELS.items():
+            self.tree.heading(c, text=label + (arrow if c == col else ""))
+
+    @staticmethod
+    def _parse_price(text: str) -> float:
+        """Extract a numeric value from a display price string for sorting."""
+        if not text or text == "-":
+            return float("inf")
+        cleaned = text.replace(",", "")
+        nums = re.findall(r"[\d.]+", cleaned)
+        if nums:
+            try:
+                return float(nums[0])
+            except ValueError:
+                pass
+        return float("inf")
 
     def set_busy(self, busy: bool) -> None:
         state = tk.DISABLED if busy else tk.NORMAL
