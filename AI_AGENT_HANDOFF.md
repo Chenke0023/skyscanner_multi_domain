@@ -1,6 +1,6 @@
 # AI Agent Handoff
 
-Last updated: 2026-03-12
+Last updated: 2026-03-13
 Project root: `skyscanner_multi_domain`
 
 ## 0. Current Development Status (branch: `feat/scrapling-transport`)
@@ -9,55 +9,57 @@ Project root: `skyscanner_multi_domain`
 
 - Added a new transport path: `--transport scrapling` in CLI `page` command.
 - `run_page_scan(...)` now supports transport routing:
-  - `scrapling` (default)
+  - `scrapling` (primary + default)
   - `page` (Edge CDP fallback)
 - Implemented `compare_via_scrapling(...)` in `skyscanner_neo.py` with:
   - lazy import and graceful `scrapling_unavailable` handling
-  - primary `StealthyFetcher.fetch(...)`
-  - fallback `Fetcher.get(...)`
-- Added Scrapling text extraction helper to avoid relying on `str(page)`:
-  - prefer CSS text extraction (`body *::text`, `body::text`)
-  - fallback to `body` bytes decode
-  - then `text/html/content`
-  - if still empty -> `scrapling_parse_failed`
+  - staged `StealthyFetcher.fetch(...)` retries
+  - HTTP fallback via `Fetcher.get(...)`
+- Added Scrapling text extraction cleanup:
+  - prefer visible HTML text extracted from parsed DOM
+  - strip `script/style/noscript/template` payloads before parsing
+  - fallback to CSS text extraction and raw body/text/html/content accessors
 - GUI call path updated to pass `transport="scrapling"` explicitly.
 - Dependencies updated:
   - `requirements.txt` includes `scrapling[fetchers]>=0.3.0`.
+- Parser updated so loading/challenge hints no longer mask valid Best / Cheapest prices when real price text is already present.
+- Added regression tests for:
+  - script payload pollution in Scrapling text extraction
+  - loading text coexisting with valid price blocks
 
 ### Verified results (latest)
 
 - Syntax check: passed
-- Unit tests: passed (`11/11` in `test_skyscanner_neo.py`)
+- Unit tests: passed (`16/16` across `test_skyscanner_neo.py` and `test_date_window.py`)
 - E2E comparison (same route/date):
   - `--transport page`: returns valid Best/Cheapest prices for tested regions
-  - `--transport scrapling`: still returns no usable price rows in latest run
+  - `--transport scrapling`: returns valid Best/Cheapest prices for default regions (`CN, HK, SG, US, UK, KZ`) on `BJSA -> ALA`, `2026-04-29`
 
-### Current known issue
+### Current status
 
-`scrapling` transport is functional at pipeline level (no crash, outputs still generated), but page content quality is not stable enough on Skyscanner result pages, so parser often gets challenge/loading/insufficient text and yields no final prices.
+`scrapling` is now the primary transport and has been verified as the default CLI path for the tested route/date/regions above.
 
-### Next implementation target (not yet merged)
+The `page` transport remains in the codebase as a compatibility fallback and debugging path, but it is no longer the recommended default.
 
-- Upgrade Scrapling strategy from single-shot fetch to staged retry flow:
-  1. Stealthy fetch
-  2. wait-selector + longer wait retry on loading/parse-failed
-  3. session-based HTTP fallback
-- Prefer reusing local CDP browser context when available (`cdp_url`) for higher parity with `page` transport.
-- Add clearer per-attempt diagnostics into failed `error` messages.
+### Next implementation target (optional future work)
+
+- Add richer per-attempt diagnostics into failed Scrapling `error` messages
+- Consider an automatic `scrapling -> page` fallback only if future live runs show material regressions
+- Expand live validation to more routes / markets before considering removal of the `page` path
 
 ## 1. Project Purpose
 
-This project compares Skyscanner prices across multiple markets by reading real result pages from a local Edge instance over CDP.
+This project compares Skyscanner prices across multiple markets by fetching and parsing real Skyscanner result pages.
 
 Current workflow:
 
-1. Connect to local Edge CDP on port `9222`
-2. Expand the requested date into a date window when enabled
-3. Open the same route/date on multiple Skyscanner market domains
-4. Read page text from the rendered result page
-5. Extract both Best and Cheapest prices
-6. Convert prices to CNY when FX is available
-7. Save per-day Markdown reports plus an optional window summary
+1. Expand the requested date into a date window when enabled
+2. Open the same route/date on multiple Skyscanner market domains
+3. Use Scrapling to fetch page content and extract visible text
+4. Parse both Best and Cheapest prices from the sort/results section
+5. Convert prices to CNY when FX is available
+6. Save per-day Markdown reports plus an optional window summary
+7. Use local Edge CDP only when the `page` transport is explicitly selected
 
 ## 2. Active Entry Points
 
@@ -69,7 +71,7 @@ Current workflow:
   - Handles location resolution, smart effective regions, FX conversion, and Markdown output
 - `skyscanner_neo.py`
   - Scan orchestrator
-  - Browser/CDP detection and page polling
+  - Scrapling transport, optional browser/CDP fallback, and scan routing
   - Neo compatibility path
 - `skyscanner_regions.py`
   - Region config and smart region selection
@@ -181,12 +183,12 @@ Examples:
 
 ### Long-page text capture fix
 
-Older runs could fail when the sort section appeared after the first 12,000 characters of `document.body.innerText`.
+Older runs could fail when the sort section appeared after the first 12,000 characters of captured page text.
 Current behavior now:
 
-- CDP capture keeps up to 80,000 chars
-- capture is anchored around sort-section hints / labels when they appear later in the page
-- parser also applies the same anchored slicing as a fallback guard
+- long page text is sliced around sort-section hints / labels when they appear later in the page
+- parser applies the same anchored slicing as a fallback guard
+- Scrapling text extraction strips embedded script payloads before parsing, reducing false loading/challenge matches
 
 Regression tests now cover:
 
@@ -212,6 +214,8 @@ The parser explicitly distinguishes:
 - `page_text_inconsistent`
 - `page_text_recovered_best`
 
+It now prefers valid parsed prices over transient loading text when both appear in the same page snapshot.
+
 ## 7. Files Most Relevant To Future Work
 
 - `skyscanner_page_parser.py`
@@ -219,7 +223,7 @@ The parser explicitly distinguishes:
 - `skyscanner_regions.py`
   - start here for market defaults and host aliases
 - `skyscanner_neo.py`
-  - start here for CDP/browser/page polling behavior
+  - start here for Scrapling transport behavior, retry logic, and optional `page` fallback
 - `cli.py`
   - start here for output rendering, date-window scanning, and CLI summary behavior
 - `gui.py`
@@ -232,12 +236,14 @@ The parser explicitly distinguishes:
 ### Anti-bot / challenge pages
 
 Skyscanner may still show challenge or loading pages.
-Results depend on the live browser session and can vary with:
+Results depend on live site behavior and can vary with:
 
 - locale redirects
 - challenge state
 - cookies / login state
 - timing of page readiness
+
+The primary mitigation is now Scrapling retry / text-cleanup logic. The `page` transport remains available if manual fallback is needed.
 
 ### JP can still be partial
 
@@ -253,7 +259,7 @@ Recommended order:
 3. Inspect `skyscanner_page_parser.py`, `skyscanner_regions.py`, and `skyscanner_neo.py`
 4. Validate parser changes with `python3 -m pytest -q test_skyscanner_neo.py`
 5. Validate date-window behavior with `python3 -m pytest -q test_date_window.py`
-6. Validate live behavior against a real Edge session before changing label rules again
+6. Validate live Scrapling behavior first; use `--transport page` only if you need to compare against the browser-based fallback
 
 ## 10. Things To Avoid
 
@@ -262,3 +268,4 @@ Recommended order:
 - Do not assume project-local `data/browser-profiles/` is the active runtime path
 - Do not trust generic Best labels in CN/HK/SG without scoped validation
 - Do not delete browser profile state unless the user explicitly accepts losing verification state
+- Do not reframe the project docs back to “Edge/CDP-first” unless the primary transport changes again
