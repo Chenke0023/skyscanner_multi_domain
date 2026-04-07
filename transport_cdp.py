@@ -4,15 +4,14 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import http.client
 import json
 import shutil
 import subprocess
 import time
 from pathlib import Path
 from typing import Any, Optional
-from urllib.error import URLError
 from urllib.parse import urlparse
-from urllib.request import urlopen
 
 import aiohttp
 
@@ -28,6 +27,7 @@ from skyscanner_page_parser import (
 from skyscanner_regions import REGION_HOST_ALIASES
 
 CDP_HTTP = "http://localhost:9222"
+CDP_HOST_CANDIDATES = ("localhost", "::1", "127.0.0.1")
 PROFILE_CACHE_PATHS = (
     "BrowserMetrics",
     "component_crx_cache",
@@ -61,11 +61,26 @@ def profile_dir_for(browser_name: str) -> Path:
 
 
 def detect_cdp_version(port: int = 9222) -> Optional[dict[str, Any]]:
-    try:
-        with urlopen(f"http://localhost:{port}/json/version", timeout=2) as response:
-            return json.loads(response.read().decode("utf-8"))
-    except (URLError, OSError, json.JSONDecodeError, TimeoutError):
-        return None
+    for host in CDP_HOST_CANDIDATES:
+        try:
+            connection = http.client.HTTPConnection(host, port, timeout=2)
+            connection.request("GET", "/json/version")
+            response = connection.getresponse()
+            if response.status != 200:
+                response.read()
+                continue
+            payload = json.loads(response.read().decode("utf-8"))
+        except (OSError, http.client.HTTPException, json.JSONDecodeError, TimeoutError):
+            continue
+        finally:
+            try:
+                connection.close()
+            except Exception:
+                pass
+
+        if isinstance(payload, dict) and payload.get("Browser"):
+            return payload
+    return None
 
 
 def wait_for_cdp(
