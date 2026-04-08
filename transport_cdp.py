@@ -115,7 +115,7 @@ def prune_browser_profile(profile_dir: Path) -> tuple[int, list[str]]:
 
 
 def launch_browser_with_cdp(
-    port: int = 9222, start_url: str = "https://www.skyscanner.com"
+    port: int = 9222, start_url: str = "https://www.skyscanner.co.uk"
 ) -> str:
     browsers = detect_browsers()
     for browser_name in ("edge", "chrome"):
@@ -156,7 +156,7 @@ def ensure_cdp_ready(
     port: int = 9222,
     auto_launch: bool = True,
     wait_timeout: float = 12.0,
-    start_url: str = "https://www.skyscanner.com",
+    start_url: str = "https://www.skyscanner.co.uk",
 ) -> dict[str, Any]:
     cdp_info = detect_cdp_version(port)
     if cdp_info:

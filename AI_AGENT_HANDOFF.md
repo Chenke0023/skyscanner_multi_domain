@@ -68,7 +68,7 @@ Project root: `skyscanner_multi_domain`
 - Unit tests: passed (`15/15` in `test_skyscanner_neo.py`, plus `test_date_window.py`)
 - E2E comparison (same route/date):
   - `--transport page`: returns valid Best/Cheapest prices for tested regions
-  - `--transport scrapling`: returns valid Best/Cheapest prices for default regions (`CN, HK, SG, US, UK, KZ`) on `BJSA -> ALA`, `2026-04-29`
+  - `--transport scrapling`: returns valid Best/Cheapest prices for default regions (`CN, HK, SG, UK, KZ`) on `BJSA -> ALA`, `2026-04-29`
 - Main branch status:
   - Refactor + transport split work merged into `main`
   - `scrapling` is now the default production path in both CLI and GUI
@@ -216,7 +216,6 @@ Effective regions are built from:
 - `CN`
 - `HK`
 - `SG`
-- `US`
 - `UK`
 
 Important:

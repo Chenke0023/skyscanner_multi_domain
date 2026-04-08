@@ -133,7 +133,6 @@ python3 cli.py page -o 北京 -d 阿拉木图 -t 2026-04-29 --transport page
 - `CN`
 - `HK`
 - `SG`
-- `US`
 - `UK`
 
 `JP` / `KR` 不在默认基线里，但仍可手动追加。
