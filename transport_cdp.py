@@ -294,12 +294,17 @@ async def compare_via_pages(
         from scan_orchestrator import _persist_failure_log as _pfl
         persist_failure_log = _pfl
 
+    return_date = getattr(args, "return_date", None)
     route_key = f"{args.origin}_{args.destination}_{args.date.replace('-', '')}"
+    if return_date:
+        route_key = f"{route_key}_rt{return_date.replace('-', '')}"
     total_wait = max(args.timeout, args.page_wait + 60, 45)
     timeout = aiohttp.ClientTimeout(total=total_wait + 15)
     async with aiohttp.ClientSession(timeout=timeout) as session:
         for region in selected_regions:
-            url = build_search_url(region, args.origin, args.destination, args.date)
+            url = build_search_url(
+                region, args.origin, args.destination, args.date, return_date
+            )
             await cdp_open_tab(session, url)
 
         await asyncio.sleep(args.page_wait)
@@ -314,7 +319,9 @@ async def compare_via_pages(
 
             for region in pending_regions.values():
                 expected_path = urlparse(
-                    build_search_url(region, args.origin, args.destination, args.date)
+                    build_search_url(
+                        region, args.origin, args.destination, args.date, return_date
+                    )
                 ).path
                 allowed_hosts = REGION_HOST_ALIASES.get(
                     region.code, {urlparse(region.domain).netloc}
@@ -333,7 +340,11 @@ async def compare_via_pages(
                         price=None,
                         currency=region.currency,
                         source_url=build_search_url(
-                            region, args.origin, args.destination, args.date
+                            region,
+                            args.origin,
+                            args.destination,
+                            args.date,
+                            return_date,
                         ),
                         status="page_missing",
                         error="CDP 列表中未找到对应结果页",
@@ -383,7 +394,11 @@ async def compare_via_pages(
                         price=None,
                         currency=region.currency,
                         source_url=build_search_url(
-                            region, args.origin, args.destination, args.date
+                            region,
+                            args.origin,
+                            args.destination,
+                            args.date,
+                            return_date,
                         ),
                         status="page_parse_failed",
                         error="页面正文未识别到 Best/Cheapest 价格",

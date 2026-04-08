@@ -299,7 +299,10 @@ async def compare_via_scrapling(
     timeout_ms = max(int(getattr(args, "timeout", 30) * 1000), 10000)
     wait_ms = max(int(getattr(args, "page_wait", 8) * 1000), 3000)
     timeout_seconds = max(int(getattr(args, "timeout", 30)), 10)
+    return_date = getattr(args, "return_date", None)
     route_key = f"{args.origin}_{args.destination}_{args.date.replace('-', '')}"
+    if return_date:
+        route_key = f"{route_key}_rt{return_date.replace('-', '')}"
 
     async def fetch_with_stealth(
         url: str,
@@ -328,7 +331,9 @@ async def compare_via_scrapling(
     for region in selected_regions:
         if on_region_start is not None:
             on_region_start(region)
-        url = build_search_url(region, args.origin, args.destination, args.date)
+        url = build_search_url(
+            region, args.origin, args.destination, args.date, return_date
+        )
         page_text = ""
         latest_quote: FlightQuote | None = None
         latest_error: str | None = None
