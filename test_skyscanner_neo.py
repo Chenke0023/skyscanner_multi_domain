@@ -46,13 +46,13 @@ class ExtractPageQuoteTests(unittest.TestCase):
             [
                 "Show results by",
                 "Best option",
-                "US$123",
+                "£123",
                 "Cheapest",
-                "US$111",
+                "£111",
             ]
         )
 
-        quote = extract_page_quote(REGIONS["US"], "https://example.com", page_text)
+        quote = extract_page_quote(REGIONS["UK"], "https://example.com", page_text)
 
         self.assertEqual(quote.best_price, 123.0)
         self.assertEqual(quote.cheapest_price, 111.0)
@@ -64,13 +64,13 @@ class ExtractPageQuoteTests(unittest.TestCase):
                 "Loading results...",
                 "Show results by",
                 "Best",
-                "US$345",
+                "£345",
                 "Cheapest",
-                "US$222",
+                "£222",
             ]
         )
 
-        quote = extract_page_quote(REGIONS["US"], "https://example.com", page_text)
+        quote = extract_page_quote(REGIONS["UK"], "https://example.com", page_text)
 
         self.assertEqual(quote.status, "page_text")
         self.assertEqual(quote.best_price, 345.0)
@@ -81,13 +81,13 @@ class ExtractPageQuoteTests(unittest.TestCase):
             [
                 "Show results by",
                 "Best",
-                "US$345",
+                "£345",
                 "Cheapest",
-                "US$222",
+                "£222",
             ]
         )
 
-        quote = extract_page_quote(REGIONS["US"], "https://example.com", page_text)
+        quote = extract_page_quote(REGIONS["UK"], "https://example.com", page_text)
 
         self.assertEqual(quote.best_price, 345.0)
         self.assertEqual(quote.cheapest_price, 222.0)
@@ -97,14 +97,14 @@ class ExtractPageQuoteTests(unittest.TestCase):
             [
                 "Show results by",
                 "Best",
-                "US$345",
+                "£345",
                 "Cheapest",
-                "US$222",
+                "£222",
             ]
         )
 
         captured = slice_page_text_for_scan(page_text, max_chars=12000, context_chars=120)
-        quote = extract_page_quote(REGIONS["US"], "https://example.com", captured)
+        quote = extract_page_quote(REGIONS["UK"], "https://example.com", captured)
 
         self.assertIn("Show results by", captured)
         self.assertEqual(quote.best_price, 345.0)
@@ -114,14 +114,14 @@ class ExtractPageQuoteTests(unittest.TestCase):
         page_text = ("header\n" * 7000) + "\n".join(
             [
                 "Best",
-                "US$333",
+                "£333",
                 "Cheapest",
-                "US$222",
+                "£222",
             ]
         )
 
         captured = slice_page_text_for_scan(page_text, max_chars=12000, context_chars=120)
-        quote = extract_page_quote(REGIONS["US"], "https://example.com", captured)
+        quote = extract_page_quote(REGIONS["UK"], "https://example.com", captured)
 
         self.assertIn("Best", captured)
         self.assertEqual(quote.best_price, 333.0)
@@ -132,14 +132,14 @@ class ExtractPageQuoteTests(unittest.TestCase):
             [
                 "Show results by",
                 "Best",
-                "US$456",
+                "£456",
                 "Cheapest",
-                "US$234",
+                "£234",
             ]
         )
 
         captured = slice_page_text_for_scan(page_text)
-        quote = extract_page_quote(REGIONS["US"], "https://example.com", captured)
+        quote = extract_page_quote(REGIONS["UK"], "https://example.com", captured)
 
         self.assertLessEqual(len(captured), PAGE_TEXT_CAPTURE_LIMIT)
         self.assertIn("Show results by", captured)
@@ -172,13 +172,13 @@ class ExtractPageQuoteTests(unittest.TestCase):
                 "Carry-on included",
                 "Flexible ticket",
                 "Popular with travellers",
-                "US$333",
+                "£333",
                 "Cheapest",
-                "US$222",
+                "£222",
             ]
         )
 
-        quote = extract_page_quote(REGIONS["US"], "https://example.com", page_text)
+        quote = extract_page_quote(REGIONS["UK"], "https://example.com", page_text)
 
         self.assertEqual(quote.best_price, 333.0)
         self.assertEqual(quote.cheapest_price, 222.0)
@@ -188,11 +188,11 @@ class ExtractPageQuoteTests(unittest.TestCase):
             [
                 "Show results by",
                 "Cheapest",
-                "US$111",
+                "£111",
             ]
         )
 
-        quote = extract_page_quote(REGIONS["US"], "https://example.com", page_text)
+        quote = extract_page_quote(REGIONS["UK"], "https://example.com", page_text)
 
         self.assertIsNone(quote.best_price)
         self.assertEqual(quote.cheapest_price, 111.0)
@@ -203,13 +203,13 @@ class ExtractPageQuoteTests(unittest.TestCase):
             [
                 "Show results by",
                 "Recommended for most travellers",
-                "US$321",
+                "£321",
                 "Cheapest",
-                "US$222",
+                "£222",
             ]
         )
 
-        quote = extract_page_quote(REGIONS["US"], "https://example.com", page_text)
+        quote = extract_page_quote(REGIONS["UK"], "https://example.com", page_text)
 
         self.assertEqual(quote.best_price, 321.0)
         self.assertEqual(quote.cheapest_price, 222.0)
@@ -219,15 +219,15 @@ class ExtractPageQuoteTests(unittest.TestCase):
             [
                 "Show results by",
                 "Best",
-                "US$100",
+                "£100",
                 "Best",
-                "US$300",
+                "£300",
                 "Cheapest",
-                "US$200",
+                "£200",
             ]
         )
 
-        quote = extract_page_quote(REGIONS["US"], "https://example.com", page_text)
+        quote = extract_page_quote(REGIONS["UK"], "https://example.com", page_text)
 
         self.assertEqual(quote.best_price, 300.0)
         self.assertEqual(quote.cheapest_price, 200.0)
@@ -238,13 +238,13 @@ class ExtractPageQuoteTests(unittest.TestCase):
             [
                 "Show results by",
                 "Best",
-                "US$261",
+                "£261",
                 "Cheapest",
-                "US$493",
+                "£493",
             ]
         )
 
-        quote = extract_page_quote(REGIONS["US"], "https://example.com", page_text)
+        quote = extract_page_quote(REGIONS["UK"], "https://example.com", page_text)
 
         self.assertIsNone(quote.best_price)
         self.assertEqual(quote.cheapest_price, 493.0)
