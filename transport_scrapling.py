@@ -13,6 +13,9 @@ from skyscanner_models import FlightQuote, RegionConfig
 from skyscanner_page_parser import extract_page_quote
 
 
+PLAYWRIGHT_PROBE_TEXT_LIMIT = 12000
+
+
 def _extract_scrapling_page_text(page: Any) -> str:
     """Extract parser-friendly page text from Scrapling response."""
     html_value = None
@@ -84,25 +87,154 @@ def _extract_scrapling_page_text(page: Any) -> str:
     return ""
 
 
-def _check_captcha_in_page(page_text: str) -> tuple[bool, str]:
+def _coerce_page_snippet(value: Any) -> str:
+    if callable(value):
+        try:
+            value = value()
+        except Exception:
+            value = None
+    if isinstance(value, (bytes, bytearray)):
+        value = value.decode("utf-8", errors="ignore")
+    if isinstance(value, str):
+        return value
+    return ""
+
+
+def _check_captcha_in_page(page_text: str, page: Any | None = None) -> tuple[bool, str]:
     """Check if page contains captcha indicators.
 
     Returns:
         (has_captcha, captcha_type)
     """
     captcha_indicators = {
+        "px": [
+            "captcha-v2",
+            "/sttc/px/",
+            "perimeterx",
+            "px-captcha",
+            "press and hold",
+        ],
         "cloudflare": ["cf-turnstile", "cloudflare", "turnstile", "cf.challenge"],
         "recaptcha": ["g-recaptcha", "recaptcha", "google recaptcha"],
         "hcaptcha": ["h-captcha", "hcaptcha"],
         "generic": ["captcha", "verify you are human", "human verification"],
     }
 
-    text_lower = page_text.lower()
+    text_parts = [page_text]
+    if page is not None:
+        for attr_name in ("url", "current_url", "html", "content", "body", "text"):
+            text_parts.append(_coerce_page_snippet(getattr(page, attr_name, None)))
+    text_lower = "\n".join(part for part in text_parts if part).lower()
     for captcha_type, indicators in captcha_indicators.items():
         for indicator in indicators:
             if indicator in text_lower:
                 return True, captcha_type
     return False, ""
+
+
+async def _probe_page_with_playwright(
+    url: str, region: RegionConfig, timeout_ms: int
+) -> FlightQuote | None:
+    try:
+        from playwright.async_api import TimeoutError as PlaywrightTimeoutError
+        from playwright.async_api import async_playwright
+    except ImportError:
+        return None
+
+    browser = None
+    context = None
+    page = None
+    page_text = ""
+    final_url = url
+    timed_out = False
+
+    try:
+        async with async_playwright() as playwright:
+            browser = await playwright.chromium.launch(headless=True)
+            context = await browser.new_context(
+                locale=region.locale,
+                extra_http_headers={
+                    "accept-language": region.locale,
+                    "referer": region.domain,
+                },
+            )
+            page = await context.new_page()
+            try:
+                await page.goto(
+                    url,
+                    wait_until="domcontentloaded",
+                    timeout=min(timeout_ms, 12000),
+                )
+            except PlaywrightTimeoutError:
+                timed_out = True
+
+            final_url = page.url or url
+            try:
+                page_text = await page.evaluate(
+                    f"""
+                    () => {{
+                        const text = document.body ? document.body.innerText : '';
+                        return text.slice(0, {PLAYWRIGHT_PROBE_TEXT_LIMIT});
+                    }}
+                    """
+                )
+            except Exception:
+                try:
+                    page_text = await page.text_content("body") or ""
+                except Exception:
+                    page_text = ""
+
+            quote = extract_page_quote(region, final_url, page_text)
+            if quote.price is not None:
+                return quote
+
+            has_captcha, captcha_type = _check_captcha_in_page(page_text)
+            if has_captcha:
+                label = "PX" if captcha_type == "px" else captcha_type.upper()
+                return FlightQuote(
+                    region=region.code,
+                    domain=region.domain,
+                    price=None,
+                    currency=region.currency,
+                    source_url=final_url,
+                    status="page_challenge",
+                    error=f"Playwright 预探测命中 {label} 验证页",
+                )
+
+            if quote.status == "page_loading":
+                quote.error = "Playwright 预探测显示结果页仍在加载"
+                return quote
+
+            if timed_out and page_text:
+                return FlightQuote(
+                    region=region.code,
+                    domain=region.domain,
+                    price=None,
+                    currency=region.currency,
+                    source_url=final_url,
+                    status="page_loading",
+                    error="Playwright 预探测在 domcontentloaded 前超时",
+                )
+    except Exception:
+        return None
+    finally:
+        try:
+            if page is not None:
+                await page.close()
+        except Exception:
+            pass
+        try:
+            if context is not None:
+                await context.close()
+        except Exception:
+            pass
+        try:
+            if browser is not None:
+                await browser.close()
+        except Exception:
+            pass
+
+    return None
 
 
 async def compare_via_scrapling(
@@ -121,25 +253,6 @@ async def compare_via_scrapling(
     if persist_failure_log is None:
         from scan_orchestrator import _persist_failure_log as _pfl
         persist_failure_log = _pfl
-
-    try:
-        from scrapling import Fetcher, StealthyFetcher
-    except ImportError:
-        install_hint = '未安装 Scrapling，请先执行: pip install "scrapling[fetchers]"'
-        return [
-            FlightQuote(
-                region=region.code,
-                domain=region.domain,
-                price=None,
-                currency=region.currency,
-                source_url=build_search_url(
-                    region, args.origin, args.destination, args.date
-                ),
-                status="scrapling_unavailable",
-                error=install_hint,
-            )
-            for region in selected_regions
-        ]
 
     try:
         from captcha_solver import CaptchaSolverClient, CaptchaSolverError
@@ -164,7 +277,8 @@ async def compare_via_scrapling(
             StealthyFetcher.fetch,
             url,
             headless=True,
-            network_idle=True,
+            network_idle=False,
+            load_dom=False,
             timeout=timeout_ms,
             wait=wait_override_ms or wait_ms,
             solve_cloudflare=solve_cloudflare,
@@ -183,6 +297,38 @@ async def compare_via_scrapling(
         page_text = ""
         latest_quote: FlightQuote | None = None
         latest_error: str | None = None
+        detected_captcha_type = ""
+
+        probe_quote = await _probe_page_with_playwright(url, region, timeout_ms)
+        if probe_quote is not None:
+            if persist_failures and probe_quote.price is None:
+                persist_failure_log(
+                    probe_quote,
+                    transport="scrapling",
+                    route_key=route_key,
+                    page_text=page_text,
+                    extra={"locale": region.locale, "probe": "playwright"},
+                )
+            quotes.append(probe_quote)
+            continue
+
+        try:
+            from scrapling import Fetcher, StealthyFetcher
+        except ImportError:
+            install_hint = '未安装 Scrapling，请先执行: pip install "scrapling[fetchers]"'
+            quotes.append(
+                FlightQuote(
+                    region=region.code,
+                    domain=region.domain,
+                    price=None,
+                    currency=region.currency,
+                    source_url=url,
+                    status="scrapling_unavailable",
+                    error=install_hint,
+                )
+            )
+            continue
+
         stealth_attempts = (
             {"solve_cloudflare": False, "wait_ms": wait_ms},
             {"solve_cloudflare": True, "wait_ms": max(wait_ms, 8000)},
@@ -202,6 +348,7 @@ async def compare_via_scrapling(
                 continue
 
             page_text = _extract_scrapling_page_text(page)
+            has_captcha, detected_captcha_type = _check_captcha_in_page(page_text, page)
             if not page_text:
                 latest_quote = FlightQuote(
                     region=region.code,
@@ -216,6 +363,9 @@ async def compare_via_scrapling(
 
             latest_quote = extract_page_quote(region, url, page_text)
             if latest_quote.price is not None:
+                break
+
+            if has_captcha and detected_captcha_type != "cloudflare":
                 break
 
             if latest_quote.status not in {
@@ -233,6 +383,7 @@ async def compare_via_scrapling(
         has_captcha, captcha_type = _check_captcha_in_page(page_text)
         if (
             has_captcha
+            and captcha_type in {"cloudflare", "recaptcha", "hcaptcha"}
             and latest_quote is not None
             and latest_quote.price is None
             and CaptchaSolverClient is not None
