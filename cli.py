@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Optional
 
 from app_paths import PROJECT_ROOT, get_reports_dir
-from date_window import build_date_window
+from date_window import build_date_window, format_trip_date_label
 from fx_rates import FxRateService
 from location_resolver import LocationResolver, ResolvedLocation
 from skyscanner_neo import (
@@ -41,6 +41,13 @@ CombinedQuoteRow = dict[str, str | float | None]
 
 BEST_LABEL = "最佳"
 CHEAPEST_LABEL = "最低价"
+
+
+def _trip_file_token(date: str, return_date: str | None = None) -> str:
+    token = date.replace("-", "")
+    if return_date:
+        token = f"{token}_rt{return_date.replace('-', '')}"
+    return token
 
 
 class SimpleCLI:
@@ -160,12 +167,15 @@ class SimpleCLI:
         origin: str,
         destination: str,
         date: str,
+        return_date: str | None = None,
     ) -> str:
+        trip_mode = "往返" if return_date else "单程"
         lines = [
             f"# Skyscanner 比价结果",
             "",
             f"- 航线: `{origin} -> {destination}`",
-            f"- 日期: `{date}`",
+            f"- 行程: `{trip_mode}`",
+            f"- 日期: `{format_trip_date_label(date, return_date)}`",
             f"- 生成时间: `{datetime.now().isoformat(timespec='seconds')}`",
             "",
         ]
@@ -262,15 +272,24 @@ class SimpleCLI:
         destination: str,
         start_date: str,
         end_date: str,
+        start_return_date: str | None = None,
+        end_return_date: str | None = None,
     ) -> str:
         lines = [
             "# Skyscanner 比价结果（日期窗口）",
             "",
             f"- 航线: `{origin} -> {destination}`",
-            f"- 日期窗口: `{start_date}` ~ `{end_date}`",
+            (
+                f"- 日期窗口: `{start_date}` ~ `{end_date}`"
+                if not start_return_date or not end_return_date
+                else f"- 出发窗口: `{start_date}` ~ `{end_date}`"
+            ),
             f"- 生成时间: `{datetime.now().isoformat(timespec='seconds')}`",
             "",
         ]
+        if start_return_date and end_return_date:
+            lines.insert(3, "- 行程: `往返`")
+            lines.insert(5, f"- 返程窗口: `{start_return_date}` ~ `{end_return_date}`")
         total_rows = sum(len(rows) for _, rows in rows_by_date)
         if total_rows == 0:
             lines.append("暂无可用价格结果。")
@@ -328,13 +347,14 @@ class SimpleCLI:
         origin: str,
         destination: str,
         date: str,
+        return_date: str | None = None,
     ) -> Path:
         output_dir = get_reports_dir()
-        filename = (
-            output_dir / f"edge_page_{origin}_{destination}_{date.replace('-', '')}.md"
-        )
+        filename = output_dir / f"edge_page_{origin}_{destination}_{_trip_file_token(date, return_date)}.md"
         rows = self.simplify_quotes(quotes)
-        payload = self.build_markdown_table(rows, origin, destination, date)
+        payload = self.build_markdown_table(
+            rows, origin, destination, date, return_date=return_date
+        )
         filename.write_text(payload, encoding="utf-8")
         return filename
 
@@ -344,11 +364,12 @@ class SimpleCLI:
         origin: str,
         destination: str,
         date: str,
+        return_date: str | None = None,
     ) -> Path:
         output_dir = get_reports_dir()
         filename = (
             output_dir
-            / f"edge_page_{origin}_{destination}_{date.replace('-', '')}_combined.md"
+            / f"edge_page_{origin}_{destination}_{_trip_file_token(date, return_date)}_combined.md"
         )
         payload = self.build_combined_markdown_table(rows, origin, destination)
         filename.write_text(payload, encoding="utf-8")
@@ -361,16 +382,24 @@ class SimpleCLI:
         destination: str,
         start_date: str,
         end_date: str,
+        start_return_date: str | None = None,
+        end_return_date: str | None = None,
     ) -> Path:
         output_dir = get_reports_dir()
-        start_stamp = start_date.replace("-", "")
-        end_stamp = end_date.replace("-", "")
+        start_stamp = _trip_file_token(start_date, start_return_date)
+        end_stamp = _trip_file_token(end_date, end_return_date)
         filename = (
             output_dir
             / f"edge_page_{origin}_{destination}_{start_stamp}_{end_stamp}_summary.md"
         )
         payload = self.build_window_markdown_table(
-            rows_by_date, origin, destination, start_date, end_date
+            rows_by_date,
+            origin,
+            destination,
+            start_date,
+            end_date,
+            start_return_date=start_return_date,
+            end_return_date=end_return_date,
         )
         filename.write_text(payload, encoding="utf-8")
         return filename

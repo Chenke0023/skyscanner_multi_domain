@@ -8,11 +8,15 @@ Launch:
 from __future__ import annotations
 
 import asyncio
+import calendar
+import importlib.util
+import inspect
+import os
 import queue
 import re
 import threading
 import webbrowser
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 import tkinter as tk
 from tkinter import messagebox, ttk
@@ -20,8 +24,16 @@ from typing import Any
 
 from app_paths import get_reports_dir
 from cli import CombinedQuoteRow, SimpleCLI
-from date_window import build_date_window
-from location_resolver import LocationRecord
+from date_window import (
+    build_date_window,
+    build_round_trip_date_window,
+    format_trip_date_label,
+)
+from location_resolver import (
+    AIRPORT_DATASET_PATH,
+    LOCATION_MAPPINGS_PATH,
+    LocationRecord,
+)
 from skyscanner_neo import (
     DEFAULT_REGIONS,
     NeoCli,
@@ -47,6 +59,291 @@ _COLUMN_LABELS = {
 }
 _PRICE_COLUMNS = {"best_native", "best_cny", "cheapest_native", "cheapest_cny"}
 
+# ── Classic Mac OS 8/9 Platinum Theme ──────────────────────────────────
+_PLATINUM = "#DDDDDD"
+_PLATINUM_DARK = "#BBBBBB"
+_PLATINUM_LIGHT = "#EEEEEE"
+_BUTTON_FACE = "#CCCCCC"
+_HIGHLIGHT = "#336699"
+_FONT_BODY = ("Geneva", 11)
+_FONT_TITLE = ("Geneva", 20, "bold")
+_FONT_BUTTON = ("Geneva", 12, "bold")
+_FONT_HEADING = ("Geneva", 11, "bold")
+_FONT_MONO = ("Monaco", 10)
+_TRIP_TYPE_ONE_WAY = "one_way"
+_TRIP_TYPE_ROUND_TRIP = "round_trip"
+_REQUIRED_APIFY_DATA_FILES = (
+    "browser-helper-file.json",
+    "fingerprint-network-definition.zip",
+    "header-network-definition.zip",
+    "headers-order.json",
+    "input-network-definition.zip",
+)
+
+
+def _find_missing_apify_data_files() -> list[str]:
+    try:
+        import apify_fingerprint_datapoints
+    except ImportError:
+        return _REQUIRED_APIFY_DATA_FILES[:]
+
+    package_dir = Path(inspect.getfile(apify_fingerprint_datapoints)).resolve().parent
+    data_dir = package_dir / "data"
+    return [name for name in _REQUIRED_APIFY_DATA_FILES if not (data_dir / name).exists()]
+
+
+def _collect_startup_issues() -> list[str]:
+    issues: list[str] = []
+
+    if importlib.util.find_spec("scrapling") is None:
+        issues.append("缺少 Scrapling 主抓取依赖，请重新安装项目依赖。")
+
+    if not AIRPORT_DATASET_PATH.exists():
+        issues.append(f"缺少机场数据文件：{AIRPORT_DATASET_PATH}")
+
+    if not LOCATION_MAPPINGS_PATH.exists():
+        issues.append(f"缺少地点映射文件：{LOCATION_MAPPINGS_PATH}")
+
+    missing_apify_files = _find_missing_apify_data_files()
+    if missing_apify_files:
+        missing_text = "、".join(missing_apify_files)
+        issues.append(
+            "缺少 Scrapling 指纹数据资源："
+            f"{missing_text}。请使用最新桌面包重新解压后再试。"
+        )
+
+    return issues
+
+
+def _show_startup_issues_and_exit(issues: list[str]) -> None:
+    root = tk.Tk()
+    root.withdraw()
+    detail = "\n".join(f"{idx}. {issue}" for idx, issue in enumerate(issues, start=1))
+    messagebox.showerror(
+        "启动前自检失败",
+        "应用缺少必要运行条件，已停止启动。\n\n"
+        f"{detail}\n\n"
+        "建议：请重新下载并解压最新桌面包；如果仍失败，再联系我排查。",
+        parent=root,
+    )
+    root.destroy()
+
+
+def _apply_classic_mac_theme(root: tk.Tk) -> None:
+    """Apply a Classic Mac OS 8/9 Platinum appearance."""
+    root.configure(bg=_PLATINUM)
+    root.option_add("*Background", _PLATINUM)
+    root.option_add("*Foreground", "#000000")
+    root.option_add("*selectBackground", _HIGHLIGHT)
+    root.option_add("*selectForeground", "#FFFFFF")
+
+    style = ttk.Style()
+    style.theme_use("clam")
+
+    style.configure(
+        ".", background=_PLATINUM, foreground="#000000",
+        font=_FONT_BODY, borderwidth=1,
+    )
+    style.configure("TFrame", background=_PLATINUM)
+    style.configure("TLabel", background=_PLATINUM, font=_FONT_BODY)
+    style.configure(
+        "TLabelframe", background=_PLATINUM,
+        relief="groove", borderwidth=2,
+    )
+    style.configure(
+        "TLabelframe.Label", background=_PLATINUM,
+        font=_FONT_HEADING, foreground="#000000",
+    )
+    style.configure(
+        "TEntry", fieldbackground="#FFFFFF", font=_FONT_BODY,
+        borderwidth=2, relief="sunken",
+    )
+    style.configure(
+        "TButton", background=_BUTTON_FACE, font=_FONT_BUTTON,
+        borderwidth=2, relief="raised", padding=(10, 4),
+    )
+    style.map(
+        "TButton",
+        background=[("active", _PLATINUM_LIGHT), ("pressed", _PLATINUM_DARK)],
+        relief=[("pressed", "sunken")],
+    )
+    style.configure("TCheckbutton", background=_PLATINUM, font=_FONT_BODY)
+    style.configure("TRadiobutton", background=_PLATINUM, font=_FONT_BODY)
+    style.configure(
+        "Treeview", background="#FFFFFF", fieldbackground="#FFFFFF",
+        font=_FONT_BODY, rowheight=22, borderwidth=1,
+    )
+    style.configure(
+        "Treeview.Heading", font=_FONT_HEADING,
+        background=_BUTTON_FACE, relief="raised", borderwidth=1,
+    )
+    style.map("Treeview.Heading", background=[("active", _PLATINUM_LIGHT)])
+    style.configure(
+        "Horizontal.TProgressbar",
+        background=_HIGHLIGHT, troughcolor=_PLATINUM_DARK, borderwidth=1,
+    )
+
+
+def _draw_pinstripes(canvas: tk.Canvas, _event: tk.Event | None = None) -> None:
+    """Draw classic Mac OS horizontal pinstripes on a canvas."""
+    canvas.delete("stripe")
+    w = canvas.winfo_width()
+    h = canvas.winfo_height()
+    for y in range(0, h, 2):
+        fill = _PLATINUM_DARK if y % 4 == 0 else _PLATINUM_LIGHT
+        canvas.create_line(0, y, w, y, fill=fill, tags="stripe")
+
+
+class DatePickerDialog(tk.Toplevel):
+    def __init__(
+        self,
+        parent: tk.Misc,
+        *,
+        initial_date: str,
+        min_date: str | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self.title("选择日期")
+        self.resizable(False, False)
+        self.transient(parent)
+
+        self.result: str | None = None
+        self._calendar = calendar.Calendar(firstweekday=0)
+        self._min_date = (
+            datetime.strptime(min_date, "%Y-%m-%d").date() if min_date else None
+        )
+        self._selected_date = datetime.strptime(initial_date, "%Y-%m-%d").date()
+        if self._min_date and self._selected_date < self._min_date:
+            self._selected_date = self._min_date
+        self._display_year = self._selected_date.year
+        self._display_month = self._selected_date.month
+        self._month_label_var = tk.StringVar()
+
+        container = ttk.Frame(self, padding=12)
+        container.pack(fill=tk.BOTH, expand=True)
+
+        header = ttk.Frame(container)
+        header.pack(fill=tk.X)
+        ttk.Button(header, text="‹ 上月", command=self._show_previous_month).pack(
+            side=tk.LEFT
+        )
+        ttk.Label(
+            header,
+            textvariable=self._month_label_var,
+            font=_FONT_HEADING,
+        ).pack(side=tk.LEFT, expand=True)
+        ttk.Button(header, text="下月 ›", command=self._show_next_month).pack(
+            side=tk.RIGHT
+        )
+
+        weekday_row = ttk.Frame(container)
+        weekday_row.pack(fill=tk.X, pady=(10, 4))
+        for column, label in enumerate(("一", "二", "三", "四", "五", "六", "日")):
+            ttk.Label(weekday_row, text=label, anchor="center", width=4).grid(
+                row=0, column=column, padx=1
+            )
+
+        self._days_frame = ttk.Frame(container)
+        self._days_frame.pack()
+
+        footer = ttk.Frame(container)
+        footer.pack(fill=tk.X, pady=(10, 0))
+        ttk.Button(footer, text="今天", command=self._choose_today).pack(side=tk.LEFT)
+        ttk.Button(footer, text="取消", command=self.destroy).pack(side=tk.RIGHT)
+
+        self.protocol("WM_DELETE_WINDOW", self.destroy)
+        self.bind("<Escape>", lambda _event: self.destroy())
+
+        self._render_calendar()
+        self.update_idletasks()
+        self._center_over_parent(parent)
+        self.grab_set()
+        self.focus_set()
+
+    def _center_over_parent(self, parent: tk.Misc) -> None:
+        parent.update_idletasks()
+        width = self.winfo_reqwidth()
+        height = self.winfo_reqheight()
+        x = parent.winfo_rootx() + max((parent.winfo_width() - width) // 2, 0)
+        y = parent.winfo_rooty() + max((parent.winfo_height() - height) // 2, 0)
+        self.geometry(f"{width}x{height}+{x}+{y}")
+
+    def _choose_today(self) -> None:
+        today = date.today()
+        if self._min_date and today < self._min_date:
+            today = self._min_date
+        self._select_date(today)
+
+    def _show_previous_month(self) -> None:
+        year = self._display_year
+        month = self._display_month - 1
+        if month == 0:
+            month = 12
+            year -= 1
+        if not self._month_has_selectable_day(year, month):
+            return
+        self._display_year = year
+        self._display_month = month
+        self._render_calendar()
+
+    def _show_next_month(self) -> None:
+        year = self._display_year
+        month = self._display_month + 1
+        if month == 13:
+            month = 1
+            year += 1
+        self._display_year = year
+        self._display_month = month
+        self._render_calendar()
+
+    def _month_has_selectable_day(self, year: int, month: int) -> bool:
+        days = [
+            day_value
+            for week in self._calendar.monthdatescalendar(year, month)
+            for day_value in week
+            if day_value.month == month
+        ]
+        if not days:
+            return False
+        if self._min_date is None:
+            return True
+        return max(days) >= self._min_date
+
+    def _render_calendar(self) -> None:
+        for child in self._days_frame.winfo_children():
+            child.destroy()
+        self._month_label_var.set(f"{self._display_year} 年 {self._display_month:02d} 月")
+
+        for row_index, week in enumerate(
+            self._calendar.monthdatescalendar(self._display_year, self._display_month)
+        ):
+            for column_index, day_value in enumerate(week):
+                is_current_month = day_value.month == self._display_month
+                is_selectable = is_current_month and (
+                    self._min_date is None or day_value >= self._min_date
+                )
+                button = tk.Button(
+                    self._days_frame,
+                    text=str(day_value.day),
+                    width=4,
+                    font=_FONT_BODY,
+                    bg=_BUTTON_FACE if is_selectable else _PLATINUM_LIGHT,
+                    fg="#000000" if is_current_month else "#777777",
+                    relief="raised",
+                    borderwidth=2,
+                    disabledforeground="#999999",
+                    command=lambda current=day_value: self._select_date(current),
+                )
+                if day_value == self._selected_date and is_selectable:
+                    button.configure(bg=_HIGHLIGHT, fg="#FFFFFF", relief="sunken")
+                if not is_selectable:
+                    button.configure(state=tk.DISABLED)
+                button.grid(row=row_index, column=column_index, padx=1, pady=1)
+
+    def _select_date(self, value: date) -> None:
+        self.result = value.strftime("%Y-%m-%d")
+        self.destroy()
+
 
 class App:
     def __init__(self, root: tk.Tk) -> None:
@@ -61,11 +358,14 @@ class App:
         self.current_output: Path | None = None
         self._sort_state: dict[str, bool] = {}
 
-        default_date = (datetime.now() + timedelta(days=30)).strftime("%Y-%m-%d")
+        default_departure = (datetime.now() + timedelta(days=30)).date()
+        default_return = default_departure + timedelta(days=7)
 
         self.origin_var = tk.StringVar(value="北京")
         self.destination_var = tk.StringVar(value="阿拉木图")
-        self.date_var = tk.StringVar(value=default_date)
+        self.trip_type_var = tk.StringVar(value=_TRIP_TYPE_ONE_WAY)
+        self.date_var = tk.StringVar(value=default_departure.strftime("%Y-%m-%d"))
+        self.return_date_var = tk.StringVar(value=default_return.strftime("%Y-%m-%d"))
         self.regions_var = tk.StringVar(value="")
         self.wait_var = tk.StringVar(value="10")
         self.date_window_var = tk.StringVar(value="3")
@@ -82,6 +382,7 @@ class App:
             "origin": [],
             "destination": [],
         }
+        self.return_date_cell: ttk.Frame | None = None
 
         self._build_ui()
         self.origin_var.trace_add("write", self._refresh_location_hints)
@@ -91,24 +392,37 @@ class App:
         self.regions_var.trace_add("write", self._refresh_location_hints)
         self.exact_airport_var.trace_add("write", self._refresh_location_hints)
         self.exact_airport_var.trace_add("write", self._refresh_origin_suggestions)
+        self.trip_type_var.trace_add("write", self._refresh_trip_mode)
+        self.date_var.trace_add("write", self._sync_return_date_minimum)
         self._refresh_location_hints()
         self._refresh_origin_suggestions()
         self._refresh_destination_suggestions()
+        self._refresh_trip_mode()
         self._poll_queue()
 
     def _build_ui(self) -> None:
         outer = ttk.Frame(self.root, padding=16)
         outer.pack(fill=tk.BOTH, expand=True)
 
+        # ── Classic Mac pinstripe banner ──
+        stripe_bar = tk.Canvas(outer, height=8, bg=_PLATINUM, highlightthickness=0)
+        stripe_bar.pack(fill=tk.X, pady=(0, 6))
+        stripe_bar.bind("<Configure>", lambda e: _draw_pinstripes(stripe_bar, e))
+
         title = ttk.Label(
-            outer, text="Skyscanner 多市场比价", font=("SF Pro Display", 20, "bold")
+            outer, text="\u2318  Skyscanner 多市场比价", font=_FONT_TITLE,
         )
         title.pack(anchor="w")
         subtitle = ttk.Label(
             outer,
-            text="基于本机 Edge 结果页直接读取价格，适合不懂命令行的同事直接使用。",
+            text="优先直连抓取结果页；失败市场会自动回退到本机 Edge 读取。",
+            font=_FONT_BODY,
         )
-        subtitle.pack(anchor="w", pady=(4, 14))
+        subtitle.pack(anchor="w", pady=(4, 2))
+
+        stripe_bar2 = tk.Canvas(outer, height=4, bg=_PLATINUM, highlightthickness=0)
+        stripe_bar2.pack(fill=tk.X, pady=(2, 10))
+        stripe_bar2.bind("<Configure>", lambda e: _draw_pinstripes(stripe_bar2, e))
 
         form = ttk.LabelFrame(outer, text="查询参数", padding=12)
         form.pack(fill=tk.X)
@@ -131,33 +445,42 @@ class App:
             hint_var=self.destination_hint_var,
             location_field="destination",
         )
-        self._add_labeled_entry(form, "日期", self.date_var, 0, 2)
+        self._add_trip_type_selector(form, 0, 2)
+        self._add_date_selector(form, "出发日期", self.date_var, 1, 0)
+        self.return_date_cell = self._add_date_selector(
+            form,
+            "返程日期",
+            self.return_date_var,
+            1,
+            1,
+            min_date_var=self.date_var,
+        )
         self._add_labeled_entry(
             form,
             "额外地区代码",
             self.regions_var,
-            1,
+            2,
             0,
             colspan=2,
             hint_var=self.regions_hint_var,
         )
         self._add_labeled_entry(form, "等待秒数", self.wait_var, 1, 2)
-        self._add_labeled_entry(form, "±天数", self.date_window_var, 2, 0)
+        self._add_labeled_entry(form, "±天数", self.date_window_var, 2, 2)
 
         ttk.Checkbutton(
             form,
             text="保存多日期汇总",
             variable=self.combined_summary_var,
-        ).grid(row=2, column=1, sticky="w", pady=(8, 0))
+        ).grid(row=3, column=0, sticky="w", pady=(8, 0))
 
         ttk.Checkbutton(
             form,
             text="严格机场代码（例如北京不自动转成 BJSA）",
             variable=self.exact_airport_var,
-        ).grid(row=3, column=0, columnspan=2, sticky="w", pady=(8, 0))
+        ).grid(row=3, column=1, columnspan=2, sticky="w", pady=(8, 0))
 
         button_row = ttk.Frame(form)
-        button_row.grid(row=3, column=2, sticky="e")
+        button_row.grid(row=4, column=2, sticky="e")
         self.doctor_button = ttk.Button(
             button_row, text="检查环境", command=self.check_environment
         )
@@ -200,7 +523,7 @@ class App:
             self.tree.heading(
                 col, text=label, command=lambda c=col: self._sort_column(c)
             )
-        self.tree.column("date", width=100, anchor="w")
+        self.tree.column("date", width=180, anchor="w")
         self.tree.column("region", width=110, anchor="w")
         self.tree.column("best_native", width=120, anchor="e")
         self.tree.column("best_cny", width=120, anchor="e")
@@ -220,9 +543,13 @@ class App:
 
         logs = ttk.LabelFrame(outer, text="运行日志", padding=12)
         logs.pack(fill=tk.BOTH, expand=True, pady=(12, 0))
-        self.log_text = tk.Text(logs, height=10, wrap="word")
+        self.log_text = tk.Text(
+            logs, height=10, wrap="word", font=_FONT_MONO,
+            bg="#FFFFFF", fg="#000000", insertbackground="#000000",
+            relief="sunken", borderwidth=2,
+        )
         self.log_text.pack(fill=tk.BOTH, expand=True)
-        self.log("界面已启动。先点“检查环境”，确认 Edge/CDP 正常。")
+        self.log("界面已启动。可先点“检查环境”确认主抓取与回退环境，再开始比价。")
 
     def _add_labeled_entry(
         self,
@@ -250,7 +577,10 @@ class App:
         if location_field is not None:
             self.location_entries[location_field] = entry
             listbox = tk.Listbox(
-                cell, height=0, activestyle="none", exportselection=False
+                cell, height=0, activestyle="none", exportselection=False,
+                font=_FONT_BODY, bg="#FFFFFF", fg="#000000",
+                relief="sunken", borderwidth=2,
+                selectbackground=_HIGHLIGHT, selectforeground="#FFFFFF",
             )
             listbox.pack(fill=tk.X, expand=True, pady=(4, 0))
             listbox.pack_forget()
@@ -310,11 +640,102 @@ class App:
                 ),
             )
         if hint_var is not None:
-            hint_label = ttk.Label(cell, textvariable=hint_var, foreground="#666666")
+            hint_label = ttk.Label(cell, textvariable=hint_var, foreground="#555555")
             hint_label.pack(anchor="w", pady=(4, 0))
             if location_field is not None:
                 self.location_hint_labels[location_field] = hint_label
         parent.columnconfigure(column, weight=1)
+
+    def _add_trip_type_selector(
+        self, parent: ttk.Widget, row: int, column: int
+    ) -> ttk.Frame:
+        cell = ttk.Frame(parent)
+        cell.grid(row=row, column=column, sticky="ew", padx=(0, 12), pady=(0, 8))
+        ttk.Label(cell, text="行程类型").pack(anchor="w")
+        radios = ttk.Frame(cell)
+        radios.pack(fill=tk.X, expand=True)
+        ttk.Radiobutton(
+            radios,
+            text="单程",
+            value=_TRIP_TYPE_ONE_WAY,
+            variable=self.trip_type_var,
+        ).pack(side=tk.LEFT)
+        ttk.Radiobutton(
+            radios,
+            text="往返",
+            value=_TRIP_TYPE_ROUND_TRIP,
+            variable=self.trip_type_var,
+        ).pack(side=tk.LEFT, padx=(8, 0))
+        parent.columnconfigure(column, weight=1)
+        return cell
+
+    def _add_date_selector(
+        self,
+        parent: ttk.Widget,
+        label: str,
+        var: tk.StringVar,
+        row: int,
+        column: int,
+        *,
+        min_date_var: tk.StringVar | None = None,
+    ) -> ttk.Frame:
+        cell = ttk.Frame(parent)
+        cell.grid(row=row, column=column, sticky="ew", padx=(0, 12), pady=(0, 8))
+        ttk.Label(cell, text=label).pack(anchor="w")
+
+        picker_row = ttk.Frame(cell)
+        picker_row.pack(fill=tk.X, expand=True)
+        entry = ttk.Entry(picker_row, textvariable=var, state="readonly")
+        entry.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        entry.bind(
+            "<Button-1>",
+            lambda _event, target=var, minimum=min_date_var: self._open_date_picker(
+                target, min_date_var=minimum
+            ),
+        )
+        entry.bind("<Key>", lambda _event: "break")
+        ttk.Button(
+            picker_row,
+            text="选择...",
+            command=lambda target=var, minimum=min_date_var: self._open_date_picker(
+                target, min_date_var=minimum
+            ),
+        ).pack(side=tk.LEFT, padx=(6, 0))
+        parent.columnconfigure(column, weight=1)
+        return cell
+
+    def _open_date_picker(
+        self,
+        target_var: tk.StringVar,
+        *,
+        min_date_var: tk.StringVar | None = None,
+    ) -> None:
+        min_date = min_date_var.get().strip() if min_date_var is not None else None
+        dialog = DatePickerDialog(
+            self.root,
+            initial_date=target_var.get().strip(),
+            min_date=min_date or None,
+        )
+        self.root.wait_window(dialog)
+        if dialog.result:
+            target_var.set(dialog.result)
+
+    def _sync_return_date_minimum(self, *_args: object) -> None:
+        if self.trip_type_var.get() != _TRIP_TYPE_ROUND_TRIP:
+            return
+        departure_date = self.date_var.get().strip()
+        return_date = self.return_date_var.get().strip()
+        if return_date and return_date < departure_date:
+            self.return_date_var.set(departure_date)
+
+    def _refresh_trip_mode(self, *_args: object) -> None:
+        if self.return_date_cell is None:
+            return
+        if self.trip_type_var.get() == _TRIP_TYPE_ROUND_TRIP:
+            self.return_date_cell.grid()
+            self._sync_return_date_minimum()
+        else:
+            self.return_date_cell.grid_remove()
 
     def _format_location_suggestion(self, item: LocationRecord) -> str:
         if item.kind == "metro":
@@ -569,31 +990,47 @@ class App:
 
     def check_environment(self) -> None:
         neo = NeoCli(self.cli.project_root)
+        scrapling_ready = importlib.util.find_spec("scrapling") is not None
         try:
             cdp = ensure_cdp_ready(wait_timeout=8)
-            cdp_line = f"Edge/CDP 9222: {cdp.get('Browser', '已连接')}"
+            cdp_line = f"Edge/CDP 回退: {cdp.get('Browser', '已连接')}"
         except RuntimeError as exc:
             cdp = None
-            cdp_line = f"Edge/CDP 9222: 未连接 ({exc})"
+            cdp_line = f"Edge/CDP 回退: 未连接（仅影响失败市场自动兜底）({exc})"
         lines = [
+            f"Scrapling 主抓取: {'已安装' if scrapling_ready else '未安装'}",
             f"Neo CLI: {'已找到' if neo.available else '未找到'}",
             cdp_line,
             f"项目目录: {self.cli.project_root}",
         ]
-        self.status_var.set(lines[1])
+        self.status_var.set(lines[0] if scrapling_ready else "主抓取环境未就绪")
         for line in lines:
             self.log(line)
-        if not cdp:
-            messagebox.showwarning("环境未就绪", cdp_line)
+        if not scrapling_ready:
+            messagebox.showwarning(
+                "环境未就绪",
+                '未检测到 Scrapling。请先安装依赖，例如执行: pip install -r requirements.txt',
+            )
+        elif not cdp:
+            messagebox.showinfo(
+                "主抓取已就绪",
+                "Scrapling 主抓取可用，但未检测到 Edge/CDP。大多数扫描仍可运行，只是失败市场无法自动回退。",
+            )
         else:
             messagebox.showinfo(
-                "环境已就绪", "已检测到可用的 Edge/CDP 9222，可以开始比价。"
+                "环境已就绪", "主抓取与 Edge/CDP 回退均可用，可以开始比价。"
             )
 
     def start_scan(self) -> None:
         origin = self.origin_var.get().strip()
         destination = self.destination_var.get().strip()
         date = self.date_var.get().strip()
+        trip_type = self.trip_type_var.get()
+        return_date = (
+            self.return_date_var.get().strip()
+            if trip_type == _TRIP_TYPE_ROUND_TRIP
+            else None
+        )
         manual_regions = [
             code.strip().upper()
             for code in self.regions_var.get().split(",")
@@ -601,14 +1038,23 @@ class App:
         ]
 
         if not origin or not destination or not date:
-            messagebox.showerror("参数不完整", "请填写出发地、目的地和日期。")
+            messagebox.showerror("参数不完整", "请填写出发地、目的地和出发日期。")
             return
 
         try:
-            datetime.strptime(date, "%Y-%m-%d")
+            departure_value = datetime.strptime(date, "%Y-%m-%d")
         except ValueError:
-            messagebox.showerror("日期格式错误", "日期必须是 YYYY-MM-DD。")
+            messagebox.showerror("日期格式错误", "出发日期必须是 YYYY-MM-DD。")
             return
+        if return_date:
+            try:
+                return_value = datetime.strptime(return_date, "%Y-%m-%d")
+            except ValueError:
+                messagebox.showerror("日期格式错误", "返程日期必须是 YYYY-MM-DD。")
+                return
+            if return_value < departure_value:
+                messagebox.showerror("日期错误", "返程日期不能早于出发日期。")
+                return
 
         try:
             wait_seconds = int(self.wait_var.get() or "10")
@@ -649,8 +1095,11 @@ class App:
         self._cancel_event.clear()
         self.set_busy(True)
         self.status_var.set("正在运行...")
+        trip_label = format_trip_date_label(date, return_date)
+        trip_mode_label = "往返" if return_date else "单程"
         self.log(
-            f"开始比价: {origin} -> {destination}, {date} (±{date_window_days} 天), "
+            f"开始比价: {origin} -> {destination}, {trip_mode_label} {trip_label} "
+            f"(±{date_window_days} 天), "
             f"地区: {', '.join(regions)} "
             f"(实际代码 {origin_resolved.code} -> {destination_resolved.code})"
         )
@@ -661,6 +1110,7 @@ class App:
                 origin_resolved.code,
                 destination_resolved.code,
                 date,
+                return_date,
                 regions,
                 wait_seconds,
                 date_window_days,
@@ -675,26 +1125,40 @@ class App:
         origin_code: str,
         destination_code: str,
         date: str,
+        return_date: str | None,
         regions: list[str],
         wait_seconds: int,
         date_window_days: int,
         save_combined: bool,
     ) -> None:
         try:
-            date_list = build_date_window(date, date_window_days)
-            total_steps = len(date_list) * len(regions)
+            if return_date:
+                trip_dates = build_round_trip_date_window(
+                    date, return_date, date_window_days
+                )
+            else:
+                trip_dates = [
+                    (current_date, None)
+                    for current_date in build_date_window(date, date_window_days)
+                ]
+            total_steps = len(trip_dates) * len(regions)
             step = 0
             rows_by_date: list[tuple[str, list[dict[str, str | float | None]]]] = []
             outputs: list[Path] = []
 
             self.queue.put(("progress_init", total_steps))
 
-            for date_idx, current_date in enumerate(date_list):
+            for date_idx, (current_date, current_return_date) in enumerate(trip_dates):
                 if self._cancel_event.is_set():
                     self.queue.put(("cancelled", None))
                     return
+                trip_label = format_trip_date_label(current_date, current_return_date)
 
-                def on_region_start(region: Any, _date: str = current_date, _di: int = date_idx) -> None:
+                def on_region_start(
+                    region: Any,
+                    _trip_label: str = trip_label,
+                    _di: int = date_idx,
+                ) -> None:
                     nonlocal step
                     step += 1
                     self.queue.put((
@@ -702,18 +1166,19 @@ class App:
                         {
                             "step": step,
                             "total": total_steps,
-                            "date": _date,
+                            "date": _trip_label,
                             "region_name": region.name,
                         },
                     ))
 
-                self.queue.put(("log", f"开始扫描日期 {current_date}。"))
+                self.queue.put(("log", f"开始扫描行程 {trip_label}。"))
                 quotes = asyncio.run(
                     run_page_scan(
                         origin=origin_code,
                         destination=destination_code,
                         date=current_date,
                         region_codes=regions,
+                        return_date=current_return_date,
                         page_wait=wait_seconds,
                         timeout=30,
                         transport="scrapling",
@@ -726,26 +1191,36 @@ class App:
                     return
 
                 if not quotes:
-                    rows_by_date.append((current_date, []))
+                    rows_by_date.append((trip_label, []))
                     self.queue.put(
-                        ("log", f"日期 {current_date} 未返回结果，请检查地区或环境。")
+                        ("log", f"行程 {trip_label} 未返回结果，请检查地区或环境。")
                     )
                     continue
 
                 quote_dicts = quotes_to_dicts(quotes)
                 output = self.cli.save_results(
-                    quote_dicts, origin_code, destination_code, current_date
+                    quote_dicts,
+                    origin_code,
+                    destination_code,
+                    current_date,
+                    return_date=current_return_date,
                 )
                 outputs.append(output)
                 rows = self.cli.simplify_quotes(quote_dicts)
-                rows_by_date.append((current_date, rows))
+                rows_by_date.append((trip_label, rows))
 
             combined_output = None
             if save_combined and rows_by_date:
-                start_date = date_list[0]
-                end_date = date_list[-1]
+                start_date, start_return_date = trip_dates[0]
+                end_date, end_return_date = trip_dates[-1]
                 combined_output = self.cli.save_window_results(
-                    rows_by_date, origin_code, destination_code, start_date, end_date
+                    rows_by_date,
+                    origin_code,
+                    destination_code,
+                    start_date,
+                    end_date,
+                    start_return_date=start_return_date,
+                    end_return_date=end_return_date,
                 )
             self.queue.put(
                 (
@@ -909,12 +1384,21 @@ class App:
 
 
 def main() -> None:
+    if os.environ.get("SKYSCANNER_GUI_SMOKE_TEST") == "1":
+        root = tk.Tk()
+        _apply_classic_mac_theme(root)
+        root.update_idletasks()
+        root.destroy()
+        print("smoke-ok")
+        return
+
+    startup_issues = _collect_startup_issues()
+    if startup_issues:
+        _show_startup_issues_and_exit(startup_issues)
+        return
+
     root = tk.Tk()
-    style = ttk.Style()
-    try:
-        style.theme_use("aqua")
-    except tk.TclError:
-        pass
+    _apply_classic_mac_theme(root)
     App(root)
     root.mainloop()
 
