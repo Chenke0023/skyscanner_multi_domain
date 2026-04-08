@@ -14,6 +14,7 @@
 - 页面解析：`skyscanner_page_parser.py`
 - 数据模型：`skyscanner_models.py`
 - App 构建脚本：`scripts/build_macos_app.sh`
+- 独立桌面版构建脚本：`scripts/build_macos_standalone_app.sh`
 - Neo 依赖：`vendor/neo`
 - 交接文档：`AI_AGENT_HANDOFF.md`
 
@@ -68,6 +69,21 @@ python3 cli.py page -o 北京 -d 阿拉木图 -t 2026-04-29 --transport page
 
 如果已经构建过 macOS App，也可以双击打开 `Skyscanner 多市场比价.app`。
 
+当前有两种 macOS 打包方式：
+
+- 轻量启动器：`./scripts/build_macos_app.sh`
+  - 只生成一个 `.app` 外壳
+  - 仍依赖当前仓库目录和本机 `python3`
+  - 适合开发机本地自用
+- 独立桌面版：`./scripts/build_macos_standalone_app.sh`
+  - 通过 PyInstaller 打出可单独分发的 `.app`
+  - 内含 Python 解释器与项目代码，不再依赖仓库路径
+  - 首次构建前需要：`python3 -m pip install pyinstaller`
+
+独立桌面版产物位于：
+
+- `dist/Skyscanner 多市场比价.app`
+
 ## 当前功能
 
 - 默认通过 Scrapling 抓取结果页可见正文
@@ -91,6 +107,14 @@ python3 cli.py page -o 北京 -d 阿拉木图 -t 2026-04-29 --transport page
 - 报告：`outputs/reports/`
 - 日志：`logs/`
 - 失败样本：`logs/failures/`
+
+当以源码方式运行时，上述路径都在项目目录内。
+
+当以独立桌面版 `.app` 运行时，运行时文件会落到：
+
+- `~/Library/Application Support/skyscanner_multi_domain/outputs/reports/`
+- `~/Library/Application Support/skyscanner_multi_domain/logs/`
+- `~/Library/Application Support/skyscanner_multi_domain/runtime/`
 
 运行时状态目录：
 
@@ -156,4 +180,11 @@ python3 -m pytest -q test_date_window.py
 
 ```bash
 ./scripts/build_macos_app.sh
+```
+
+构建独立可分发版：
+
+```bash
+python3 -m pip install pyinstaller
+./scripts/build_macos_standalone_app.sh
 ```
