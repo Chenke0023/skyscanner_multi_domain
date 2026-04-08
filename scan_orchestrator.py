@@ -30,13 +30,33 @@ def parse_date(date_str: str) -> tuple[datetime, str, str]:
     return parsed, parsed.strftime("%Y-%m-%d"), parsed.strftime("%y%m%d")
 
 
-def build_search_url(
-    region: RegionConfig, origin: str, destination: str, travel_date: str
+def build_route_key(
+    origin: str, destination: str, travel_date: str, return_date: str | None = None
 ) -> str:
-    _, _, short_date = parse_date(travel_date)
+    token = travel_date.replace("-", "")
+    if return_date:
+        token = f"{token}_rt{return_date.replace('-', '')}"
+    return f"{origin}_{destination}_{token}"
+
+
+def build_search_url(
+    region: RegionConfig,
+    origin: str,
+    destination: str,
+    travel_date: str,
+    return_date: str | None = None,
+) -> str:
+    departure_date, _, short_date = parse_date(travel_date)
+    path = f"{region.domain}/transport/flights/{origin.lower()}/{destination.lower()}/{short_date}/"
+    rtn = "0"
+    if return_date:
+        inbound_date, _, return_short_date = parse_date(return_date)
+        if inbound_date < departure_date:
+            raise ValueError("return_date must be >= travel_date")
+        path = f"{path}{return_short_date}/"
+        rtn = "1"
     return (
-        f"{region.domain}/transport/flights/{origin.lower()}/{destination.lower()}/{short_date}/"
-        "?adultsv2=1&cabinclass=economy&childrenv2=&ref=home&rtn=0"
+        f"{path}?adultsv2=1&cabinclass=economy&childrenv2=&ref=home&rtn={rtn}"
         "&preferdirects=false&outboundaltsenabled=false&inboundaltsenabled=false"
     )
 
@@ -142,6 +162,7 @@ async def run_page_scan(
     destination: str,
     date: str,
     region_codes: list[str],
+    return_date: str | None = None,
     page_wait: int = 8,
     timeout: int = 30,
     transport: str = "scrapling",
@@ -157,13 +178,16 @@ async def run_page_scan(
     normalized_transport = (transport or "scrapling").lower()
     if normalized_transport == "page":
         ensure_cdp_ready(
-            start_url=build_search_url(selected_regions[0], origin, destination, date)
+            start_url=build_search_url(
+                selected_regions[0], origin, destination, date, return_date
+            )
         )
 
     args = argparse.Namespace(
         origin=origin,
         destination=destination,
         date=date,
+        return_date=return_date,
         page_wait=page_wait,
         timeout=timeout,
     )
@@ -183,7 +207,7 @@ async def run_page_scan(
         if fallback_regions:
             ensure_cdp_ready(
                 start_url=build_search_url(
-                    fallback_regions[0], origin, destination, date
+                    fallback_regions[0], origin, destination, date, return_date
                 )
             )
             fallback_quotes = await compare_via_pages(
@@ -207,14 +231,16 @@ async def run_page_scan(
                 domain=region.domain,
                 price=None,
                 currency=region.currency,
-                source_url=build_search_url(region, origin, destination, date),
+                source_url=build_search_url(
+                    region, origin, destination, date, return_date
+                ),
                 status="invalid_transport",
                 error=f"未知 transport: {transport}（可选: scrapling, page）",
             )
             for region in selected_regions
         ]
 
-    route_key = f"{origin}_{destination}_{date.replace('-', '')}"
+    route_key = build_route_key(origin, destination, date, return_date)
     for quote in quotes:
         if quote.price is None and not quote.debug_log_path:
             _persist_failure_log(

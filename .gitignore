@@ -16,3 +16,8 @@ outputs/*-cdp-profile/
 outputs/*.md
 
 Skyscanner 多市场比价.app/
+Skyscanner 多市场比价.spec
+Skyscanner 多市场比价-Standalone.spec
+build/
+dist/
+runtime/

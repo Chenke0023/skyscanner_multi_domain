@@ -4,12 +4,11 @@ import csv
 import json
 from dataclasses import dataclass
 from functools import lru_cache
-from pathlib import Path
 
-from app_paths import PROJECT_ROOT
+from app_paths import DATA_DIR
 
-AIRPORT_DATASET_PATH = PROJECT_ROOT / "data" / "airport-codes.csv"
-LOCATION_MAPPINGS_PATH = PROJECT_ROOT / "data" / "location_mappings.json"
+AIRPORT_DATASET_PATH = DATA_DIR / "airport-codes.csv"
+LOCATION_MAPPINGS_PATH = DATA_DIR / "location_mappings.json"
 VALID_AIRPORT_TYPES = {"large_airport", "medium_airport", "small_airport"}
 MAX_LOCATION_SUGGESTIONS = 8
 

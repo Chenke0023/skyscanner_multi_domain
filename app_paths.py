@@ -2,17 +2,40 @@ from __future__ import annotations
 
 import os
 import shutil
+import sys
 from pathlib import Path
 
 
-PROJECT_ROOT = Path(__file__).resolve().parent
-OUTPUTS_DIR = PROJECT_ROOT / "outputs"
+APP_SLUG = "skyscanner_multi_domain"
+SOURCE_ROOT = Path(__file__).resolve().parent
+
+
+def _resolve_resource_root() -> Path:
+    if getattr(sys, "frozen", False):
+        return Path(getattr(sys, "_MEIPASS", SOURCE_ROOT))
+    return SOURCE_ROOT
+
+
+def _resolve_runtime_root() -> Path:
+    override = os.environ.get("SKYSCANNER_APP_HOME")
+    if override:
+        return Path(override).expanduser()
+
+    if getattr(sys, "frozen", False):
+        return Path.home() / "Library" / "Application Support" / APP_SLUG
+
+    return SOURCE_ROOT
+
+
+PROJECT_ROOT = _resolve_resource_root()
+APP_HOME_DIR = _resolve_runtime_root()
+OUTPUTS_DIR = APP_HOME_DIR / "outputs"
 REPORTS_DIR = OUTPUTS_DIR / "reports"
-LOGS_DIR = PROJECT_ROOT / "logs"
+LOGS_DIR = APP_HOME_DIR / "logs"
 DATA_DIR = PROJECT_ROOT / "data"
-RUNTIME_DIR = Path(os.environ.get("XDG_STATE_HOME", Path.home() / ".local" / "state")) / "skyscanner_multi_domain"
+RUNTIME_DIR = APP_HOME_DIR / "runtime"
 BROWSER_PROFILES_DIR = RUNTIME_DIR / "browser-profiles"
-LEGACY_BROWSER_PROFILES_ROOT = OUTPUTS_DIR
+LEGACY_BROWSER_PROFILES_ROOT = SOURCE_ROOT / "outputs"
 
 
 def ensure_runtime_dirs() -> None:

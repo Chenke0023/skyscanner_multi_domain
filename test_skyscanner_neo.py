@@ -9,6 +9,7 @@ from skyscanner_neo import (
     REGIONS,
     _extract_scrapling_page_text,
     _persist_failure_log,
+    build_search_url,
     extract_page_quote,
     run_page_scan,
 )
@@ -282,6 +283,26 @@ class FailureLogTests(unittest.TestCase):
             self.assertIn("综合最佳", content)
 
 
+class SearchUrlTests(unittest.TestCase):
+    def test_build_search_url_for_one_way(self) -> None:
+        url = build_search_url(REGIONS["HK"], "BJSA", "ALA", "2026-04-29")
+
+        self.assertIn("/transport/flights/bjsa/ala/260429/", url)
+        self.assertIn("rtn=0", url)
+
+    def test_build_search_url_for_round_trip(self) -> None:
+        url = build_search_url(
+            REGIONS["HK"],
+            "BJSA",
+            "ALA",
+            "2026-04-29",
+            return_date="2026-05-03",
+        )
+
+        self.assertIn("/transport/flights/bjsa/ala/260429/260503/", url)
+        self.assertIn("rtn=1", url)
+
+
 class RunPageScanFallbackTests(unittest.TestCase):
     def test_run_page_scan_falls_back_failed_markets_to_page(self) -> None:
         scrapling_quotes = [
@@ -348,6 +369,27 @@ class RunPageScanFallbackTests(unittest.TestCase):
                 page_mock.assert_awaited_once()
                 fallback_regions = page_mock.await_args.args[1]
                 self.assertEqual([region.code for region in fallback_regions], ["HK"])
+
+        asyncio.run(run_case())
+
+    def test_run_page_scan_passes_return_date_to_transport(self) -> None:
+        async def run_case() -> None:
+            with patch(
+                "transport_scrapling.compare_via_scrapling",
+                new=AsyncMock(return_value=[]),
+            ) as scrapling_mock:
+                quotes = await run_page_scan(
+                    origin="BJSA",
+                    destination="ALA",
+                    date="2026-04-29",
+                    return_date="2026-05-03",
+                    region_codes=["CN"],
+                    transport="scrapling",
+                )
+
+                self.assertEqual(quotes, [])
+                args = scrapling_mock.await_args.args[0]
+                self.assertEqual(args.return_date, "2026-05-03")
 
         asyncio.run(run_case())
 
