@@ -132,6 +132,45 @@ def _check_captcha_in_page(page_text: str, page: Any | None = None) -> tuple[boo
     return False, ""
 
 
+def _build_captcha_quote(
+    region: RegionConfig,
+    source_url: str,
+    captcha_type: str,
+    *,
+    source_label: str,
+) -> FlightQuote:
+    normalized_type = (captcha_type or "").strip().lower()
+    if normalized_type == "px":
+        return FlightQuote(
+            region=region.code,
+            domain=region.domain,
+            price=None,
+            currency=region.currency,
+            source_url=source_url,
+            status="px_challenge",
+            error=(
+                f"{source_label} 命中 PX captcha-v2 验证页。"
+                "当前不会自动解此类验证；如已打开浏览器结果页，请在页面中手动完成验证后等待页面模式继续轮询。"
+            ),
+        )
+
+    challenge_label = {
+        "cloudflare": "Cloudflare",
+        "recaptcha": "reCAPTCHA",
+        "hcaptcha": "hCaptcha",
+        "generic": "通用验证码",
+    }.get(normalized_type, normalized_type.upper() or "验证码")
+    return FlightQuote(
+        region=region.code,
+        domain=region.domain,
+        price=None,
+        currency=region.currency,
+        source_url=source_url,
+        status="page_challenge",
+        error=f"{source_label} 命中 {challenge_label} 验证页",
+    )
+
+
 async def _probe_page_with_playwright(
     url: str, region: RegionConfig, timeout_ms: int
 ) -> FlightQuote | None:
@@ -190,15 +229,11 @@ async def _probe_page_with_playwright(
 
             has_captcha, captcha_type = _check_captcha_in_page(page_text)
             if has_captcha:
-                label = "PX" if captcha_type == "px" else captcha_type.upper()
-                return FlightQuote(
-                    region=region.code,
-                    domain=region.domain,
-                    price=None,
-                    currency=region.currency,
-                    source_url=final_url,
-                    status="page_challenge",
-                    error=f"Playwright 预探测命中 {label} 验证页",
+                return _build_captcha_quote(
+                    region,
+                    final_url,
+                    captcha_type,
+                    source_label="Playwright 预探测",
                 )
 
             if quote.status == "page_loading":
@@ -349,6 +384,15 @@ async def compare_via_scrapling(
 
             page_text = _extract_scrapling_page_text(page)
             has_captcha, detected_captcha_type = _check_captcha_in_page(page_text, page)
+            page_url = _coerce_page_snippet(getattr(page, "url", None)) or url
+            if has_captcha and detected_captcha_type == "px":
+                latest_quote = _build_captcha_quote(
+                    region,
+                    page_url,
+                    detected_captcha_type,
+                    source_label="Scrapling",
+                )
+                break
             if not page_text:
                 latest_quote = FlightQuote(
                     region=region.code,
@@ -361,11 +405,17 @@ async def compare_via_scrapling(
                 )
                 continue
 
-            latest_quote = extract_page_quote(region, url, page_text)
+            latest_quote = extract_page_quote(region, page_url, page_text)
             if latest_quote.price is not None:
                 break
 
             if has_captcha and detected_captcha_type != "cloudflare":
+                latest_quote = _build_captcha_quote(
+                    region,
+                    page_url,
+                    detected_captcha_type,
+                    source_label="Scrapling",
+                )
                 break
 
             if latest_quote.status not in {
@@ -375,9 +425,13 @@ async def compare_via_scrapling(
             }:
                 break
 
-        if latest_quote is not None and latest_quote.price is not None:
-            quotes.append(latest_quote)
-            continue
+        if latest_quote is not None:
+            if latest_quote.price is not None:
+                quotes.append(latest_quote)
+                continue
+            if latest_quote.status == "px_challenge":
+                quotes.append(latest_quote)
+                continue
 
         # Check if page contains captcha and try to solve it
         has_captcha, captcha_type = _check_captcha_in_page(page_text)
@@ -439,8 +493,21 @@ async def compare_via_scrapling(
                     follow_redirects=True,
                 )
                 page_text = _extract_scrapling_page_text(page)
+                page_url = _coerce_page_snippet(getattr(page, "url", None)) or url
                 if page_text:
-                    latest_quote = extract_page_quote(region, url, page_text)
+                    has_captcha, detected_captcha_type = _check_captcha_in_page(
+                        page_text,
+                        page,
+                    )
+                    if has_captcha:
+                        latest_quote = _build_captcha_quote(
+                            region,
+                            page_url,
+                            detected_captcha_type,
+                            source_label="Scrapling fallback",
+                        )
+                    else:
+                        latest_quote = extract_page_quote(region, page_url, page_text)
                 elif latest_quote is None:
                     latest_quote = FlightQuote(
                         region=region.code,

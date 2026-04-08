@@ -10,6 +10,7 @@ import shutil
 import subprocess
 import time
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Optional
 from urllib.parse import urlparse
 
@@ -25,6 +26,7 @@ from skyscanner_page_parser import (
     extract_page_quote,
 )
 from skyscanner_regions import REGION_HOST_ALIASES
+from transport_scrapling import _build_captcha_quote, _check_captcha_in_page
 
 CDP_HTTP = "http://localhost:9222"
 CDP_HOST_CANDIDATES = ("localhost", "::1", "127.0.0.1")
@@ -248,6 +250,31 @@ def build_page_text_capture_expression(
     )
 
 
+def _quote_from_cdp_payload(
+    region: RegionConfig,
+    payload: dict[str, Any],
+    fallback_url: str,
+) -> FlightQuote:
+    page_url = str(payload.get("url", fallback_url))
+    page_text = str(payload.get("text", ""))
+    quote = extract_page_quote(region, page_url, page_text)
+    if quote.price is not None:
+        return quote
+
+    has_captcha, captcha_type = _check_captcha_in_page(
+        page_text,
+        SimpleNamespace(url=page_url),
+    )
+    if has_captcha:
+        return _build_captcha_quote(
+            region,
+            page_url,
+            captcha_type,
+            source_label="页面模式",
+        )
+    return quote
+
+
 # ---------------------------------------------------------------------------
 # compare_via_pages — CDP page transport
 # ---------------------------------------------------------------------------
@@ -336,10 +363,10 @@ async def compare_via_pages(
                         ws_url,
                         build_page_text_capture_expression(),
                     )
-                    quote = extract_page_quote(
+                    quote = _quote_from_cdp_payload(
                         region,
-                        payload.get("url", str(page.get("url", ""))),
-                        payload.get("text", ""),
+                        payload,
+                        str(page.get("url", "")),
                     )
                     last_page_text = str(payload.get("text", ""))
                     if quote.price is not None:

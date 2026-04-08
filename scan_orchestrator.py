@@ -16,6 +16,7 @@ from skyscanner_regions import REGIONS, get_selected_regions
 FAILURE_LOG_TEXT_LIMIT = 12000
 SCRAPLING_FALLBACK_STATUSES = {
     "page_challenge",
+    "px_challenge",
     "page_loading",
     "page_parse_failed",
     "scrapling_failed",
