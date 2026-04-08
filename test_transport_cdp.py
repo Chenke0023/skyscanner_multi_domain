@@ -3,7 +3,8 @@ from __future__ import annotations
 import json
 from unittest.mock import MagicMock, patch
 
-from transport_cdp import detect_cdp_version
+from skyscanner_models import RegionConfig
+from transport_cdp import _quote_from_cdp_payload, detect_cdp_version
 
 
 def _build_connection(response_bodies: list[tuple[int, str]]) -> MagicMock:
@@ -45,3 +46,26 @@ def test_detect_cdp_version_skips_404_and_tries_next_host() -> None:
 
     assert info is not None
     assert info["Browser"] == "Edg/146.0.3856.84"
+
+
+def test_quote_from_cdp_payload_marks_px_challenge_from_url() -> None:
+    region = RegionConfig(
+        code="SG",
+        name="Singapore",
+        domain="https://www.skyscanner.sg",
+        currency="SGD",
+        locale="en-SG",
+    )
+
+    quote = _quote_from_cdp_payload(
+        region,
+        {
+            "url": "https://www.skyscanner.com.sg/sttc/px/captcha-v2/index.html",
+            "text": "",
+        },
+        "https://www.skyscanner.sg/transport/flights/bjsa/dps/260502/",
+    )
+
+    assert quote.status == "px_challenge"
+    assert quote.price is None
+    assert "PX" in (quote.error or "")
