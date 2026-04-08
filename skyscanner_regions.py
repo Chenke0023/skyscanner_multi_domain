@@ -7,7 +7,6 @@ from skyscanner_models import RegionConfig
 
 REGIONS: dict[str, RegionConfig] = {
     "CN": RegionConfig("CN", "中国", "https://www.skyscanner.cn", "zh-CN", "CNY"),
-    "US": RegionConfig("US", "美国", "https://www.skyscanner.com", "en-US", "USD"),
     "UK": RegionConfig("UK", "英国", "https://www.skyscanner.co.uk", "en-GB", "GBP"),
     "SG": RegionConfig("SG", "新加坡", "https://www.skyscanner.sg", "en-SG", "SGD"),
     "HK": RegionConfig("HK", "香港", "https://www.skyscanner.com.hk", "zh-HK", "HKD"),
@@ -37,12 +36,11 @@ REGIONS: dict[str, RegionConfig] = {
     "RU": RegionConfig("RU", "俄罗斯", "https://ru.skyscanner.com", "ru-RU", "RUB"),
 }
 
-BASELINE_REGIONS = ("CN", "HK", "SG", "US", "UK")
+BASELINE_REGIONS = ("CN", "HK", "SG", "UK")
 COUNTRY_TO_REGION_CODES: dict[str, tuple[str, ...]] = {
     "CN": ("CN",),
     "HK": ("HK",),
     "SG": ("SG",),
-    "US": ("US",),
     "JP": ("JP",),
     "KR": ("KR",),
     "GB": ("UK",),
@@ -68,7 +66,6 @@ COUNTRY_TO_REGION_CODES: dict[str, tuple[str, ...]] = {
 DEFAULT_REGIONS = list(BASELINE_REGIONS)
 REGION_HOST_ALIASES = {
     "CN": {"www.skyscanner.cn", "www.tianxun.com"},
-    "US": {"www.skyscanner.com"},
     "UK": {"www.skyscanner.co.uk", "www.skyscanner.net"},
     "SG": {"www.skyscanner.sg", "www.skyscanner.com.sg"},
     "HK": {"www.skyscanner.com.hk"},

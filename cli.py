@@ -504,7 +504,7 @@ def build_parser() -> argparse.ArgumentParser:
   python cli.py page -o 北京 -d 阿拉木图 -t 2026-04-29
   python cli.py page -o 北京 -d 阿拉木图 -t 2026-04-29 --date-window 0
   python cli.py page -o PEK -d ALA -t 2026-04-29 --exact-airport
-  python cli.py page -o 北京 -d 阿拉木图 -t 2026-04-29 -r CN,US,UK,SG,HK
+  python cli.py page -o 北京 -d 阿拉木图 -t 2026-04-29 -r CN,UK,SG,HK
         """,
     )
 
