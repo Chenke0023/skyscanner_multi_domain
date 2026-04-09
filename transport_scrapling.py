@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import argparse
+from dataclasses import dataclass
 import re
 from typing import Any, Callable
 
@@ -14,6 +15,12 @@ from skyscanner_page_parser import extract_page_quote
 
 
 PLAYWRIGHT_PROBE_TEXT_LIMIT = 12000
+
+
+@dataclass(frozen=True)
+class ProbeOutcome:
+    quote: FlightQuote
+    page_text: str
 
 
 def _extract_scrapling_page_text(page: Any) -> str:
@@ -173,7 +180,7 @@ def _build_captcha_quote(
 
 async def _probe_page_with_playwright(
     url: str, region: RegionConfig, timeout_ms: int
-) -> FlightQuote | None:
+) -> ProbeOutcome | None:
     try:
         from playwright.async_api import TimeoutError as PlaywrightTimeoutError
         from playwright.async_api import async_playwright
@@ -225,30 +232,36 @@ async def _probe_page_with_playwright(
 
             quote = extract_page_quote(region, final_url, page_text)
             if quote.price is not None:
-                return quote
+                return ProbeOutcome(quote=quote, page_text=page_text)
 
             has_captcha, captcha_type = _check_captcha_in_page(page_text)
             if has_captcha:
-                return _build_captcha_quote(
-                    region,
-                    final_url,
-                    captcha_type,
-                    source_label="Playwright 预探测",
+                return ProbeOutcome(
+                    quote=_build_captcha_quote(
+                        region,
+                        final_url,
+                        captcha_type,
+                        source_label="Playwright 预探测",
+                    ),
+                    page_text=page_text,
                 )
 
             if quote.status == "page_loading":
                 quote.error = "Playwright 预探测显示结果页仍在加载"
-                return quote
+                return ProbeOutcome(quote=quote, page_text=page_text)
 
             if timed_out and page_text:
-                return FlightQuote(
-                    region=region.code,
-                    domain=region.domain,
-                    price=None,
-                    currency=region.currency,
-                    source_url=final_url,
-                    status="page_loading",
-                    error="Playwright 预探测在 domcontentloaded 前超时",
+                return ProbeOutcome(
+                    quote=FlightQuote(
+                        region=region.code,
+                        domain=region.domain,
+                        price=None,
+                        currency=region.currency,
+                        source_url=final_url,
+                        status="page_loading",
+                        error="Playwright 预探测在 domcontentloaded 前超时",
+                    ),
+                    page_text=page_text,
                 )
     except Exception:
         return None
@@ -339,14 +352,20 @@ async def compare_via_scrapling(
         latest_error: str | None = None
         detected_captcha_type = ""
 
-        probe_quote = await _probe_page_with_playwright(url, region, timeout_ms)
-        if probe_quote is not None:
+        probe_outcome = await _probe_page_with_playwright(url, region, timeout_ms)
+        if probe_outcome is not None:
+            if hasattr(probe_outcome, "quote"):
+                probe_quote = probe_outcome.quote
+                probe_page_text = getattr(probe_outcome, "page_text", "")
+            else:
+                probe_quote = probe_outcome
+                probe_page_text = getattr(probe_outcome, "page_text", "")
             if persist_failures and probe_quote.price is None:
                 persist_failure_log(
                     probe_quote,
                     transport="scrapling",
                     route_key=route_key,
-                    page_text=page_text,
+                    page_text=probe_page_text,
                     extra={"locale": region.locale, "probe": "playwright"},
                 )
             quotes.append(probe_quote)

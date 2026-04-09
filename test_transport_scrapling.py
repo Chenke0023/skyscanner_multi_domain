@@ -23,6 +23,53 @@ class CaptchaDetectionTests(unittest.TestCase):
 
 
 class ScraplingRetryTests(unittest.TestCase):
+    def test_compare_via_scrapling_forwards_probe_page_text_to_failure_log(self) -> None:
+        args = argparse.Namespace(
+            origin="BJSA",
+            destination="TBS",
+            date="2026-04-28",
+            timeout=30,
+            page_wait=8,
+        )
+        region = RegionConfig(
+            code="SG",
+            name="Singapore",
+            domain="https://www.skyscanner.sg",
+            currency="SGD",
+            locale="en-SG",
+        )
+        logged: list[tuple[tuple[object, ...], dict[str, object]]] = []
+
+        async def run_case() -> None:
+            with patch(
+                "transport_scrapling._probe_page_with_playwright",
+                return_value=types.SimpleNamespace(
+                    region="SG",
+                    domain="https://www.skyscanner.sg",
+                    price=None,
+                    currency="SGD",
+                    source_url="https://www.skyscanner.sg/transport/flights/bjsa/tbs/260428/",
+                    status="page_parse_failed",
+                    error="页面正文未识别到 Best/Cheapest 价格",
+                    page_text="Show results by\nBest\n£123",
+                ),
+            ):
+                quotes = await compare_via_scrapling(
+                    args,
+                    [region],
+                    persist_failures=True,
+                    build_search_url=lambda *_args: (
+                        "https://www.skyscanner.sg/transport/flights/bjsa/tbs/260428/"
+                    ),
+                    persist_failure_log=lambda *a, **k: logged.append((a, k)) or a[0],
+                )
+
+            self.assertEqual(len(quotes), 1)
+            self.assertEqual(len(logged), 1)
+            self.assertEqual(logged[0][1]["page_text"], "Show results by\nBest\n£123")
+
+        asyncio.run(run_case())
+
     def test_compare_via_scrapling_returns_probe_quote_without_scrapling(self) -> None:
         args = argparse.Namespace(
             origin="BJSA",

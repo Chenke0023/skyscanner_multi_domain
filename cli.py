@@ -24,6 +24,11 @@ from date_window import (
     build_round_trip_date_window,
     format_trip_date_label,
 )
+from failure_replay import (
+    DEFAULT_FAILURE_DIR,
+    build_failure_replay_report,
+    render_failure_replay_report,
+)
 from fx_rates import FxRateService
 from location_resolver import (
     COUNTRY_ROUTE_DEFAULT_AIRPORT_LIMIT,
@@ -64,6 +69,13 @@ def _safe_output_token(value: str) -> str:
     cleaned = "".join(ch if ch.isalnum() else "_" for ch in value.strip())
     cleaned = cleaned.strip("_")
     return cleaned or "unknown"
+
+
+def run_failure_replay_command(args: argparse.Namespace) -> int:
+    failure_dir = Path(args.failure_dir).expanduser()
+    report = build_failure_replay_report(failure_dir)
+    print(render_failure_replay_report(report, show_samples=args.show_samples))
+    return 0 if report.total_samples else 1
 
 
 class SimpleCLI:
@@ -1005,6 +1017,29 @@ def build_parser() -> argparse.ArgumentParser:
     doctor = subparsers.add_parser("doctor", help="检查 Edge/CDP/Neo 环境")
     doctor.add_argument("--capture-file", help="可选：检查某个 Neo export 文件是否存在")
 
+    replay = subparsers.add_parser(
+        "replay-failures",
+        help="回放 logs/failures 并统计各市场 parser 稳定性",
+    )
+    replay.add_argument(
+        "--failure-dir",
+        default=str(DEFAULT_FAILURE_DIR),
+        help="失败样本目录，默认指向运行时 logs/failures",
+    )
+    replay.add_argument(
+        "--show-samples",
+        dest="show_samples",
+        action="store_true",
+        default=True,
+        help="打印逐样本回放详情",
+    )
+    replay.add_argument(
+        "--no-show-samples",
+        dest="show_samples",
+        action="store_false",
+        help="仅打印汇总统计",
+    )
+
     page = subparsers.add_parser("page", help="打开各市场结果页并抽取最佳价和最低价")
     page.add_argument(
         "-o", "--origin", help="出发地（中文、IATA 或 metro code）"
@@ -1082,6 +1117,9 @@ def main() -> int:
         if cdp_info:
             print(f"\n当前 CDP 浏览器: {cdp_info.get('Browser', 'unknown')}")
         return 0
+
+    if args.command == "replay-failures":
+        return run_failure_replay_command(args)
 
     if args.command == "page":
         return asyncio.run(cli.run_page_command(args))

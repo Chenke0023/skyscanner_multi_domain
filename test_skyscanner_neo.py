@@ -280,6 +280,7 @@ class FailureLogTests(unittest.TestCase):
             self.assertIn("transport: scrapling", content)
             self.assertIn("route: BJSA_ALA_20260429", content)
             self.assertIn("locale", content)
+            self.assertIn("parser_snapshot", content)
             self.assertIn("综合最佳", content)
 
 
