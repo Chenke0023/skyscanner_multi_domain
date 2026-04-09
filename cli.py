@@ -19,9 +19,19 @@ from pathlib import Path
 from typing import Optional
 
 from app_paths import PROJECT_ROOT, get_reports_dir
-from date_window import build_date_window, format_trip_date_label
+from date_window import (
+    build_date_window,
+    build_round_trip_date_window,
+    format_trip_date_label,
+)
 from fx_rates import FxRateService
-from location_resolver import LocationResolver, ResolvedLocation
+from location_resolver import (
+    COUNTRY_ROUTE_DEFAULT_AIRPORT_LIMIT,
+    CountryRecord,
+    LocationRecord,
+    LocationResolver,
+    ResolvedLocation,
+)
 from skyscanner_neo import (
     DEFAULT_REGIONS,
     NeoCli,
@@ -50,6 +60,12 @@ def _trip_file_token(date: str, return_date: str | None = None) -> str:
     return token
 
 
+def _safe_output_token(value: str) -> str:
+    cleaned = "".join(ch if ch.isalnum() else "_" for ch in value.strip())
+    cleaned = cleaned.strip("_")
+    return cleaned or "unknown"
+
+
 class SimpleCLI:
     def __init__(self) -> None:
         self.project_root = PROJECT_ROOT
@@ -63,6 +79,122 @@ class SimpleCLI:
 
     def resolve_location(self, value: str, prefer_metro: bool) -> ResolvedLocation:
         return self.location_resolver.resolve_location(value, prefer_metro=prefer_metro)
+
+    def resolve_country(self, value: str) -> CountryRecord:
+        return self.location_resolver.resolve_country(value)
+
+    def build_country_route_plan(
+        self,
+        origin_country_value: str,
+        destination_country_value: str,
+        *,
+        manual_region_codes: list[str] | None = None,
+        airport_limit: int = COUNTRY_ROUTE_DEFAULT_AIRPORT_LIMIT,
+    ) -> tuple[CountryRecord, CountryRecord, list[LocationRecord], list[LocationRecord], list[str]]:
+        origin_country, origin_airports = self.location_resolver.get_country_route_airports(
+            origin_country_value,
+            limit=airport_limit,
+        )
+        destination_country, destination_airports = (
+            self.location_resolver.get_country_route_airports(
+                destination_country_value,
+                limit=airport_limit,
+            )
+        )
+        regions = build_effective_region_codes(
+            origin_country=origin_country.code,
+            destination_country=destination_country.code,
+            manual_region_codes=manual_region_codes or [],
+        )
+        return (
+            origin_country,
+            destination_country,
+            origin_airports,
+            destination_airports,
+            regions,
+        )
+
+    def build_expanded_route_plan(
+        self,
+        *,
+        origin_value: str | None,
+        destination_value: str | None,
+        origin_is_country: bool,
+        destination_is_country: bool,
+        prefer_origin_metro: bool,
+        manual_region_codes: list[str] | None = None,
+        airport_limit: int = COUNTRY_ROUTE_DEFAULT_AIRPORT_LIMIT,
+    ) -> tuple[str, str, str, str, list[LocationRecord], list[LocationRecord], list[str]]:
+        if origin_is_country:
+            if not origin_value:
+                raise ValueError("缺少出发国家。")
+            origin_country, origin_points = self.location_resolver.get_country_route_airports(
+                origin_value,
+                limit=airport_limit,
+            )
+            origin_label = origin_country.name
+            origin_file_token = f"{origin_country.code}_ANY"
+            origin_region_country = origin_country.code
+        else:
+            if not origin_value:
+                raise ValueError("缺少出发地。")
+            origin = self.resolve_location(origin_value, prefer_metro=prefer_origin_metro)
+            origin_points = [
+                LocationRecord(
+                    name=origin.name,
+                    code=origin.code,
+                    kind=origin.kind,
+                    municipality=origin.municipality,
+                    country=origin.country,
+                )
+            ]
+            origin_label = origin.query or origin.name or origin.code
+            origin_file_token = origin.code
+            origin_region_country = origin.country
+
+        if destination_is_country:
+            if not destination_value:
+                raise ValueError("缺少目的国家。")
+            destination_country, destination_points = (
+                self.location_resolver.get_country_route_airports(
+                    destination_value,
+                    limit=airport_limit,
+                )
+            )
+            destination_label = destination_country.name
+            destination_file_token = f"{destination_country.code}_ANY"
+            destination_region_country = destination_country.code
+        else:
+            if not destination_value:
+                raise ValueError("缺少目的地。")
+            destination = self.resolve_location(destination_value, prefer_metro=False)
+            destination_points = [
+                LocationRecord(
+                    name=destination.name,
+                    code=destination.code,
+                    kind=destination.kind,
+                    municipality=destination.municipality,
+                    country=destination.country,
+                )
+            ]
+            destination_label = destination.query or destination.name or destination.code
+            destination_file_token = destination.code
+            destination_region_country = destination.country
+
+        regions = build_effective_region_codes(
+            origin_country=origin_region_country,
+            destination_country=destination_region_country,
+            manual_region_codes=manual_region_codes or [],
+        )
+        return (
+            origin_label,
+            destination_label,
+            origin_file_token,
+            destination_file_token,
+            origin_points,
+            destination_points,
+            regions,
+        )
 
     def build_effective_regions(
         self,
@@ -96,7 +228,28 @@ class SimpleCLI:
     ) -> Optional[float]:
         return self.fx_rates.convert_to_cny(price, currency)
 
-    def simplify_quotes(self, quotes: list[QuoteRow]) -> list[SimplifiedQuoteRow]:
+    def _sort_simplified_rows(
+        self, rows: list[SimplifiedQuoteRow]
+    ) -> list[SimplifiedQuoteRow]:
+        rows.sort(
+            key=lambda item: (
+                item["cheapest_cny_price"] is None,
+                item["cheapest_cny_price"]
+                if isinstance(item["cheapest_cny_price"], (int, float))
+                else float("inf"),
+                item["best_cny_price"] is None,
+                item["best_cny_price"]
+                if isinstance(item["best_cny_price"], (int, float))
+                else float("inf"),
+                str(item.get("route") or ""),
+                str(item["region_name"]),
+            )
+        )
+        return rows
+
+    def simplify_quotes(
+        self, quotes: list[QuoteRow], *, route_label: str | None = None
+    ) -> list[SimplifiedQuoteRow]:
         simplified: list[SimplifiedQuoteRow] = []
         for quote in quotes:
             currency = quote.get("currency")
@@ -144,22 +297,10 @@ class SimpleCLI:
                     "link": source_url,
                     "status": str(quote.get("status") or "-"),
                     "error": str(quote.get("error") or "-"),
+                    "route": route_label or "-",
                 }
             )
-        simplified.sort(
-            key=lambda item: (
-                item["cheapest_cny_price"] is None,
-                item["cheapest_cny_price"]
-                if isinstance(item["cheapest_cny_price"], (int, float))
-                else float("inf"),
-                item["best_cny_price"] is None,
-                item["best_cny_price"]
-                if isinstance(item["best_cny_price"], (int, float))
-                else float("inf"),
-                str(item["region_name"]),
-            )
-        )
-        return simplified
+        return self._sort_simplified_rows(simplified)
 
     def build_markdown_table(
         self,
@@ -185,8 +326,8 @@ class SimpleCLI:
 
         lines.extend(
             [
-                "| 地区 | 最佳（原币） | 最佳（人民币） | 最低价（原币） | 最低价（人民币） | 状态 | 错误 | 链接 |",
-                "| --- | ---: | ---: | ---: | ---: | --- | --- | --- |",
+                "| 航段 | 地区 | 最佳（原币） | 最佳（人民币） | 最低价（原币） | 最低价（人民币） | 状态 | 错误 | 链接 |",
+                "| --- | --- | ---: | ---: | ---: | ---: | --- | --- | --- |",
             ]
         )
         for row in rows:
@@ -201,7 +342,7 @@ class SimpleCLI:
                 else "-"
             )
             lines.append(
-                f"| {row['region_name']} | {row.get('best_display_price') or '-'} | {best_cny_text} | {row.get('cheapest_display_price') or '-'} | {cheapest_cny_text} | {row.get('status') or '-'} | {row.get('error') or '-'} | [打开结果页]({row['link']}) |"
+                f"| {row.get('route') or '-'} | {row['region_name']} | {row.get('best_display_price') or '-'} | {best_cny_text} | {row.get('cheapest_display_price') or '-'} | {cheapest_cny_text} | {row.get('status') or '-'} | {row.get('error') or '-'} | [打开结果页]({row['link']}) |"
             )
         return "\n".join(lines) + "\n"
 
@@ -229,8 +370,8 @@ class SimpleCLI:
 
         lines.extend(
             [
-                "| 日期 | 地区 | 最佳（原币） | 最佳（人民币） | 最低价（原币） | 最低价（人民币） | 状态 | 错误 | 链接 |",
-                "| --- | --- | ---: | ---: | ---: | ---: | --- | --- | --- |",
+                "| 日期 | 航段 | 地区 | 最佳（原币） | 最佳（人民币） | 最低价（原币） | 最低价（人民币） | 状态 | 错误 | 链接 |",
+                "| --- | --- | --- | ---: | ---: | ---: | ---: | --- | --- | --- |",
             ]
         )
         for row in rows:
@@ -251,6 +392,7 @@ class SimpleCLI:
                 + " | ".join(
                     [
                         str(row.get("date") or "-"),
+                        str(row.get("route") or "-"),
                         str(row.get("region_name") or "-"),
                         str(row.get("best_display_price") or "-"),
                         best_cny_text,
@@ -297,8 +439,8 @@ class SimpleCLI:
 
         lines.extend(
             [
-                "| 日期 | 地区 | 最佳（原币） | 最佳（人民币） | 最低价（原币） | 最低价（人民币） | 状态 | 错误 | 链接 |",
-                "| --- | --- | ---: | ---: | ---: | ---: | --- | --- | --- |",
+                "| 日期 | 航段 | 地区 | 最佳（原币） | 最佳（人民币） | 最低价（原币） | 最低价（人民币） | 状态 | 错误 | 链接 |",
+                "| --- | --- | --- | ---: | ---: | ---: | ---: | --- | --- | --- |",
             ]
         )
         for date, rows in rows_by_date:
@@ -314,7 +456,7 @@ class SimpleCLI:
                     else "-"
                 )
                 lines.append(
-                    f"| {date} | {row['region_name']} | {row.get('best_display_price') or '-'} | {best_cny_text} | {row.get('cheapest_display_price') or '-'} | {cheapest_cny_text} | {row.get('status') or '-'} | {row.get('error') or '-'} | [打开结果页]({row['link']}) |"
+                    f"| {date} | {row.get('route') or '-'} | {row['region_name']} | {row.get('best_display_price') or '-'} | {best_cny_text} | {row.get('cheapest_display_price') or '-'} | {cheapest_cny_text} | {row.get('status') or '-'} | {row.get('error') or '-'} | [打开结果页]({row['link']}) |"
                 )
         return "\n".join(lines) + "\n"
 
@@ -323,9 +465,9 @@ class SimpleCLI:
             print("\n暂无可用价格结果。")
             return
         print(
-            "\n| 地区 | 最佳（原币） | 最佳（人民币） | 最低价（原币） | 最低价（人民币） | 状态 | 错误 | 链接 |"
+            "\n| 航段 | 地区 | 最佳（原币） | 最佳（人民币） | 最低价（原币） | 最低价（人民币） | 状态 | 错误 | 链接 |"
         )
-        print("| --- | ---: | ---: | ---: | ---: | --- | --- | --- |")
+        print("| --- | --- | ---: | ---: | ---: | ---: | --- | --- | --- |")
         for row in rows:
             best_cny_text = (
                 f"¥{row['best_cny_price']:,.2f}"
@@ -338,7 +480,7 @@ class SimpleCLI:
                 else "-"
             )
             print(
-                f"| {row['region_name']} | {row.get('best_display_price') or '-'} | {best_cny_text} | {row.get('cheapest_display_price') or '-'} | {cheapest_cny_text} | {row.get('status') or '-'} | {row.get('error') or '-'} | {row['link']} |"
+                f"| {row.get('route') or '-'} | {row['region_name']} | {row.get('best_display_price') or '-'} | {best_cny_text} | {row.get('cheapest_display_price') or '-'} | {cheapest_cny_text} | {row.get('status') or '-'} | {row.get('error') or '-'} | {row['link']} |"
             )
 
     def save_results(
@@ -348,12 +490,45 @@ class SimpleCLI:
         destination: str,
         date: str,
         return_date: str | None = None,
+        route_label: str | None = None,
+        file_origin_token: str | None = None,
+        file_destination_token: str | None = None,
     ) -> Path:
         output_dir = get_reports_dir()
-        filename = output_dir / f"edge_page_{origin}_{destination}_{_trip_file_token(date, return_date)}.md"
-        rows = self.simplify_quotes(quotes)
+        filename = output_dir / (
+            f"edge_page_{_safe_output_token(file_origin_token or origin)}_"
+            f"{_safe_output_token(file_destination_token or destination)}_"
+            f"{_trip_file_token(date, return_date)}.md"
+        )
+        rows = self.simplify_quotes(quotes, route_label=route_label)
         payload = self.build_markdown_table(
             rows, origin, destination, date, return_date=return_date
+        )
+        filename.write_text(payload, encoding="utf-8")
+        return filename
+
+    def save_simplified_results(
+        self,
+        rows: list[SimplifiedQuoteRow],
+        origin: str,
+        destination: str,
+        date: str,
+        return_date: str | None = None,
+        file_origin_token: str | None = None,
+        file_destination_token: str | None = None,
+    ) -> Path:
+        output_dir = get_reports_dir()
+        filename = output_dir / (
+            f"edge_page_{_safe_output_token(file_origin_token or origin)}_"
+            f"{_safe_output_token(file_destination_token or destination)}_"
+            f"{_trip_file_token(date, return_date)}.md"
+        )
+        payload = self.build_markdown_table(
+            rows,
+            origin,
+            destination,
+            date,
+            return_date=return_date,
         )
         filename.write_text(payload, encoding="utf-8")
         return filename
@@ -365,11 +540,17 @@ class SimpleCLI:
         destination: str,
         date: str,
         return_date: str | None = None,
+        file_origin_token: str | None = None,
+        file_destination_token: str | None = None,
     ) -> Path:
         output_dir = get_reports_dir()
         filename = (
             output_dir
-            / f"edge_page_{origin}_{destination}_{_trip_file_token(date, return_date)}_combined.md"
+            / (
+                f"edge_page_{_safe_output_token(file_origin_token or origin)}_"
+                f"{_safe_output_token(file_destination_token or destination)}_"
+                f"{_trip_file_token(date, return_date)}_combined.md"
+            )
         )
         payload = self.build_combined_markdown_table(rows, origin, destination)
         filename.write_text(payload, encoding="utf-8")
@@ -384,13 +565,19 @@ class SimpleCLI:
         end_date: str,
         start_return_date: str | None = None,
         end_return_date: str | None = None,
+        file_origin_token: str | None = None,
+        file_destination_token: str | None = None,
     ) -> Path:
         output_dir = get_reports_dir()
         start_stamp = _trip_file_token(start_date, start_return_date)
         end_stamp = _trip_file_token(end_date, end_return_date)
         filename = (
             output_dir
-            / f"edge_page_{origin}_{destination}_{start_stamp}_{end_stamp}_summary.md"
+            / (
+                f"edge_page_{_safe_output_token(file_origin_token or origin)}_"
+                f"{_safe_output_token(file_destination_token or destination)}_"
+                f"{start_stamp}_{end_stamp}_summary.md"
+            )
         )
         payload = self.build_window_markdown_table(
             rows_by_date,
@@ -404,10 +591,48 @@ class SimpleCLI:
         filename.write_text(payload, encoding="utf-8")
         return filename
 
-    async def run_page_command(self, args: argparse.Namespace) -> int:
-        manual_regions = [
-            code.strip().upper() for code in args.regions.split(",") if code.strip()
-        ]
+    @staticmethod
+    def _display_price_value(value: str | float | None) -> float:
+        if not isinstance(value, str) or not value or value == "-":
+            return float("inf")
+        try:
+            return float(value.replace(",", "").split()[0])
+        except (IndexError, ValueError):
+            return float("inf")
+
+    def _row_selection_key(self, row: SimplifiedQuoteRow) -> tuple[float, float, float, float]:
+        cheapest_cny = row.get("cheapest_cny_price")
+        best_cny = row.get("best_cny_price")
+        cheapest_native = self._display_price_value(row.get("cheapest_display_price"))
+        best_native = self._display_price_value(row.get("best_display_price"))
+        return (
+            float(cheapest_cny) if isinstance(cheapest_cny, (int, float)) else float("inf"),
+            float(best_cny) if isinstance(best_cny, (int, float)) else float("inf"),
+            cheapest_native,
+            best_native,
+        )
+
+    def _pick_better_row(
+        self,
+        current: SimplifiedQuoteRow | None,
+        candidate: SimplifiedQuoteRow,
+    ) -> SimplifiedQuoteRow:
+        if current is None:
+            return candidate
+        if self._row_selection_key(candidate) < self._row_selection_key(current):
+            return candidate
+        return current
+
+    async def _run_point_to_point_page_command(
+        self,
+        args: argparse.Namespace,
+        *,
+        manual_regions: list[str],
+    ) -> int:
+        if not args.origin or not args.destination:
+            print("参数错误: 点对点模式下必须同时提供 --origin 和 --destination。")
+            return 2
+
         origin, destination, regions = self.build_effective_regions(
             args.origin,
             args.destination,
@@ -417,30 +642,46 @@ class SimpleCLI:
         print(f"本次实际地区: {', '.join(regions)}")
 
         date_window_days = max(int(getattr(args, "date_window", 0)), 0)
-        date_list = build_date_window(args.date, date_window_days)
+        try:
+            trip_dates = (
+                build_round_trip_date_window(
+                    args.date, args.return_date, date_window_days
+                )
+                if args.return_date
+                else [
+                    (date, None)
+                    for date in build_date_window(args.date, date_window_days)
+                ]
+            )
+        except ValueError as exc:
+            print(f"日期参数错误: {exc}")
+            return 2
         rows_by_date: list[tuple[str, list[SimplifiedQuoteRow]]] = []
         any_rows = False
         any_winner = False
 
-        for date in date_list:
-            print(f"\n日期: {date}")
+        for date, return_date in trip_dates:
+            trip_label = format_trip_date_label(date, return_date)
+            route_label = f"{origin.code} -> {destination.code}"
+            print(f"\n日期: {trip_label}")
             quotes = await run_page_scan(
                 origin=origin.code,
                 destination=destination.code,
                 date=date,
                 region_codes=regions,
+                return_date=return_date,
                 page_wait=args.wait,
                 timeout=args.timeout,
                 transport=args.transport,
             )
             if not quotes:
                 print("没有返回任何结果。检查地区代码或 Edge/CDP 环境。")
-                rows_by_date.append((date, []))
+                rows_by_date.append((trip_label, []))
                 continue
 
             quote_dicts = quotes_to_dicts(quotes)
-            rows = self.simplify_quotes(quote_dicts)
-            rows_by_date.append((date, rows))
+            rows = self.simplify_quotes(quote_dicts, route_label=route_label)
+            rows_by_date.append((trip_label, rows))
             if rows:
                 any_rows = True
 
@@ -479,15 +720,26 @@ class SimpleCLI:
 
             if args.save:
                 saved = self.save_results(
-                    quote_dicts, origin.code, destination.code, date
+                    quote_dicts,
+                    origin.code,
+                    destination.code,
+                    date,
+                    return_date=return_date,
+                    route_label=route_label,
                 )
                 print(f"结果已保存到: {saved}")
 
         if args.save and rows_by_date:
-            start_date = date_list[0]
-            end_date = date_list[-1]
+            start_date, start_return_date = trip_dates[0]
+            end_date, end_return_date = trip_dates[-1]
             summary_path = self.save_window_results(
-                rows_by_date, origin.code, destination.code, start_date, end_date
+                rows_by_date,
+                origin.code,
+                destination.code,
+                start_date,
+                end_date,
+                start_return_date=start_return_date,
+                end_return_date=end_return_date,
             )
             print(f"窗口汇总已保存到: {summary_path}")
 
@@ -498,6 +750,214 @@ class SimpleCLI:
         if not any_rows:
             return 1
         return 0 if any_winner else 2
+
+    async def _run_expanded_route_page_command(
+        self,
+        args: argparse.Namespace,
+        *,
+        manual_regions: list[str],
+    ) -> int:
+        airport_limit = max(
+            int(
+                getattr(
+                    args,
+                    "country_airport_limit",
+                    COUNTRY_ROUTE_DEFAULT_AIRPORT_LIMIT,
+                )
+            ),
+            1,
+        )
+        try:
+            (
+                origin_label,
+                destination_label,
+                origin_file_token,
+                destination_file_token,
+                origin_points,
+                destination_points,
+                regions,
+            ) = self.build_expanded_route_plan(
+                origin_value=getattr(args, "origin_country", None) or getattr(args, "origin", None),
+                destination_value=getattr(args, "destination_country", None) or getattr(args, "destination", None),
+                origin_is_country=bool(getattr(args, "origin_country", None)),
+                destination_is_country=bool(getattr(args, "destination_country", None)),
+                prefer_origin_metro=not getattr(args, "exact_airport", False),
+                manual_region_codes=manual_regions,
+                airport_limit=airport_limit,
+            )
+        except ValueError as exc:
+            print(f"扩展模式参数错误: {exc}")
+            return 2
+
+        mode_label = []
+        mode_label.append("国家" if getattr(args, "origin_country", None) else "地点")
+        mode_label.append("国家" if getattr(args, "destination_country", None) else "地点")
+        print(f"扩展模式: {'-'.join(mode_label)} {origin_label} -> {destination_label}")
+        print(
+            "出发候选机场: "
+            + ", ".join(
+                f"{airport.code}({airport.municipality or airport.name})"
+                for airport in origin_points
+            )
+        )
+        print(
+            "目的候选机场: "
+            + ", ".join(
+                f"{airport.code}({airport.municipality or airport.name})"
+                for airport in destination_points
+            )
+        )
+        print(f"本次实际地区: {', '.join(regions)}")
+
+        date_window_days = max(int(getattr(args, "date_window", 0)), 0)
+        try:
+            trip_dates = (
+                build_round_trip_date_window(
+                    args.date, args.return_date, date_window_days
+                )
+                if args.return_date
+                else [
+                    (date, None)
+                    for date in build_date_window(args.date, date_window_days)
+                ]
+            )
+        except ValueError as exc:
+            print(f"日期参数错误: {exc}")
+            return 2
+
+        rows_by_date: list[tuple[str, list[SimplifiedQuoteRow]]] = []
+        any_rows = False
+        any_winner = False
+        pair_count = len(origin_points) * len(destination_points)
+
+        for date, return_date in trip_dates:
+            trip_label = format_trip_date_label(date, return_date)
+            print(f"\n日期: {trip_label}，共 {pair_count} 个候选航段")
+            best_rows_by_region: dict[str, SimplifiedQuoteRow] = {}
+            scanned_pairs = 0
+
+            for origin_airport in origin_points:
+                for destination_airport in destination_points:
+                    scanned_pairs += 1
+                    route_label = f"{origin_airport.code} -> {destination_airport.code}"
+                    print(f"  [{scanned_pairs}/{pair_count}] 扫描 {route_label}")
+                    quotes = await run_page_scan(
+                        origin=origin_airport.code,
+                        destination=destination_airport.code,
+                        date=date,
+                        region_codes=regions,
+                        return_date=return_date,
+                        page_wait=args.wait,
+                        timeout=args.timeout,
+                        transport=args.transport,
+                    )
+                    if not quotes:
+                        continue
+
+                    rows = self.simplify_quotes(
+                        quotes_to_dicts(quotes),
+                        route_label=route_label,
+                    )
+                    for row in rows:
+                        region_name = str(row.get("region_name") or "-")
+                        best_rows_by_region[region_name] = self._pick_better_row(
+                            best_rows_by_region.get(region_name),
+                            row,
+                        )
+
+            rows = self._sort_simplified_rows(list(best_rows_by_region.values()))
+            rows_by_date.append((trip_label, rows))
+            if rows:
+                any_rows = True
+
+            self.print_quotes(rows)
+
+            best_winner = next(
+                (
+                    row
+                    for row in rows
+                    if isinstance(row.get("best_cny_price"), (int, float))
+                ),
+                None,
+            )
+            cheapest_winner = next(
+                (
+                    row
+                    for row in rows
+                    if isinstance(row.get("cheapest_cny_price"), (int, float))
+                ),
+                None,
+            )
+            if best_winner:
+                any_winner = True
+                print(
+                    "最佳: ¥{price:,.2f} 来自 {region}，航段 {route}".format(
+                        price=float(best_winner["best_cny_price"]),
+                        region=best_winner["region_name"],
+                        route=best_winner.get("route") or "-",
+                    )
+                )
+            if cheapest_winner:
+                any_winner = True
+                print(
+                    "最低价: ¥{price:,.2f} 来自 {region}，航段 {route}".format(
+                        price=float(cheapest_winner["cheapest_cny_price"]),
+                        region=cheapest_winner["region_name"],
+                        route=cheapest_winner.get("route") or "-",
+                    )
+                )
+            elif rows:
+                print("已提取市场价格，但人民币换算暂不可用。")
+            else:
+                print("未能从候选机场组合里提取出有效价格。")
+
+            if args.save:
+                saved = self.save_simplified_results(
+                    rows,
+                    origin_label,
+                    destination_label,
+                    date,
+                    return_date=return_date,
+                    file_origin_token=origin_file_token,
+                    file_destination_token=destination_file_token,
+                )
+                print(f"结果已保存到: {saved}")
+
+        if args.save and rows_by_date:
+            start_date, start_return_date = trip_dates[0]
+            end_date, end_return_date = trip_dates[-1]
+            summary_path = self.save_window_results(
+                rows_by_date,
+                origin_label,
+                destination_label,
+                start_date,
+                end_date,
+                start_return_date=start_return_date,
+                end_return_date=end_return_date,
+                file_origin_token=origin_file_token,
+                file_destination_token=destination_file_token,
+            )
+            print(f"窗口汇总已保存到: {summary_path}")
+
+        if not any_rows:
+            return 1
+        return 0 if any_winner else 2
+
+    async def run_page_command(self, args: argparse.Namespace) -> int:
+        manual_regions = [
+            code.strip().upper() for code in args.regions.split(",") if code.strip()
+        ]
+        if getattr(args, "origin_country", None) or getattr(
+            args, "destination_country", None
+        ):
+            return await self._run_expanded_route_page_command(
+                args,
+                manual_regions=manual_regions,
+            )
+        return await self._run_point_to_point_page_command(
+            args,
+            manual_regions=manual_regions,
+        )
 
     def interactive_page(self) -> int:
         self.print_banner()
@@ -511,6 +971,8 @@ class SimpleCLI:
         args = argparse.Namespace(
             origin=origin,
             destination=destination,
+            origin_country=None,
+            destination_country=None,
             date=date,
             regions=regions,
             wait=10,
@@ -518,6 +980,7 @@ class SimpleCLI:
             save=True,
             date_window=int(date_window_raw) if date_window_raw else 3,
             exact_airport=False,
+            country_airport_limit=COUNTRY_ROUTE_DEFAULT_AIRPORT_LIMIT,
             transport="scrapling",
         )
         return asyncio.run(self.run_page_command(args))
@@ -544,17 +1007,32 @@ def build_parser() -> argparse.ArgumentParser:
 
     page = subparsers.add_parser("page", help="打开各市场结果页并抽取最佳价和最低价")
     page.add_argument(
-        "-o", "--origin", required=True, help="出发地（中文、IATA 或 metro code）"
+        "-o", "--origin", help="出发地（中文、IATA 或 metro code）"
     )
     page.add_argument(
-        "-d", "--destination", required=True, help="目的地（中文或 IATA）"
+        "-d", "--destination", help="目的地（中文或 IATA）"
+    )
+    page.add_argument(
+        "--origin-country",
+        help="国家模式：出发国家（中文、英文或 ISO 国家码）",
+    )
+    page.add_argument(
+        "--destination-country",
+        help="国家模式：目的国家（中文、英文或 ISO 国家码）",
+    )
+    page.add_argument(
+        "--country-airport-limit",
+        type=int,
+        default=COUNTRY_ROUTE_DEFAULT_AIRPORT_LIMIT,
+        help="国家模式下每国最多展开多少个候选机场（默认 5）",
     )
     page.add_argument("-t", "--date", required=True, help="出发日期 YYYY-MM-DD")
+    page.add_argument("--return-date", help="返程日期 YYYY-MM-DD（不传则按单程处理）")
     page.add_argument(
         "--date-window",
         type=int,
         default=3,
-        help="日期前后扫窗天数（默认 ±3 天）",
+        help="日期前后扫窗天数（默认 ±3 天；往返时保持停留天数不变）",
     )
     page.add_argument(
         "-r",

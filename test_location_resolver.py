@@ -27,6 +27,18 @@ class LocationResolverTests(unittest.TestCase):
         self.assertEqual(resolved.code, "TBS")
         self.assertEqual(resolved.country, "GE")
 
+    def test_country_name_can_resolve_to_iso_code(self) -> None:
+        resolved = self.resolver.resolve_country("乌兹别克斯坦")
+
+        self.assertEqual(resolved.code, "UZ")
+        self.assertEqual(resolved.name, "乌兹别克斯坦")
+
+    def test_country_route_airports_use_curated_priority(self) -> None:
+        resolved, airports = self.resolver.get_country_route_airports("中国", limit=3)
+
+        self.assertEqual(resolved.code, "CN")
+        self.assertEqual([airport.code for airport in airports], ["PEK", "PKX", "PVG"])
+
     def test_location_mappings_json_contains_required_sections(self) -> None:
         mappings = load_location_mappings()
 

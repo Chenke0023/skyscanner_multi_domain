@@ -11,6 +11,182 @@ AIRPORT_DATASET_PATH = DATA_DIR / "airport-codes.csv"
 LOCATION_MAPPINGS_PATH = DATA_DIR / "location_mappings.json"
 VALID_AIRPORT_TYPES = {"large_airport", "medium_airport", "small_airport"}
 MAX_LOCATION_SUGGESTIONS = 8
+COUNTRY_ROUTE_DEFAULT_AIRPORT_LIMIT = 5
+PREFERRED_COUNTRY_ROUTE_AIRPORT_TYPES = {"large_airport", "medium_airport"}
+
+COUNTRY_DISPLAY_NAMES: dict[str, str] = {
+    "AE": "阿联酋",
+    "AT": "奥地利",
+    "AU": "澳大利亚",
+    "BR": "巴西",
+    "CA": "加拿大",
+    "CH": "瑞士",
+    "CN": "中国",
+    "DE": "德国",
+    "ES": "西班牙",
+    "FR": "法国",
+    "GB": "英国",
+    "GE": "格鲁吉亚",
+    "HK": "香港",
+    "ID": "印度尼西亚",
+    "IE": "爱尔兰",
+    "IN": "印度",
+    "IT": "意大利",
+    "JP": "日本",
+    "KR": "韩国",
+    "KZ": "哈萨克斯坦",
+    "MX": "墨西哥",
+    "MY": "马来西亚",
+    "NL": "荷兰",
+    "PH": "菲律宾",
+    "PT": "葡萄牙",
+    "QA": "卡塔尔",
+    "RU": "俄罗斯",
+    "SA": "沙特阿拉伯",
+    "SE": "瑞典",
+    "SG": "新加坡",
+    "TH": "泰国",
+    "TR": "土耳其",
+    "US": "美国",
+    "UZ": "乌兹别克斯坦",
+    "VN": "越南",
+}
+
+COUNTRY_ALIAS_TO_CODE: dict[str, str] = {
+    "ae": "AE",
+    "united arab emirates": "AE",
+    "uae": "AE",
+    "阿联酋": "AE",
+    "at": "AT",
+    "austria": "AT",
+    "奥地利": "AT",
+    "au": "AU",
+    "australia": "AU",
+    "澳大利亚": "AU",
+    "br": "BR",
+    "brazil": "BR",
+    "巴西": "BR",
+    "ca": "CA",
+    "canada": "CA",
+    "加拿大": "CA",
+    "ch": "CH",
+    "switzerland": "CH",
+    "瑞士": "CH",
+    "cn": "CN",
+    "china": "CN",
+    "中国": "CN",
+    "de": "DE",
+    "germany": "DE",
+    "德国": "DE",
+    "es": "ES",
+    "spain": "ES",
+    "西班牙": "ES",
+    "fr": "FR",
+    "france": "FR",
+    "法国": "FR",
+    "gb": "GB",
+    "uk": "GB",
+    "united kingdom": "GB",
+    "great britain": "GB",
+    "britain": "GB",
+    "england": "GB",
+    "英国": "GB",
+    "ge": "GE",
+    "georgia": "GE",
+    "格鲁吉亚": "GE",
+    "hk": "HK",
+    "hong kong": "HK",
+    "香港": "HK",
+    "id": "ID",
+    "indonesia": "ID",
+    "印度尼西亚": "ID",
+    "印尼": "ID",
+    "ie": "IE",
+    "ireland": "IE",
+    "爱尔兰": "IE",
+    "in": "IN",
+    "india": "IN",
+    "印度": "IN",
+    "it": "IT",
+    "italy": "IT",
+    "意大利": "IT",
+    "jp": "JP",
+    "japan": "JP",
+    "日本": "JP",
+    "kr": "KR",
+    "south korea": "KR",
+    "korea": "KR",
+    "韩国": "KR",
+    "kz": "KZ",
+    "kazakhstan": "KZ",
+    "哈萨克斯坦": "KZ",
+    "mx": "MX",
+    "mexico": "MX",
+    "墨西哥": "MX",
+    "my": "MY",
+    "malaysia": "MY",
+    "马来西亚": "MY",
+    "nl": "NL",
+    "netherlands": "NL",
+    "荷兰": "NL",
+    "ph": "PH",
+    "philippines": "PH",
+    "菲律宾": "PH",
+    "pt": "PT",
+    "portugal": "PT",
+    "葡萄牙": "PT",
+    "qa": "QA",
+    "qatar": "QA",
+    "卡塔尔": "QA",
+    "ru": "RU",
+    "russia": "RU",
+    "俄罗斯": "RU",
+    "sa": "SA",
+    "saudi arabia": "SA",
+    "沙特阿拉伯": "SA",
+    "se": "SE",
+    "sweden": "SE",
+    "瑞典": "SE",
+    "sg": "SG",
+    "singapore": "SG",
+    "新加坡": "SG",
+    "th": "TH",
+    "thailand": "TH",
+    "泰国": "TH",
+    "tr": "TR",
+    "turkiye": "TR",
+    "turkey": "TR",
+    "土耳其": "TR",
+    "us": "US",
+    "usa": "US",
+    "united states": "US",
+    "america": "US",
+    "美国": "US",
+    "uz": "UZ",
+    "uzbekistan": "UZ",
+    "乌兹别克斯坦": "UZ",
+    "vn": "VN",
+    "vietnam": "VN",
+    "越南": "VN",
+}
+
+COUNTRY_ROUTE_PRIORITY_AIRPORTS: dict[str, tuple[str, ...]] = {
+    "AE": ("DXB", "AUH", "SHJ"),
+    "CN": ("PEK", "PKX", "PVG", "SHA", "CAN", "SZX", "TFU", "CTU", "CKG", "XIY"),
+    "GB": ("LHR", "LGW", "MAN", "STN", "LTN"),
+    "GE": ("TBS", "KUT", "BUS"),
+    "HK": ("HKG",),
+    "JP": ("HND", "NRT", "KIX", "ITM", "FUK"),
+    "KR": ("ICN", "GMP", "PUS", "CJU"),
+    "KZ": ("ALA", "NQZ", "CIT", "KGF"),
+    "MY": ("KUL", "SZB", "PEN", "BKI"),
+    "QA": ("DOH",),
+    "SG": ("SIN",),
+    "TH": ("BKK", "DMK", "HKT", "CNX"),
+    "TR": ("IST", "SAW", "ADB", "AYT"),
+    "US": ("JFK", "EWR", "LAX", "SFO", "ORD"),
+    "UZ": ("TAS", "SKD", "BHK", "NVI", "UGC", "NCU", "FEG", "AZN", "NMA"),
+}
 
 
 @dataclass(frozen=True)
@@ -28,6 +204,14 @@ class LocationRecord:
     kind: str
     municipality: str = ""
     country: str = ""
+    search_name: str = ""
+    airport_type: str = ""
+
+
+@dataclass(frozen=True)
+class CountryRecord:
+    name: str
+    code: str
     search_name: str = ""
 
 
@@ -51,6 +235,17 @@ class LocationResolver:
         self._records_by_code: dict[str, list[LocationRecord]] = {}
         for record in self._records:
             self._records_by_code.setdefault(record.code, []).append(record)
+        self._country_records = load_country_records()
+        self._country_records_by_code = {
+            record.code: record for record in self._country_records
+        }
+        self._country_code_set = set(self._country_records_by_code)
+        self._airports_by_country: dict[str, list[LocationRecord]] = {}
+        for airport_code in sorted(self._airport_code_set):
+            record = self._pick_record_for_code(airport_code, kind="airport")
+            if record is None or not record.country:
+                continue
+            self._airports_by_country.setdefault(record.country.upper(), []).append(record)
 
     def normalize_location(self, value: str, prefer_metro: bool) -> str:
         return self.resolve_location(value, prefer_metro=prefer_metro).code
@@ -117,6 +312,93 @@ class LocationResolver:
     def describe_code_kind(self, code: str) -> str:
         return "城市代码" if code.upper() in self._metro_code_set else "机场代码"
 
+    def resolve_country(self, value: str) -> CountryRecord:
+        raw = value.strip()
+        if not raw:
+            raise ValueError("国家不能为空。")
+
+        upper = raw.upper()
+        if upper in self._country_code_set:
+            return self._country_records_by_code[upper]
+
+        lookup = raw.lower()
+        country_code = COUNTRY_ALIAS_TO_CODE.get(lookup)
+        if country_code and country_code in self._country_records_by_code:
+            return self._country_records_by_code[country_code]
+
+        suggestions = self.search_countries(raw, limit=1)
+        if suggestions:
+            return suggestions[0]
+
+        raise ValueError(
+            f"无法识别国家“{raw}”。请使用常见国家名或 ISO 国家码（例如 中国 / CN、乌兹别克斯坦 / UZ）。"
+        )
+
+    def search_countries(
+        self, query: str, *, limit: int = MAX_LOCATION_SUGGESTIONS
+    ) -> list[CountryRecord]:
+        raw = query.strip()
+        if not raw:
+            return []
+        lowered = raw.lower()
+        ranked: list[tuple[int, int, str, CountryRecord]] = []
+        for record in self._country_records:
+            score = _score_country_query(lowered, record)
+            if score is None:
+                continue
+            ranked.append((score, len(record.name), record.name, record))
+        ranked.sort(key=lambda item: item[:3])
+        return [record for *_meta, record in ranked[:limit]]
+
+    def get_country_route_airports(
+        self,
+        country_value: str,
+        *,
+        limit: int = COUNTRY_ROUTE_DEFAULT_AIRPORT_LIMIT,
+    ) -> tuple[CountryRecord, list[LocationRecord]]:
+        resolved_country = self.resolve_country(country_value)
+        airports = list(self._airports_by_country.get(resolved_country.code, []))
+        if not airports:
+            raise ValueError(f"国家“{resolved_country.name}”没有可用 IATA 机场数据。")
+
+        preferred = [
+            airport
+            for airport in airports
+            if airport.airport_type in PREFERRED_COUNTRY_ROUTE_AIRPORT_TYPES
+        ]
+        if preferred:
+            airports = preferred
+
+        priority_codes = COUNTRY_ROUTE_PRIORITY_AIRPORTS.get(resolved_country.code, ())
+        priority_rank = {code: index for index, code in enumerate(priority_codes)}
+
+        def sort_key(record: LocationRecord) -> tuple[int, int, int, str, str, str]:
+            airport_type_rank = {
+                "large_airport": 0,
+                "medium_airport": 1,
+                "small_airport": 2,
+            }.get(record.airport_type, 9)
+            code_rank = priority_rank.get(record.code, len(priority_codes) + 1)
+            code_bucket = 0 if record.code in priority_rank else 1
+            return (
+                code_bucket,
+                code_rank,
+                airport_type_rank,
+                record.municipality or record.name,
+                record.name,
+                record.code,
+            )
+
+        deduped: list[LocationRecord] = []
+        seen_codes: set[str] = set()
+        for airport in sorted(airports, key=sort_key):
+            if airport.code in seen_codes:
+                continue
+            seen_codes.add(airport.code)
+            deduped.append(airport)
+
+        return resolved_country, deduped[: max(limit, 1)]
+
     def _build_resolved_location(self, query: str, code: str, *, kind: str) -> ResolvedLocation:
         record = self._pick_record_for_code(code, kind=kind)
         if record is not None:
@@ -149,6 +431,10 @@ class LocationResolver:
         preferred = [record for record in records if record.kind == kind]
         if not preferred:
             return None
+        if kind == "airport":
+            with_airport_type = [record for record in preferred if record.airport_type]
+            if with_airport_type:
+                preferred = with_airport_type
         with_country = [record for record in preferred if record.country]
         if with_country:
             return sorted(with_country, key=lambda record: (len(record.name), record.name))[0]
@@ -235,6 +521,7 @@ def load_airport_records() -> list[LocationRecord]:
                             municipality=municipality,
                             country=country,
                             search_name=alias.lower(),
+                            airport_type=airport_type,
                         )
                     )
 
@@ -254,6 +541,64 @@ def load_airport_records() -> list[LocationRecord]:
         )
 
     return records
+
+
+@lru_cache(maxsize=1)
+def load_country_records() -> list[CountryRecord]:
+    seen_codes: set[str] = set()
+    records: list[CountryRecord] = []
+
+    if AIRPORT_DATASET_PATH.exists():
+        with AIRPORT_DATASET_PATH.open("r", encoding="utf-8", newline="") as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                airport_type = (row.get("type") or "").strip()
+                iata_code = (row.get("iata_code") or "").strip().upper()
+                country_code = (row.get("iso_country") or "").strip().upper()
+                if (
+                    not country_code
+                    or not iata_code
+                    or airport_type not in VALID_AIRPORT_TYPES
+                    or country_code in seen_codes
+                ):
+                    continue
+                seen_codes.add(country_code)
+                records.append(
+                    CountryRecord(
+                        name=COUNTRY_DISPLAY_NAMES.get(country_code, country_code),
+                        code=country_code,
+                        search_name=COUNTRY_DISPLAY_NAMES.get(country_code, country_code).lower(),
+                    )
+                )
+
+    for country_code in sorted(set(COUNTRY_ALIAS_TO_CODE.values())):
+        if country_code in seen_codes:
+            continue
+        records.append(
+            CountryRecord(
+                name=COUNTRY_DISPLAY_NAMES.get(country_code, country_code),
+                code=country_code,
+                search_name=COUNTRY_DISPLAY_NAMES.get(country_code, country_code).lower(),
+            )
+        )
+    return sorted(records, key=lambda record: (record.name, record.code))
+
+
+def _score_country_query(lowered: str, record: CountryRecord) -> int | None:
+    aliases = {
+        alias
+        for alias, code in COUNTRY_ALIAS_TO_CODE.items()
+        if code == record.code
+    }
+    aliases.update({record.code.lower(), record.name.lower(), record.search_name})
+
+    if lowered in aliases:
+        return 0
+    if any(alias.startswith(lowered) for alias in aliases):
+        return 1
+    if any(lowered in alias for alias in aliases):
+        return 2
+    return None
 
 
 def _normalize_mapping(

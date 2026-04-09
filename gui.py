@@ -31,6 +31,7 @@ from date_window import (
 )
 from location_resolver import (
     AIRPORT_DATASET_PATH,
+    COUNTRY_ROUTE_DEFAULT_AIRPORT_LIMIT,
     LOCATION_MAPPINGS_PATH,
     LocationRecord,
 )
@@ -48,6 +49,7 @@ MAX_LOCATION_SUGGESTIONS = 8
 
 _COLUMN_LABELS = {
     "date": "日期",
+    "route": "航段",
     "region": "地区",
     "best_native": "最佳（原币）",
     "best_cny": "最佳（人民币）",
@@ -370,6 +372,8 @@ class App:
         self.wait_var = tk.StringVar(value="10")
         self.date_window_var = tk.StringVar(value="3")
         self.exact_airport_var = tk.BooleanVar(value=False)
+        self.origin_country_var = tk.BooleanVar(value=False)
+        self.destination_country_var = tk.BooleanVar(value=False)
         self.combined_summary_var = tk.BooleanVar(value=True)
         self.status_var = tk.StringVar(value="就绪")
         self.origin_hint_var = tk.StringVar(value="")
@@ -392,12 +396,19 @@ class App:
         self.regions_var.trace_add("write", self._refresh_location_hints)
         self.exact_airport_var.trace_add("write", self._refresh_location_hints)
         self.exact_airport_var.trace_add("write", self._refresh_origin_suggestions)
+        self.origin_country_var.trace_add("write", self._refresh_location_hints)
+        self.origin_country_var.trace_add("write", self._refresh_origin_suggestions)
+        self.origin_country_var.trace_add("write", self._refresh_route_mode)
+        self.destination_country_var.trace_add("write", self._refresh_location_hints)
+        self.destination_country_var.trace_add("write", self._refresh_destination_suggestions)
+        self.destination_country_var.trace_add("write", self._refresh_route_mode)
         self.trip_type_var.trace_add("write", self._refresh_trip_mode)
         self.date_var.trace_add("write", self._sync_return_date_minimum)
         self._refresh_location_hints()
         self._refresh_origin_suggestions()
         self._refresh_destination_suggestions()
         self._refresh_trip_mode()
+        self._refresh_route_mode()
         self._poll_queue()
 
     def _build_ui(self) -> None:
@@ -479,6 +490,18 @@ class App:
             variable=self.exact_airport_var,
         ).grid(row=3, column=1, columnspan=2, sticky="w", pady=(8, 0))
 
+        ttk.Checkbutton(
+            form,
+            text="出发地按国家",
+            variable=self.origin_country_var,
+        ).grid(row=4, column=0, sticky="w", pady=(8, 0))
+
+        ttk.Checkbutton(
+            form,
+            text="目的地按国家",
+            variable=self.destination_country_var,
+        ).grid(row=4, column=1, sticky="w", pady=(8, 0))
+
         button_row = ttk.Frame(form)
         button_row.grid(row=4, column=2, sticky="e")
         self.doctor_button = ttk.Button(
@@ -509,6 +532,7 @@ class App:
 
         columns = (
             "date",
+            "route",
             "region",
             "best_native",
             "best_cny",
@@ -524,6 +548,7 @@ class App:
                 col, text=label, command=lambda c=col: self._sort_column(c)
             )
         self.tree.column("date", width=180, anchor="w")
+        self.tree.column("route", width=120, anchor="w")
         self.tree.column("region", width=110, anchor="w")
         self.tree.column("best_native", width=120, anchor="e")
         self.tree.column("best_cny", width=120, anchor="e")
@@ -737,7 +762,16 @@ class App:
         else:
             self.return_date_cell.grid_remove()
 
+    def _refresh_route_mode(self, *_args: object) -> None:
+        if self.origin_country_var.get():
+            self.exact_airport_var.set(False)
+
+    def _field_uses_country_mode(self, field: str) -> bool:
+        return self.origin_country_var.get() if field == "origin" else self.destination_country_var.get()
+
     def _format_location_suggestion(self, item: LocationRecord) -> str:
+        if item.kind == "country":
+            return f"{item.name} ({item.code}, 国家)"
         if item.kind == "metro":
             return f"{item.name} ({item.code}, 城市)"
         details = [part for part in [item.municipality, item.country] if part]
@@ -745,8 +779,16 @@ class App:
         return f"{item.name} ({item.code}){suffix}"
 
     def _get_location_suggestions(
-        self, value: str, *, prefer_metro: bool
+        self, field: str, value: str, *, prefer_metro: bool
     ) -> list[LocationRecord]:
+        if self._field_uses_country_mode(field):
+            return [
+                LocationRecord(name=item.name, code=item.code, kind="country")
+                for item in self.cli.location_resolver.search_countries(
+                    value,
+                    limit=MAX_LOCATION_SUGGESTIONS,
+                )
+            ]
         return self.cli.location_resolver.search_locations(
             value,
             prefer_metro=prefer_metro,
@@ -789,13 +831,17 @@ class App:
 
     def _refresh_origin_suggestions(self, *args: object) -> None:
         suggestions = self._get_location_suggestions(
-            self.origin_var.get(), prefer_metro=not self.exact_airport_var.get()
+            "origin",
+            self.origin_var.get(),
+            prefer_metro=not self.exact_airport_var.get(),
         )
         self._set_location_suggestions("origin", suggestions)
 
     def _refresh_destination_suggestions(self, *args: object) -> None:
         suggestions = self._get_location_suggestions(
-            self.destination_var.get(), prefer_metro=False
+            "destination",
+            self.destination_var.get(),
+            prefer_metro=False,
         )
         self._set_location_suggestions("destination", suggestions)
 
@@ -860,11 +906,30 @@ class App:
         self.location_entries[field].icursor(tk.END)
 
     def _set_location_hint(
-        self, hint_var: tk.StringVar, label: str, value: str, prefer_metro: bool
+        self,
+        field: str,
+        hint_var: tk.StringVar,
+        label: str,
+        value: str,
+        prefer_metro: bool,
     ) -> None:
         raw = value.strip()
         if not raw:
             hint_var.set("")
+            return
+        if self._field_uses_country_mode(field):
+            try:
+                country = self.cli.resolve_country(raw)
+                _resolved, airports = self.cli.location_resolver.get_country_route_airports(
+                    raw,
+                    limit=COUNTRY_ROUTE_DEFAULT_AIRPORT_LIMIT,
+                )
+                hint_var.set(
+                    f"{label}将使用国家代码: {country.code}；候选机场: "
+                    + ", ".join(airport.code for airport in airports)
+                )
+            except ValueError as exc:
+                hint_var.set(str(exc))
             return
         try:
             code = self.cli.normalize_location(raw, prefer_metro=prefer_metro)
@@ -880,28 +945,36 @@ class App:
             if code.strip()
         ]
         try:
-            origin = self.cli.resolve_location(
-                self.origin_var.get(), prefer_metro=not self.exact_airport_var.get()
-            )
-            destination = self.cli.resolve_location(
-                self.destination_var.get(), prefer_metro=False
-            )
+            if self.origin_country_var.get():
+                origin_country = self.cli.resolve_country(self.origin_var.get()).code
+            else:
+                origin_country = self.cli.resolve_location(
+                    self.origin_var.get(), prefer_metro=not self.exact_airport_var.get()
+                ).country
+            if self.destination_country_var.get():
+                destination_country = self.cli.resolve_country(self.destination_var.get()).code
+            else:
+                destination_country = self.cli.resolve_location(
+                    self.destination_var.get(), prefer_metro=False
+                ).country
         except ValueError:
             return build_effective_region_codes(manual_region_codes=manual_regions)
         return build_effective_region_codes(
-            origin_country=origin.country,
-            destination_country=destination.country,
+            origin_country=origin_country,
+            destination_country=destination_country,
             manual_region_codes=manual_regions,
         )
 
     def _refresh_location_hints(self, *args: object) -> None:
         self._set_location_hint(
+            "origin",
             self.origin_hint_var,
             "出发地",
             self.origin_var.get(),
             prefer_metro=not self.exact_airport_var.get(),
         )
         self._set_location_hint(
+            "destination",
             self.destination_hint_var,
             "目的地",
             self.destination_var.get(),
@@ -979,7 +1052,7 @@ class App:
         if not item:
             return
         col_index = int(col_id.replace("#", "")) - 1
-        columns = ("date", "region", "best_native", "best_cny",
+        columns = ("date", "route", "region", "best_native", "best_cny",
                     "cheapest_native", "cheapest_cny", "status", "error", "link")
         if col_index < 0 or col_index >= len(columns):
             return
@@ -1071,6 +1144,18 @@ class App:
             messagebox.showerror("±天数错误", "±天数必须是非负整数。")
             return
 
+        if self.origin_country_var.get() or self.destination_country_var.get():
+            self._start_expanded_scan(
+                origin=origin,
+                destination=destination,
+                date=date,
+                return_date=return_date,
+                manual_regions=manual_regions,
+                wait_seconds=wait_seconds,
+                date_window_days=date_window_days,
+            )
+            return
+
         try:
             origin_resolved = self.cli.resolve_location(
                 origin, prefer_metro=not self.exact_airport_var.get()
@@ -1109,6 +1194,93 @@ class App:
             args=(
                 origin_resolved.code,
                 destination_resolved.code,
+                date,
+                return_date,
+                regions,
+                wait_seconds,
+                date_window_days,
+                self.combined_summary_var.get(),
+            ),
+            daemon=True,
+        )
+        thread.start()
+
+    def _start_expanded_scan(
+        self,
+        *,
+        origin: str,
+        destination: str,
+        date: str,
+        return_date: str | None,
+        manual_regions: list[str],
+        wait_seconds: int,
+        date_window_days: int,
+    ) -> None:
+        try:
+            (
+                origin_label,
+                destination_label,
+                origin_file_token,
+                destination_file_token,
+                origin_points,
+                destination_points,
+                regions,
+            ) = self.cli.build_expanded_route_plan(
+                origin_value=origin,
+                destination_value=destination,
+                origin_is_country=self.origin_country_var.get(),
+                destination_is_country=self.destination_country_var.get(),
+                prefer_origin_metro=not self.exact_airport_var.get(),
+                manual_region_codes=manual_regions,
+                airport_limit=COUNTRY_ROUTE_DEFAULT_AIRPORT_LIMIT,
+            )
+        except ValueError as exc:
+            messagebox.showerror("地点无法识别", str(exc))
+            return
+
+        if not regions:
+            messagebox.showerror("地区为空", "无法生成可用地区代码。")
+            return
+
+        self.clear_results()
+        self._cancel_event.clear()
+        self.set_busy(True)
+        self.status_var.set("正在运行...")
+        trip_label = format_trip_date_label(date, return_date)
+        trip_mode_label = "往返" if return_date else "单程"
+        mode_label = (
+            f"{'国家' if self.origin_country_var.get() else '地点'}"
+            f"-{'国家' if self.destination_country_var.get() else '地点'}"
+        )
+        self.log(
+            f"开始扩展比价[{mode_label}]: {origin_label} -> {destination_label}, "
+            f"{trip_mode_label} {trip_label} (±{date_window_days} 天), "
+            f"地区: {', '.join(regions)}"
+        )
+        self.log(
+            "出发候选机场: "
+            + ", ".join(
+                f"{airport.code}({airport.municipality or airport.name})"
+                for airport in origin_points
+            )
+        )
+        self.log(
+            "目的候选机场: "
+            + ", ".join(
+                f"{airport.code}({airport.municipality or airport.name})"
+                for airport in destination_points
+            )
+        )
+
+        thread = threading.Thread(
+            target=self._run_expanded_scan_worker,
+            args=(
+                origin_label,
+                destination_label,
+                origin_file_token,
+                destination_file_token,
+                origin_points,
+                destination_points,
                 date,
                 return_date,
                 regions,
@@ -1204,9 +1376,13 @@ class App:
                     destination_code,
                     current_date,
                     return_date=current_return_date,
+                    route_label=f"{origin_code} -> {destination_code}",
                 )
                 outputs.append(output)
-                rows = self.cli.simplify_quotes(quote_dicts)
+                rows = self.cli.simplify_quotes(
+                    quote_dicts,
+                    route_label=f"{origin_code} -> {destination_code}",
+                )
                 rows_by_date.append((trip_label, rows))
 
             combined_output = None
@@ -1230,6 +1406,142 @@ class App:
                         "outputs": outputs,
                         "combined_output": combined_output,
                         "origin_code": origin_code,
+                        "date_window_days": date_window_days,
+                    },
+                )
+            )
+        except Exception as exc:
+            self.queue.put(("error", str(exc)))
+
+    def _run_expanded_scan_worker(
+        self,
+        origin_label: str,
+        destination_label: str,
+        origin_file_token: str,
+        destination_file_token: str,
+        origin_points: list[LocationRecord],
+        destination_points: list[LocationRecord],
+        date: str,
+        return_date: str | None,
+        regions: list[str],
+        wait_seconds: int,
+        date_window_days: int,
+        save_combined: bool,
+    ) -> None:
+        try:
+            if return_date:
+                trip_dates = build_round_trip_date_window(
+                    date, return_date, date_window_days
+                )
+            else:
+                trip_dates = [
+                    (current_date, None)
+                    for current_date in build_date_window(date, date_window_days)
+                ]
+            pair_count = len(origin_points) * len(destination_points)
+            total_steps = len(trip_dates) * len(regions) * pair_count
+            step = 0
+            rows_by_date: list[tuple[str, list[dict[str, str | float | None]]]] = []
+            outputs: list[Path] = []
+
+            self.queue.put(("progress_init", total_steps))
+
+            for current_date, current_return_date in trip_dates:
+                if self._cancel_event.is_set():
+                    self.queue.put(("cancelled", None))
+                    return
+                trip_label = format_trip_date_label(current_date, current_return_date)
+                self.queue.put(("log", f"开始扫描行程 {trip_label}。"))
+                best_rows_by_region: dict[str, CombinedQuoteRow] = {}
+
+                for origin_airport in origin_points:
+                    for destination_airport in destination_points:
+                        if self._cancel_event.is_set():
+                            self.queue.put(("cancelled", None))
+                            return
+
+                        route_label = f"{origin_airport.code} -> {destination_airport.code}"
+
+                        def on_region_start(
+                            region: Any,
+                            _trip_label: str = trip_label,
+                            _route_label: str = route_label,
+                        ) -> None:
+                            nonlocal step
+                            step += 1
+                            self.queue.put((
+                                "progress",
+                                {
+                                    "step": step,
+                                    "total": total_steps,
+                                    "date": _trip_label,
+                                    "region_name": f"{region.name} / {_route_label}",
+                                },
+                            ))
+
+                        quotes = asyncio.run(
+                            run_page_scan(
+                                origin=origin_airport.code,
+                                destination=destination_airport.code,
+                                date=current_date,
+                                region_codes=regions,
+                                return_date=current_return_date,
+                                page_wait=wait_seconds,
+                                timeout=30,
+                                transport="scrapling",
+                                on_region_start=on_region_start,
+                            )
+                        )
+                        if not quotes:
+                            continue
+
+                        rows = self.cli.simplify_quotes(
+                            quotes_to_dicts(quotes),
+                            route_label=route_label,
+                        )
+                        for row in rows:
+                            region_name = str(row.get("region_name") or "-")
+                            best_rows_by_region[region_name] = self.cli._pick_better_row(
+                                best_rows_by_region.get(region_name),
+                                row,
+                            )
+
+                rows = self.cli._sort_simplified_rows(list(best_rows_by_region.values()))
+                rows_by_date.append((trip_label, rows))
+                output = self.cli.save_simplified_results(
+                    rows,
+                    origin_label,
+                    destination_label,
+                    current_date,
+                    return_date=current_return_date,
+                    file_origin_token=origin_file_token,
+                    file_destination_token=destination_file_token,
+                )
+                outputs.append(output)
+
+            combined_output = None
+            if save_combined and rows_by_date:
+                start_date, start_return_date = trip_dates[0]
+                end_date, end_return_date = trip_dates[-1]
+                combined_output = self.cli.save_window_results(
+                    rows_by_date,
+                    origin_label,
+                    destination_label,
+                    start_date,
+                    end_date,
+                    start_return_date=start_return_date,
+                    end_return_date=end_return_date,
+                    file_origin_token=origin_file_token,
+                    file_destination_token=destination_file_token,
+                )
+            self.queue.put(
+                (
+                    "scan_done",
+                    {
+                        "rows_by_date": rows_by_date,
+                        "outputs": outputs,
+                        "combined_output": combined_output,
+                        "origin_code": origin_file_token,
                         "date_window_days": date_window_days,
                     },
                 )
@@ -1296,6 +1608,7 @@ class App:
                     tk.END,
                     values=(
                         row_date,
+                        row.get("route") or "-",
                         row["region_name"],
                         row.get("best_display_price") or "-",
                         best_cny_text,
@@ -1339,20 +1652,22 @@ class App:
             best_price = best_winner.get("best_cny_price")
             if isinstance(best_price, (int, float)):
                 self.log(
-                    "最佳: ¥{price:,.2f} 来自 {region} ({date})".format(
+                    "最佳: ¥{price:,.2f} 来自 {region} ({date}, {route})".format(
                         price=float(best_price),
                         region=best_winner["region_name"],
                         date=best_winner.get("date") or "-",
+                        route=best_winner.get("route") or "-",
                     )
                 )
         if cheapest_winner:
             cheapest_price = cheapest_winner.get("cheapest_cny_price")
             if isinstance(cheapest_price, (int, float)):
                 self.log(
-                    "最低价: ¥{price:,.2f} 来自 {region} ({date})".format(
+                    "最低价: ¥{price:,.2f} 来自 {region} ({date}, {route})".format(
                         price=float(cheapest_price),
                         region=cheapest_winner["region_name"],
                         date=cheapest_winner.get("date") or "-",
+                        route=cheapest_winner.get("route") or "-",
                     )
                 )
         elif combined_rows:
