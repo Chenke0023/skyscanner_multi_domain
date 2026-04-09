@@ -11,6 +11,7 @@ import asyncio
 import calendar
 import importlib.util
 import inspect
+import json
 import os
 import queue
 import re
@@ -22,7 +23,7 @@ import tkinter as tk
 from tkinter import messagebox, ttk
 from typing import Any
 
-from app_paths import get_reports_dir
+from app_paths import get_gui_state_file, get_reports_dir
 from cli import CombinedQuoteRow, SimpleCLI
 from date_window import (
     build_date_window,
@@ -72,8 +73,13 @@ _FONT_TITLE = ("Geneva", 20, "bold")
 _FONT_BUTTON = ("Geneva", 12, "bold")
 _FONT_HEADING = ("Geneva", 11, "bold")
 _FONT_MONO = ("Monaco", 10)
+_FONT_CARD_PRICE = ("Geneva", 18, "bold")
+_FONT_CARD_HEADLINE = ("Geneva", 12, "bold")
 _TRIP_TYPE_ONE_WAY = "one_way"
 _TRIP_TYPE_ROUND_TRIP = "round_trip"
+_CARD_BG = "#F6E7B1"
+_CARD_BORDER = "#8A7331"
+_CARD_PRICE = "#234423"
 _REQUIRED_APIFY_DATA_FILES = (
     "browser-helper-file.json",
     "fingerprint-network-definition.zip",
@@ -81,6 +87,200 @@ _REQUIRED_APIFY_DATA_FILES = (
     "headers-order.json",
     "input-network-definition.zip",
 )
+
+
+def _default_query_state(
+    *, default_departure: str, default_return: str
+) -> dict[str, Any]:
+    return {
+        "origin": "北京",
+        "destination": "阿拉木图",
+        "trip_type": _TRIP_TYPE_ONE_WAY,
+        "date": default_departure,
+        "return_date": default_return,
+        "regions": "",
+        "wait": "10",
+        "date_window": "3",
+        "exact_airport": False,
+        "origin_country": False,
+        "destination_country": False,
+        "combined_summary": True,
+    }
+
+
+def _normalize_query_state(
+    payload: Any, *, default_departure: str, default_return: str
+) -> dict[str, Any]:
+    normalized = _default_query_state(
+        default_departure=default_departure,
+        default_return=default_return,
+    )
+    if not isinstance(payload, dict):
+        return normalized
+
+    def assign_text(key: str) -> None:
+        value = payload.get(key)
+        if value is None:
+            return
+        if isinstance(value, str):
+            normalized[key] = value.strip()
+        elif isinstance(value, (int, float)):
+            normalized[key] = str(value)
+
+    for key in ("origin", "destination", "regions", "wait", "date_window"):
+        assign_text(key)
+
+    for key in ("date", "return_date"):
+        value = payload.get(key)
+        if not isinstance(value, str):
+            continue
+        try:
+            datetime.strptime(value.strip(), "%Y-%m-%d")
+        except ValueError:
+            continue
+        normalized[key] = value.strip()
+
+    trip_type = payload.get("trip_type")
+    if trip_type in {_TRIP_TYPE_ONE_WAY, _TRIP_TYPE_ROUND_TRIP}:
+        normalized["trip_type"] = trip_type
+
+    for key in (
+        "exact_airport",
+        "origin_country",
+        "destination_country",
+        "combined_summary",
+    ):
+        value = payload.get(key)
+        if isinstance(value, bool):
+            normalized[key] = value
+
+    return normalized
+
+
+def _load_query_state(
+    state_path: Path, *, default_departure: str, default_return: str
+) -> dict[str, Any]:
+    try:
+        payload = json.loads(state_path.read_text(encoding="utf-8"))
+    except (FileNotFoundError, OSError, json.JSONDecodeError):
+        payload = None
+    return _normalize_query_state(
+        payload,
+        default_departure=default_departure,
+        default_return=default_return,
+    )
+
+
+def _write_query_state(state_path: Path, payload: dict[str, Any]) -> None:
+    state_path.parent.mkdir(parents=True, exist_ok=True)
+    state_path.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True),
+        encoding="utf-8",
+    )
+
+
+def _build_cheapest_conclusion(rows: list[CombinedQuoteRow]) -> dict[str, str | None]:
+    cheapest_candidates = [
+        row
+        for row in rows
+        if isinstance(row.get("cheapest_cny_price"), (int, float))
+    ]
+    if cheapest_candidates:
+        sorted_rows = sorted(
+            cheapest_candidates,
+            key=lambda row: (
+                float(row.get("cheapest_cny_price")),  # type: ignore[arg-type]
+                str(row.get("date") or ""),
+                str(row.get("region_name") or ""),
+            ),
+        )
+        winner = sorted_rows[0]
+        runner_up = sorted_rows[1] if len(sorted_rows) > 1 else None
+        winner_price = float(winner["cheapest_cny_price"])  # type: ignore[index]
+        delta_text = "当前只有 1 条可比较的最低价结果。"
+        if runner_up is not None:
+            runner_up_price = float(runner_up["cheapest_cny_price"])  # type: ignore[index]
+            delta = runner_up_price - winner_price
+            if delta >= 0.01:
+                delta_text = f"比下一低价再省 ¥{delta:,.2f}。"
+            else:
+                delta_text = "与下一低价几乎持平。"
+        return {
+            "headline": f"当前最低价来自 {winner.get('region_name') or '-'}",
+            "price": f"¥{winner_price:,.2f}",
+            "supporting": str(winner.get("cheapest_display_price") or "-"),
+            "meta": (
+                f"{winner.get('date') or '-'} · {winner.get('route') or '-'} · "
+                f"{winner.get('status') or '-'}"
+            ),
+            "insight": delta_text,
+            "link": str(winner.get("link") or ""),
+            "button_text": "打开最低价结果页",
+        }
+
+    native_only_candidates = [
+        row for row in rows if isinstance(row.get("cheapest_display_price"), str)
+        and row.get("cheapest_display_price") not in {"", "-"}
+    ]
+    if native_only_candidates:
+        return {
+            "headline": "已抓到原币报价",
+            "price": "等待人民币换算",
+            "supporting": f"共 {len(native_only_candidates)} 条最低价原币结果",
+            "meta": "当前无法跨币种直接比较最低价。",
+            "insight": "请检查汇率服务，或稍后重试以生成统一结论。",
+            "link": None,
+            "button_text": "等待换算完成",
+        }
+
+    if rows:
+        return {
+            "headline": "暂无最低价结论",
+            "price": "未识别到可比较价格",
+            "supporting": f"本次共返回 {len(rows)} 条结果",
+            "meta": "这些市场暂未产出可用的最低价金额。",
+            "insight": "可结合下方状态列排查 challenge / loading / parse failed。",
+            "link": None,
+            "button_text": "暂无可打开页面",
+        }
+
+    return {
+        "headline": "等待比价开始",
+        "price": "这里会出现最低价结论",
+        "supporting": "完成扫描后自动更新",
+        "meta": "",
+        "insight": "最低价市场、日期、航段和价差会在这里集中展示。",
+        "link": None,
+        "button_text": "等待结果",
+    }
+
+
+def _row_signature(row: CombinedQuoteRow) -> tuple[str, str, str, str, str]:
+    return (
+        str(row.get("date") or ""),
+        str(row.get("route") or ""),
+        str(row.get("region_name") or ""),
+        str(row.get("link") or ""),
+        str(row.get("status") or ""),
+    )
+
+
+def _find_cheapest_highlight_signatures(
+    rows: list[CombinedQuoteRow],
+) -> set[tuple[str, str, str, str, str]]:
+    cheapest_candidates = [
+        row
+        for row in rows
+        if isinstance(row.get("cheapest_cny_price"), (int, float))
+    ]
+    if not cheapest_candidates:
+        return set()
+    minimum_price = min(float(row["cheapest_cny_price"]) for row in cheapest_candidates)  # type: ignore[index]
+    return {
+        _row_signature(row)
+        for row in cheapest_candidates
+        if abs(float(row["cheapest_cny_price"]) - minimum_price) < 0.0001  # type: ignore[index]
+    }
 
 
 def _find_missing_apify_data_files() -> list[str]:
@@ -359,26 +559,43 @@ class App:
         self._cancel_event = threading.Event()
         self.current_output: Path | None = None
         self._sort_state: dict[str, bool] = {}
+        self._state_save_job: str | None = None
+        self._cheapest_link: str | None = None
+        self._state_path = get_gui_state_file()
 
         default_departure = (datetime.now() + timedelta(days=30)).date()
         default_return = default_departure + timedelta(days=7)
+        saved_state = _load_query_state(
+            self._state_path,
+            default_departure=default_departure.strftime("%Y-%m-%d"),
+            default_return=default_return.strftime("%Y-%m-%d"),
+        )
 
-        self.origin_var = tk.StringVar(value="北京")
-        self.destination_var = tk.StringVar(value="阿拉木图")
-        self.trip_type_var = tk.StringVar(value=_TRIP_TYPE_ONE_WAY)
-        self.date_var = tk.StringVar(value=default_departure.strftime("%Y-%m-%d"))
-        self.return_date_var = tk.StringVar(value=default_return.strftime("%Y-%m-%d"))
-        self.regions_var = tk.StringVar(value="")
-        self.wait_var = tk.StringVar(value="10")
-        self.date_window_var = tk.StringVar(value="3")
-        self.exact_airport_var = tk.BooleanVar(value=False)
-        self.origin_country_var = tk.BooleanVar(value=False)
-        self.destination_country_var = tk.BooleanVar(value=False)
-        self.combined_summary_var = tk.BooleanVar(value=True)
+        self.origin_var = tk.StringVar(value=str(saved_state["origin"]))
+        self.destination_var = tk.StringVar(value=str(saved_state["destination"]))
+        self.trip_type_var = tk.StringVar(value=str(saved_state["trip_type"]))
+        self.date_var = tk.StringVar(value=str(saved_state["date"]))
+        self.return_date_var = tk.StringVar(value=str(saved_state["return_date"]))
+        self.regions_var = tk.StringVar(value=str(saved_state["regions"]))
+        self.wait_var = tk.StringVar(value=str(saved_state["wait"]))
+        self.date_window_var = tk.StringVar(value=str(saved_state["date_window"]))
+        self.exact_airport_var = tk.BooleanVar(value=bool(saved_state["exact_airport"]))
+        self.origin_country_var = tk.BooleanVar(value=bool(saved_state["origin_country"]))
+        self.destination_country_var = tk.BooleanVar(
+            value=bool(saved_state["destination_country"])
+        )
+        self.combined_summary_var = tk.BooleanVar(
+            value=bool(saved_state["combined_summary"])
+        )
         self.status_var = tk.StringVar(value="就绪")
         self.origin_hint_var = tk.StringVar(value="")
         self.destination_hint_var = tk.StringVar(value="")
         self.regions_hint_var = tk.StringVar(value="")
+        self.cheapest_card_headline_var = tk.StringVar(value="")
+        self.cheapest_card_price_var = tk.StringVar(value="")
+        self.cheapest_card_supporting_var = tk.StringVar(value="")
+        self.cheapest_card_meta_var = tk.StringVar(value="")
+        self.cheapest_card_insight_var = tk.StringVar(value="")
         self.location_entries: dict[str, ttk.Entry] = {}
         self.location_listboxes: dict[str, tk.Listbox] = {}
         self.location_hint_labels: dict[str, ttk.Label] = {}
@@ -389,6 +606,7 @@ class App:
         self.return_date_cell: ttk.Frame | None = None
 
         self._build_ui()
+        self.root.protocol("WM_DELETE_WINDOW", self._handle_close)
         self.origin_var.trace_add("write", self._refresh_location_hints)
         self.destination_var.trace_add("write", self._refresh_location_hints)
         self.origin_var.trace_add("write", self._refresh_origin_suggestions)
@@ -404,11 +622,29 @@ class App:
         self.destination_country_var.trace_add("write", self._refresh_route_mode)
         self.trip_type_var.trace_add("write", self._refresh_trip_mode)
         self.date_var.trace_add("write", self._sync_return_date_minimum)
+        for variable in (
+            self.origin_var,
+            self.destination_var,
+            self.trip_type_var,
+            self.date_var,
+            self.return_date_var,
+            self.regions_var,
+            self.wait_var,
+            self.date_window_var,
+            self.exact_airport_var,
+            self.origin_country_var,
+            self.destination_country_var,
+            self.combined_summary_var,
+        ):
+            variable.trace_add("write", self._schedule_query_state_save)
         self._refresh_location_hints()
         self._refresh_origin_suggestions()
         self._refresh_destination_suggestions()
         self._refresh_trip_mode()
         self._refresh_route_mode()
+        self._apply_cheapest_conclusion(_build_cheapest_conclusion([]))
+        if self._state_path.exists():
+            self.log("已恢复上次查询条件。")
         self._poll_queue()
 
     def _build_ui(self) -> None:
@@ -530,6 +766,80 @@ class App:
         results = ttk.LabelFrame(outer, text="结果", padding=12)
         results.pack(fill=tk.BOTH, expand=True, pady=(12, 0))
 
+        conclusion = tk.Frame(
+            results,
+            bg=_CARD_BG,
+            relief="groove",
+            borderwidth=2,
+            highlightthickness=1,
+            highlightbackground=_CARD_BORDER,
+            padx=14,
+            pady=12,
+        )
+        conclusion.pack(fill=tk.X, pady=(0, 10))
+        conclusion_left = tk.Frame(conclusion, bg=_CARD_BG)
+        conclusion_left.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        tk.Label(
+            conclusion_left,
+            text="最低价结论",
+            bg=_CARD_BG,
+            fg="#5B4A12",
+            font=_FONT_HEADING,
+        ).pack(anchor="w")
+        tk.Label(
+            conclusion_left,
+            textvariable=self.cheapest_card_headline_var,
+            bg=_CARD_BG,
+            fg="#000000",
+            font=_FONT_CARD_HEADLINE,
+        ).pack(anchor="w", pady=(4, 0))
+        tk.Label(
+            conclusion_left,
+            textvariable=self.cheapest_card_price_var,
+            bg=_CARD_BG,
+            fg=_CARD_PRICE,
+            font=_FONT_CARD_PRICE,
+        ).pack(anchor="w", pady=(4, 0))
+        tk.Label(
+            conclusion_left,
+            textvariable=self.cheapest_card_supporting_var,
+            bg=_CARD_BG,
+            fg="#2F2F2F",
+            font=_FONT_HEADING,
+        ).pack(anchor="w", pady=(2, 0))
+        tk.Label(
+            conclusion_left,
+            textvariable=self.cheapest_card_meta_var,
+            bg=_CARD_BG,
+            fg="#2F2F2F",
+            font=_FONT_BODY,
+        ).pack(anchor="w", pady=(6, 0))
+        tk.Label(
+            conclusion_left,
+            textvariable=self.cheapest_card_insight_var,
+            bg=_CARD_BG,
+            fg="#4F4F4F",
+            font=_FONT_BODY,
+            justify="left",
+            wraplength=620,
+        ).pack(anchor="w", pady=(4, 0))
+
+        conclusion_actions = tk.Frame(conclusion, bg=_CARD_BG)
+        conclusion_actions.pack(side=tk.RIGHT, anchor="n", padx=(12, 0))
+        self.cheapest_card_button = ttk.Button(
+            conclusion_actions,
+            text="等待结果",
+            command=self._open_cheapest_link,
+            state=tk.DISABLED,
+        )
+        self.cheapest_card_button.pack(anchor="e")
+
+        ttk.Label(
+            results,
+            text="完整价格列表会保留在下方，最低价行会高亮显示。",
+            foreground="#555555",
+        ).pack(anchor="w", pady=(0, 6))
+
         columns = (
             "date",
             "route",
@@ -557,6 +867,7 @@ class App:
         self.tree.column("status", width=100, anchor="w")
         self.tree.column("error", width=220, anchor="w")
         self.tree.column("link", width=240, anchor="w")
+        self.tree.tag_configure("cheapest_highlight", background="#FFF2B6")
         self.tree.pack(fill=tk.BOTH, expand=True)
         self.tree.bind("<Double-1>", self._on_tree_double_click)
 
@@ -985,6 +1296,60 @@ class App:
             f"默认包含 {','.join(DEFAULT_REGIONS)}；本次实际地区: {', '.join(effective_regions)}"
         )
 
+    def _current_query_state(self) -> dict[str, Any]:
+        return {
+            "origin": self.origin_var.get().strip(),
+            "destination": self.destination_var.get().strip(),
+            "trip_type": self.trip_type_var.get().strip() or _TRIP_TYPE_ONE_WAY,
+            "date": self.date_var.get().strip(),
+            "return_date": self.return_date_var.get().strip(),
+            "regions": self.regions_var.get().strip(),
+            "wait": self.wait_var.get().strip(),
+            "date_window": self.date_window_var.get().strip(),
+            "exact_airport": bool(self.exact_airport_var.get()),
+            "origin_country": bool(self.origin_country_var.get()),
+            "destination_country": bool(self.destination_country_var.get()),
+            "combined_summary": bool(self.combined_summary_var.get()),
+        }
+
+    def _schedule_query_state_save(self, *_args: object) -> None:
+        if self._state_save_job is not None:
+            self.root.after_cancel(self._state_save_job)
+        self._state_save_job = self.root.after(250, self._persist_query_state)
+
+    def _persist_query_state(self) -> None:
+        self._state_save_job = None
+        try:
+            _write_query_state(self._state_path, self._current_query_state())
+        except OSError as exc:
+            self.log(f"保存上次查询条件失败: {exc}")
+
+    def _handle_close(self) -> None:
+        if self._state_save_job is not None:
+            self.root.after_cancel(self._state_save_job)
+            self._state_save_job = None
+        self._persist_query_state()
+        self.root.destroy()
+
+    def _apply_cheapest_conclusion(
+        self, payload: dict[str, str | None]
+    ) -> None:
+        self.cheapest_card_headline_var.set(str(payload.get("headline") or ""))
+        self.cheapest_card_price_var.set(str(payload.get("price") or ""))
+        self.cheapest_card_supporting_var.set(str(payload.get("supporting") or ""))
+        self.cheapest_card_meta_var.set(str(payload.get("meta") or ""))
+        self.cheapest_card_insight_var.set(str(payload.get("insight") or ""))
+        self._cheapest_link = payload.get("link") or None
+        button_text = str(payload.get("button_text") or "打开最低价结果页")
+        self.cheapest_card_button.config(text=button_text)
+        self.cheapest_card_button.config(
+            state=tk.NORMAL if self._cheapest_link else tk.DISABLED
+        )
+
+    def _open_cheapest_link(self) -> None:
+        if self._cheapest_link and self._cheapest_link.startswith("http"):
+            webbrowser.open(self._cheapest_link)
+
     def log(self, message: str) -> None:
         timestamp = datetime.now().strftime("%H:%M:%S")
         self.log_text.insert(tk.END, f"[{timestamp}] {message}\n")
@@ -996,6 +1361,7 @@ class App:
         self._sort_state.clear()
         for col, label in _COLUMN_LABELS.items():
             self.tree.heading(col, text=label)
+        self._apply_cheapest_conclusion(_build_cheapest_conclusion([]))
 
     def _sort_column(self, col: str) -> None:
         """Sort treeview rows by *col*, toggling asc/desc on repeated clicks."""
@@ -1188,6 +1554,18 @@ class App:
             f"地区: {', '.join(regions)} "
             f"(实际代码 {origin_resolved.code} -> {destination_resolved.code})"
         )
+        self._apply_cheapest_conclusion(
+            {
+                "headline": "正在寻找最低价…",
+                "price": "扫描进行中",
+                "supporting": f"{origin} -> {destination} · {trip_label}",
+                "meta": f"正在比较 {len(regions)} 个市场。",
+                "insight": "扫描完成后，这里会汇总最便宜的市场、日期、航段和价差。",
+                "link": None,
+                "button_text": "等待结果",
+            }
+        )
+        self._persist_query_state()
 
         thread = threading.Thread(
             target=self._run_scan_worker,
@@ -1257,6 +1635,18 @@ class App:
             f"{trip_mode_label} {trip_label} (±{date_window_days} 天), "
             f"地区: {', '.join(regions)}"
         )
+        self._apply_cheapest_conclusion(
+            {
+                "headline": "正在寻找最低价…",
+                "price": "扫描进行中",
+                "supporting": f"{origin_label} -> {destination_label} · {trip_label}",
+                "meta": f"正在比较 {len(regions)} 个市场与候选机场组合。",
+                "insight": "扫描完成后，这里会给出当前最值得优先打开的最低价结果页。",
+                "link": None,
+                "button_text": "等待结果",
+            }
+        )
+        self._persist_query_state()
         self.log(
             "出发候选机场: "
             + ", ".join(
@@ -1573,6 +1963,17 @@ class App:
                 elif kind == "cancelled":
                     self.set_busy(False)
                     self.status_var.set("已取消")
+                    self._apply_cheapest_conclusion(
+                        {
+                            "headline": "扫描已取消",
+                            "price": "未生成新的最低价结论",
+                            "supporting": "你可以调整条件后重新开始。",
+                            "meta": "",
+                            "insight": "下次启动时会自动保留这次填写的查询条件。",
+                            "link": None,
+                            "button_text": "等待结果",
+                        }
+                    )
                     self.log("扫描已被用户取消。")
         except queue.Empty:
             pass
@@ -1593,32 +1994,42 @@ class App:
         for row_date, rows in rows_by_date:
             for row in rows:
                 combined_rows.append({"date": row_date, **row})
-                best_cny_text = (
-                    f"¥{row['best_cny_price']:,.2f}"
-                    if isinstance(row.get("best_cny_price"), (int, float))
-                    else "-"
-                )
-                cheapest_cny_text = (
-                    f"¥{row['cheapest_cny_price']:,.2f}"
-                    if isinstance(row.get("cheapest_cny_price"), (int, float))
-                    else "-"
-                )
-                self.tree.insert(
-                    "",
-                    tk.END,
-                    values=(
-                        row_date,
-                        row.get("route") or "-",
-                        row["region_name"],
-                        row.get("best_display_price") or "-",
-                        best_cny_text,
-                        row.get("cheapest_display_price") or "-",
-                        cheapest_cny_text,
-                        row.get("status") or "-",
-                        row.get("error") or "-",
-                        row["link"],
-                    ),
-                )
+
+        cheapest_highlight_signatures = _find_cheapest_highlight_signatures(combined_rows)
+
+        for row in combined_rows:
+            row_date = str(row.get("date") or "-")
+            row_signature = _row_signature(row)
+            row_tags = ("cheapest_highlight",) if row_signature in cheapest_highlight_signatures else ()
+            best_cny_text = (
+                f"¥{row['best_cny_price']:,.2f}"
+                if isinstance(row.get("best_cny_price"), (int, float))
+                else "-"
+            )
+            cheapest_cny_text = (
+                f"¥{row['cheapest_cny_price']:,.2f}"
+                if isinstance(row.get("cheapest_cny_price"), (int, float))
+                else "-"
+            )
+            self.tree.insert(
+                "",
+                tk.END,
+                values=(
+                    row_date,
+                    row.get("route") or "-",
+                    row["region_name"],
+                    row.get("best_display_price") or "-",
+                    best_cny_text,
+                    row.get("cheapest_display_price") or "-",
+                    cheapest_cny_text,
+                    row.get("status") or "-",
+                    row.get("error") or "-",
+                    row["link"],
+                ),
+                tags=row_tags,
+            )
+
+        self._apply_cheapest_conclusion(_build_cheapest_conclusion(combined_rows))
 
         best_candidates = [
             row
@@ -1685,6 +2096,17 @@ class App:
     def _handle_error(self, message: str) -> None:
         self.set_busy(False)
         self.status_var.set("失败")
+        self._apply_cheapest_conclusion(
+            {
+                "headline": "本次比价失败",
+                "price": "未生成最低价结论",
+                "supporting": "请调整条件或检查抓取环境后重试。",
+                "meta": "",
+                "insight": message,
+                "link": None,
+                "button_text": "暂无可打开页面",
+            }
+        )
         self.log(f"失败: {message}")
         messagebox.showerror("运行失败", message)
 

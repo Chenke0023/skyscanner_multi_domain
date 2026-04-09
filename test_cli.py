@@ -4,7 +4,7 @@ from contextlib import redirect_stdout
 from io import StringIO
 from unittest.mock import patch
 
-from cli import SimpleCLI, build_parser
+from cli import SimpleCLI, build_parser, run_failure_replay_command
 
 
 class CliParserTests(unittest.TestCase):
@@ -63,6 +63,21 @@ class CliParserTests(unittest.TestCase):
         self.assertEqual(args.origin, "北京")
         self.assertEqual(args.destination_country, "乌兹别克斯坦")
 
+    def test_replay_failures_command_accepts_custom_directory(self) -> None:
+        parser = build_parser()
+
+        args = parser.parse_args(
+            [
+                "replay-failures",
+                "--failure-dir",
+                "/tmp/failures",
+                "--no-show-samples",
+            ]
+        )
+
+        self.assertEqual(args.failure_dir, "/tmp/failures")
+        self.assertFalse(args.show_samples)
+
 
 class MarkdownFormattingTests(unittest.TestCase):
     def test_window_markdown_shows_round_trip_range(self) -> None:
@@ -112,6 +127,36 @@ class RoutePlanTests(unittest.TestCase):
         self.assertGreaterEqual(len(destination_points), 1)
         self.assertEqual(destination_points[0].code, "TAS")
         self.assertIn("CN", regions)
+
+
+class FailureReplayCommandTests(unittest.TestCase):
+    def test_run_failure_replay_command_prints_summary(self) -> None:
+        output = StringIO()
+
+        with (
+            patch("cli.build_failure_replay_report") as build_report,
+            redirect_stdout(output),
+        ):
+            build_report.return_value = type(
+                "Report",
+                (),
+                {
+                    "total_samples": 3,
+                },
+            )()
+            with patch(
+                "cli.render_failure_replay_report",
+                return_value="# 失败样本回放集\n",
+            ):
+                exit_code = run_failure_replay_command(
+                    Namespace(
+                        failure_dir="/tmp/failures",
+                        show_samples=False,
+                    )
+                )
+
+        self.assertEqual(exit_code, 0)
+        self.assertIn("失败样本回放集", output.getvalue())
 
 
 class RunPageCommandTests(unittest.IsolatedAsyncioTestCase):

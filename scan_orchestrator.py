@@ -91,6 +91,37 @@ def _persist_failure_log(
     if len(excerpt) > FAILURE_LOG_TEXT_LIMIT:
         excerpt = excerpt[:FAILURE_LOG_TEXT_LIMIT] + "\n...[truncated]"
 
+    merged_extra: dict[str, Any] = dict(extra or {})
+    if excerpt:
+        try:
+            from skyscanner_page_parser import (
+                extract_page_quote_with_diagnostics,
+                page_parse_diagnostics_to_dict,
+            )
+            from skyscanner_regions import REGIONS
+
+            region = REGIONS.get(
+                quote.region,
+                RegionConfig(
+                    quote.region,
+                    quote.region,
+                    quote.domain,
+                    merged_extra.get("locale", ""),
+                    quote.currency or "",
+                ),
+            )
+            _, diagnostics = extract_page_quote_with_diagnostics(
+                region,
+                quote.source_url,
+                excerpt,
+            )
+            merged_extra.setdefault(
+                "parser_snapshot",
+                page_parse_diagnostics_to_dict(diagnostics),
+            )
+        except Exception:
+            pass
+
     sections = [
         f"timestamp: {datetime.now().isoformat(timespec='seconds')}",
         f"transport: {transport}",
@@ -101,8 +132,10 @@ def _persist_failure_log(
         f"error: {quote.error or '-'}",
         f"source_url: {quote.source_url}",
     ]
-    if extra:
-        sections.append("extra: " + json.dumps(extra, ensure_ascii=False, sort_keys=True))
+    if merged_extra:
+        sections.append(
+            "extra: " + json.dumps(merged_extra, ensure_ascii=False, sort_keys=True)
+        )
     sections.append("")
     sections.append("--- page_text_excerpt ---")
     sections.append(excerpt or "(empty)")
