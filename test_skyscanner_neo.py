@@ -305,7 +305,7 @@ class SearchUrlTests(unittest.TestCase):
 
 
 class RunPageScanFallbackTests(unittest.TestCase):
-    def test_run_page_scan_falls_back_failed_markets_to_page(self) -> None:
+    def test_run_page_scan_skips_browser_launch_for_partial_scrapling_success(self) -> None:
         scrapling_quotes = [
             FlightQuote(
                 region="CN",
@@ -350,6 +350,77 @@ class RunPageScanFallbackTests(unittest.TestCase):
                     "transport_cdp.compare_via_pages",
                     new=AsyncMock(return_value=page_fallback_quotes),
                 ) as page_mock,
+                patch("transport_cdp.detect_cdp_version", return_value=None),
+                patch("transport_cdp.ensure_cdp_ready") as ensure_cdp_ready_mock,
+            ):
+                quotes = await run_page_scan(
+                    origin="BJSA",
+                    destination="ALA",
+                    date="2026-04-29",
+                    region_codes=["CN", "HK"],
+                    transport="scrapling",
+                )
+
+                self.assertEqual(len(quotes), 2)
+                quotes_by_region = {quote.region: quote for quote in quotes}
+                self.assertEqual(quotes_by_region["CN"].price, 2187.0)
+                self.assertIsNone(quotes_by_region["HK"].price)
+                self.assertEqual(quotes_by_region["HK"].status, "page_loading")
+                ensure_cdp_ready_mock.assert_not_called()
+                scrapling_mock.assert_awaited_once()
+                page_mock.assert_not_awaited()
+
+        asyncio.run(run_case())
+
+    def test_run_page_scan_reuses_connected_cdp_for_failed_markets(self) -> None:
+        scrapling_quotes = [
+            FlightQuote(
+                region="CN",
+                domain="https://www.skyscanner.cn",
+                price=2187.0,
+                currency="CNY",
+                source_url="https://www.skyscanner.cn/transport/flights/bjsa/ala/260429/",
+                status="page_text",
+                best_price=3217.0,
+                cheapest_price=2187.0,
+            ),
+            FlightQuote(
+                region="HK",
+                domain="https://www.skyscanner.com.hk",
+                price=None,
+                currency="HKD",
+                source_url="https://www.skyscanner.com.hk/transport/flights/bjsa/ala/260429/",
+                status="page_loading",
+                error="页面仍在加载结果: loading",
+            ),
+        ]
+        page_fallback_quotes = [
+            FlightQuote(
+                region="HK",
+                domain="https://www.skyscanner.com.hk",
+                price=2465.0,
+                currency="HKD",
+                source_url="https://www.skyscanner.com.hk/transport/flights/bjsa/ala/260429/",
+                status="page_text",
+                best_price=2539.0,
+                cheapest_price=2465.0,
+            )
+        ]
+
+        async def run_case() -> None:
+            with (
+                patch(
+                    "transport_scrapling.compare_via_scrapling",
+                    new=AsyncMock(return_value=scrapling_quotes),
+                ) as scrapling_mock,
+                patch(
+                    "transport_cdp.compare_via_pages",
+                    new=AsyncMock(return_value=page_fallback_quotes),
+                ) as page_mock,
+                patch(
+                    "transport_cdp.detect_cdp_version",
+                    return_value={"Browser": "Edg/146.0.3856.97"},
+                ),
                 patch("transport_cdp.ensure_cdp_ready") as ensure_cdp_ready_mock,
             ):
                 quotes = await run_page_scan(
@@ -364,12 +435,73 @@ class RunPageScanFallbackTests(unittest.TestCase):
                 quotes_by_region = {quote.region: quote for quote in quotes}
                 self.assertEqual(quotes_by_region["CN"].price, 2187.0)
                 self.assertEqual(quotes_by_region["HK"].price, 2465.0)
-                self.assertEqual(quotes_by_region["HK"].status, "page_text")
-                ensure_cdp_ready_mock.assert_called_once()
+                ensure_cdp_ready_mock.assert_not_called()
                 scrapling_mock.assert_awaited_once()
                 page_mock.assert_awaited_once()
                 fallback_regions = page_mock.await_args.args[1]
                 self.assertEqual([region.code for region in fallback_regions], ["HK"])
+
+        asyncio.run(run_case())
+
+    def test_run_page_scan_launches_browser_when_no_scrapling_market_succeeds(self) -> None:
+        scrapling_quotes = [
+            FlightQuote(
+                region="CN",
+                domain="https://www.skyscanner.cn",
+                price=None,
+                currency="CNY",
+                source_url="https://www.skyscanner.cn/transport/flights/bjsa/ala/260429/",
+                status="page_loading",
+                error="页面仍在加载结果: loading",
+            ),
+            FlightQuote(
+                region="HK",
+                domain="https://www.skyscanner.com.hk",
+                price=None,
+                currency="HKD",
+                source_url="https://www.skyscanner.com.hk/transport/flights/bjsa/ala/260429/",
+                status="page_loading",
+                error="页面仍在加载结果: loading",
+            ),
+        ]
+        page_fallback_quotes = [
+            FlightQuote(
+                region="CN",
+                domain="https://www.skyscanner.cn",
+                price=2187.0,
+                currency="CNY",
+                source_url="https://www.skyscanner.cn/transport/flights/bjsa/ala/260429/",
+                status="page_text",
+                best_price=3217.0,
+                cheapest_price=2187.0,
+            )
+        ]
+
+        async def run_case() -> None:
+            with (
+                patch(
+                    "transport_scrapling.compare_via_scrapling",
+                    new=AsyncMock(return_value=scrapling_quotes),
+                ),
+                patch(
+                    "transport_cdp.compare_via_pages",
+                    new=AsyncMock(return_value=page_fallback_quotes),
+                ) as page_mock,
+                patch("transport_cdp.detect_cdp_version", return_value=None),
+                patch("transport_cdp.ensure_cdp_ready") as ensure_cdp_ready_mock,
+            ):
+                quotes = await run_page_scan(
+                    origin="BJSA",
+                    destination="ALA",
+                    date="2026-04-29",
+                    region_codes=["CN", "HK"],
+                    transport="scrapling",
+                )
+
+                self.assertEqual(len(quotes), 2)
+                ensure_cdp_ready_mock.assert_called_once()
+                page_mock.assert_awaited_once()
+                self.assertEqual(quotes[0].price, 2187.0)
 
         asyncio.run(run_case())
 

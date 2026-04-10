@@ -5,22 +5,306 @@ from __future__ import annotations
 import asyncio
 import argparse
 from dataclasses import dataclass
+import http.client
+import json
+from pathlib import Path
 import re
 from typing import Any, Callable
+from urllib.parse import urlparse, urlunparse
 
+import aiohttp
 from bs4 import BeautifulSoup
 
+from app_paths import get_browser_profile_dir
 from skyscanner_models import FlightQuote, RegionConfig
 from skyscanner_page_parser import extract_page_quote
+from skyscanner_regions import REGION_HOST_ALIASES
 
 
 PLAYWRIGHT_PROBE_TEXT_LIMIT = 12000
+BROWSER_CDP_PORT = 9222
+BROWSER_BINARY_CANDIDATES = {
+    "chrome": Path("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"),
+    "edge": Path("/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge"),
+}
+CDP_HOST_CANDIDATES = ("localhost", "::1", "127.0.0.1")
 
 
 @dataclass(frozen=True)
 class ProbeOutcome:
     quote: FlightQuote
     page_text: str
+
+
+def _detect_local_browsers() -> dict[str, Path]:
+    return {
+        name: path for name, path in BROWSER_BINARY_CANDIDATES.items() if path.exists()
+    }
+
+
+def _profile_has_state(profile_dir: Path) -> bool:
+    try:
+        return profile_dir.exists() and any(profile_dir.iterdir())
+    except OSError:
+        return False
+
+
+def _get_persistent_probe_candidates() -> tuple[tuple[str, Path, Path], ...]:
+    browsers = _detect_local_browsers()
+    candidates: list[tuple[str, Path, Path]] = []
+    for browser_name in ("edge", "chrome"):
+        binary = browsers.get(browser_name)
+        if binary is None:
+            continue
+        profile_dir = get_browser_profile_dir(browser_name)
+        if _profile_has_state(profile_dir):
+            candidates.append((browser_name, binary, profile_dir))
+    return tuple(candidates)
+
+
+def _get_persistent_profile_dirs() -> tuple[Path, ...]:
+    profile_dirs: list[Path] = []
+    for browser_name in ("edge", "chrome"):
+        profile_dir = get_browser_profile_dir(browser_name)
+        if _profile_has_state(profile_dir):
+            profile_dirs.append(profile_dir)
+    return tuple(profile_dirs)
+
+
+def _build_cookie_scope_urls(region: RegionConfig, url: str) -> tuple[str, ...]:
+    parsed = urlparse(url)
+    hosts = REGION_HOST_ALIASES.get(region.code, {parsed.netloc})
+    urls = {
+        urlunparse(
+            (
+                parsed.scheme or "https",
+                host,
+                parsed.path or "/",
+                parsed.params,
+                parsed.query,
+                parsed.fragment,
+            )
+        )
+        for host in hosts
+        if host
+    }
+    urls.add(region.domain)
+    return tuple(sorted(urls))
+
+
+def _build_request_headers(region: RegionConfig) -> dict[str, str]:
+    headers = {
+        "accept-language": region.locale,
+        "referer": region.domain,
+    }
+    version_info = _cdp_get_json("/json/version")
+    if isinstance(version_info, dict):
+        user_agent = str(version_info.get("User-Agent", "")).strip()
+        if user_agent:
+            headers["user-agent"] = user_agent
+    return headers
+
+
+def _cdp_get_json(path: str, port: int = BROWSER_CDP_PORT) -> Any:
+    for host in CDP_HOST_CANDIDATES:
+        connection: http.client.HTTPConnection | None = None
+        try:
+            connection = http.client.HTTPConnection(host, port, timeout=2)
+            connection.request("GET", path)
+            response = connection.getresponse()
+            if response.status != 200:
+                response.read()
+                continue
+            return json.loads(response.read().decode("utf-8"))
+        except (OSError, http.client.HTTPException, json.JSONDecodeError, TimeoutError):
+            continue
+        finally:
+            try:
+                if connection is not None:
+                    connection.close()
+            except Exception:
+                pass
+    return None
+
+
+async def _cdp_send_command(
+    ws_url: str,
+    method: str,
+    params: dict[str, Any] | None = None,
+    *,
+    timeout_seconds: int = 10,
+) -> Any:
+    request_id = 1
+    timeout = aiohttp.ClientTimeout(total=timeout_seconds)
+    async with aiohttp.ClientSession(timeout=timeout) as session:
+        async with session.ws_connect(ws_url) as ws:
+            await ws.send_json(
+                {
+                    "id": request_id,
+                    "method": method,
+                    "params": params or {},
+                }
+            )
+            async for message in ws:
+                if message.type != aiohttp.WSMsgType.TEXT:
+                    continue
+                payload = json.loads(message.data)
+                if payload.get("id") != request_id:
+                    continue
+                if "error" in payload:
+                    raise RuntimeError(json.dumps(payload["error"], ensure_ascii=False))
+                return payload.get("result")
+    return None
+
+
+def _detect_cdp_page_ws_url(port: int = BROWSER_CDP_PORT) -> str | None:
+    tabs = _cdp_get_json("/json/list", port=port)
+    if isinstance(tabs, list):
+        for tab in tabs:
+            if tab.get("type") != "page":
+                continue
+            ws_url = str(tab.get("webSocketDebuggerUrl", "")).strip()
+            if ws_url:
+                return ws_url
+    return None
+
+
+async def _cdp_get_cookie_jar(
+    region: RegionConfig,
+    url: str,
+    *,
+    port: int = BROWSER_CDP_PORT,
+) -> list[dict[str, Any]]:
+    ws_url = _detect_cdp_page_ws_url(port=port)
+    if not ws_url:
+        return []
+
+    try:
+        result = await _cdp_send_command(
+            ws_url,
+            "Network.getCookies",
+            {"urls": list(_build_cookie_scope_urls(region, url))},
+        )
+        cookies = (result or {}).get("cookies", [])
+        if not isinstance(cookies, list):
+            return []
+        return [cookie for cookie in cookies if isinstance(cookie, dict)]
+    except Exception:
+        return []
+
+    return []
+
+
+def _get_matching_cdp_page_ws_urls(
+    region: RegionConfig,
+    url: str,
+    *,
+    port: int = BROWSER_CDP_PORT,
+) -> tuple[str, ...]:
+    tabs = _cdp_get_json("/json/list", port=port)
+    if not isinstance(tabs, list):
+        return ()
+
+    parsed_url = urlparse(url)
+    allowed_hosts = REGION_HOST_ALIASES.get(region.code, {parsed_url.netloc})
+    expected_path = parsed_url.path
+    matches: list[str] = []
+    for tab in tabs:
+        if tab.get("type") != "page":
+            continue
+        tab_url = str(tab.get("url", "")).strip()
+        parsed_tab = urlparse(tab_url)
+        if parsed_tab.netloc not in allowed_hosts or parsed_tab.path != expected_path:
+            continue
+        ws_url = str(tab.get("webSocketDebuggerUrl", "")).strip()
+        if ws_url:
+            matches.append(ws_url)
+    return tuple(dict.fromkeys(matches))
+
+
+def _build_cdp_page_probe_expression(text_limit: int = PLAYWRIGHT_PROBE_TEXT_LIMIT) -> str:
+    return (
+        "(() => ({"
+        "url: location.href,"
+        "title: document.title,"
+        f"text: (document.body ? document.body.innerText : '').slice(0, {text_limit})"
+        "}))()"
+    )
+
+
+async def _probe_existing_cdp_page(
+    url: str,
+    region: RegionConfig,
+) -> ProbeOutcome | None:
+    for ws_url in _get_matching_cdp_page_ws_urls(region, url):
+        try:
+            payload = await _cdp_send_command(
+                ws_url,
+                "Runtime.evaluate",
+                {
+                    "expression": _build_cdp_page_probe_expression(),
+                    "returnByValue": True,
+                    "awaitPromise": True,
+                },
+            )
+        except Exception:
+            continue
+
+        if not isinstance(payload, dict):
+            continue
+        result = payload.get("result", {})
+        if not isinstance(result, dict):
+            continue
+
+        page_payload = result.get("value")
+        if not isinstance(page_payload, dict):
+            continue
+
+        page_url = str(page_payload.get("url", url))
+        page_text = str(page_payload.get("text", "")).strip()
+        if not page_text:
+            continue
+
+        quote = extract_page_quote(region, page_url, page_text)
+        if quote.price is not None:
+            return ProbeOutcome(quote=quote, page_text=page_text)
+
+        has_captcha, captcha_type = _check_captcha_in_page(page_text)
+        if has_captcha:
+            return ProbeOutcome(
+                quote=_build_captcha_quote(
+                    region,
+                    page_url,
+                    captcha_type,
+                    source_label="CDP 已打开页面",
+                ),
+                page_text=page_text,
+            )
+
+    return None
+
+
+async def _resolve_scrapling_state_overrides(
+    region: RegionConfig,
+    url: str,
+    *,
+    for_stealth: bool,
+) -> dict[str, Any]:
+    cdp_cookies = await _cdp_get_cookie_jar(region, url)
+    if cdp_cookies:
+        if for_stealth:
+            return {"cookies": cdp_cookies}
+        return {
+            "cookies": {
+                str(cookie.get("name", "")).strip(): str(cookie.get("value", ""))
+                for cookie in cdp_cookies
+                if str(cookie.get("name", "")).strip()
+            }
+        }
+
+    for profile_dir in _get_persistent_profile_dirs():
+        return {"user_data_dir": str(profile_dir)}
+    return {}
 
 
 def _extract_scrapling_page_text(page: Any) -> str:
@@ -107,6 +391,15 @@ def _coerce_page_snippet(value: Any) -> str:
     return ""
 
 
+def _looks_like_shell_page(page_text: str) -> bool:
+    normalized_lines = [line.strip() for line in page_text.splitlines() if line.strip()]
+    if not normalized_lines:
+        return False
+    if len(normalized_lines) <= 2 and len("\n".join(normalized_lines)) < 200:
+        return True
+    return False
+
+
 def _check_captcha_in_page(page_text: str, page: Any | None = None) -> tuple[bool, str]:
     """Check if page contains captcha indicators.
 
@@ -187,100 +480,127 @@ async def _probe_page_with_playwright(
     except ImportError:
         return None
 
-    browser = None
-    context = None
-    page = None
-    page_text = ""
-    final_url = url
-    timed_out = False
+    async def probe_page(page: Any) -> ProbeOutcome | None:
+        page_text = ""
+        final_url = url
+        timed_out = False
+
+        try:
+            await page.goto(
+                url,
+                wait_until="domcontentloaded",
+                timeout=min(timeout_ms, 12000),
+            )
+        except PlaywrightTimeoutError:
+            timed_out = True
+
+        final_url = page.url or url
+        try:
+            page_text = await page.evaluate(
+                f"""
+                () => {{
+                    const text = document.body ? document.body.innerText : '';
+                    return text.slice(0, {PLAYWRIGHT_PROBE_TEXT_LIMIT});
+                }}
+                """
+            )
+        except Exception:
+            try:
+                page_text = await page.text_content("body") or ""
+            except Exception:
+                page_text = ""
+
+        quote = extract_page_quote(region, final_url, page_text)
+        if quote.price is not None:
+            return ProbeOutcome(quote=quote, page_text=page_text)
+
+        has_captcha, captcha_type = _check_captcha_in_page(page_text)
+        if has_captcha:
+            return ProbeOutcome(
+                quote=_build_captcha_quote(
+                    region,
+                    final_url,
+                    captcha_type,
+                    source_label="Playwright 预探测",
+                ),
+                page_text=page_text,
+            )
+
+        if quote.status == "page_loading":
+            quote.error = "Playwright 预探测显示结果页仍在加载"
+            return ProbeOutcome(quote=quote, page_text=page_text)
+
+        if timed_out and page_text:
+            return ProbeOutcome(
+                quote=FlightQuote(
+                    region=region.code,
+                    domain=region.domain,
+                    price=None,
+                    currency=region.currency,
+                    source_url=final_url,
+                    status="page_loading",
+                    error="Playwright 预探测在 domcontentloaded 前超时",
+                ),
+                page_text=page_text,
+            )
+
+        return None
 
     try:
         async with async_playwright() as playwright:
-            browser = await playwright.chromium.launch(headless=True)
-            context = await browser.new_context(
-                locale=region.locale,
-                extra_http_headers={
-                    "accept-language": region.locale,
-                    "referer": region.domain,
-                },
-            )
-            page = await context.new_page()
-            try:
-                await page.goto(
-                    url,
-                    wait_until="domcontentloaded",
-                    timeout=min(timeout_ms, 12000),
-                )
-            except PlaywrightTimeoutError:
-                timed_out = True
-
-            final_url = page.url or url
-            try:
-                page_text = await page.evaluate(
-                    f"""
-                    () => {{
-                        const text = document.body ? document.body.innerText : '';
-                        return text.slice(0, {PLAYWRIGHT_PROBE_TEXT_LIMIT});
-                    }}
-                    """
-                )
-            except Exception:
+            headers = _build_request_headers(region)
+            for _, binary, profile_dir in _get_persistent_probe_candidates():
+                context = None
                 try:
-                    page_text = await page.text_content("body") or ""
+                    context = await playwright.chromium.launch_persistent_context(
+                        str(profile_dir),
+                        executable_path=str(binary),
+                        headless=True,
+                        locale=region.locale,
+                        extra_http_headers=headers,
+                    )
+                    page = context.pages[0] if context.pages else await context.new_page()
+                    outcome = await probe_page(page)
+                    if outcome is not None:
+                        return outcome
                 except Exception:
-                    page_text = ""
+                    pass
+                finally:
+                    try:
+                        if context is not None:
+                            await context.close()
+                    except Exception:
+                        pass
 
-            quote = extract_page_quote(region, final_url, page_text)
-            if quote.price is not None:
-                return ProbeOutcome(quote=quote, page_text=page_text)
-
-            has_captcha, captcha_type = _check_captcha_in_page(page_text)
-            if has_captcha:
-                return ProbeOutcome(
-                    quote=_build_captcha_quote(
-                        region,
-                        final_url,
-                        captcha_type,
-                        source_label="Playwright 预探测",
-                    ),
-                    page_text=page_text,
+            browser = None
+            context = None
+            page = None
+            try:
+                browser = await playwright.chromium.launch(headless=True)
+                context = await browser.new_context(
+                    locale=region.locale,
+                    extra_http_headers=headers,
                 )
-
-            if quote.status == "page_loading":
-                quote.error = "Playwright 预探测显示结果页仍在加载"
-                return ProbeOutcome(quote=quote, page_text=page_text)
-
-            if timed_out and page_text:
-                return ProbeOutcome(
-                    quote=FlightQuote(
-                        region=region.code,
-                        domain=region.domain,
-                        price=None,
-                        currency=region.currency,
-                        source_url=final_url,
-                        status="page_loading",
-                        error="Playwright 预探测在 domcontentloaded 前超时",
-                    ),
-                    page_text=page_text,
-                )
+                page = await context.new_page()
+                return await probe_page(page)
+            finally:
+                try:
+                    if page is not None:
+                        await page.close()
+                except Exception:
+                    pass
+                try:
+                    if context is not None:
+                        await context.close()
+                except Exception:
+                    pass
+                try:
+                    if browser is not None:
+                        await browser.close()
+                except Exception:
+                    pass
     except Exception:
         return None
-    finally:
-        try:
-            if page is not None:
-                await page.close()
-        except Exception:
-            pass
-        try:
-            if context is not None:
-                await context.close()
-        except Exception:
-            pass
-        try:
-            if browser is not None:
-                await browser.close()
-        except Exception:
-            pass
 
     return None
 
@@ -323,22 +643,33 @@ async def compare_via_scrapling(
         *,
         solve_cloudflare: bool,
         wait_override_ms: int | None = None,
+        load_dom_override: bool | None = None,
+        network_idle_override: bool | None = None,
+        state_overrides: dict[str, Any] | None = None,
     ) -> Any:
+        if state_overrides is None:
+            state_overrides = await _resolve_scrapling_state_overrides(
+                region,
+                url,
+                for_stealth=True,
+            )
         return await asyncio.to_thread(
             StealthyFetcher.fetch,
             url,
             headless=True,
-            network_idle=False,
-            load_dom=False,
+            network_idle=(
+                network_idle_override
+                if network_idle_override is not None
+                else False
+            ),
+            load_dom=load_dom_override if load_dom_override is not None else False,
             timeout=timeout_ms,
             wait=wait_override_ms or wait_ms,
             solve_cloudflare=solve_cloudflare,
             google_search=False,
             locale=region.locale,
-            extra_headers={
-                "accept-language": region.locale,
-                "referer": region.domain,
-            },
+            extra_headers=_build_request_headers(region),
+            **state_overrides,
         )
 
     for region in selected_regions:
@@ -352,7 +683,11 @@ async def compare_via_scrapling(
         latest_error: str | None = None
         detected_captcha_type = ""
 
-        probe_outcome = await _probe_page_with_playwright(url, region, timeout_ms)
+        probe_source = "cdp_existing_page"
+        probe_outcome = await _probe_existing_cdp_page(url, region)
+        if probe_outcome is None:
+            probe_source = "playwright"
+            probe_outcome = await _probe_page_with_playwright(url, region, timeout_ms)
         if probe_outcome is not None:
             if hasattr(probe_outcome, "quote"):
                 probe_quote = probe_outcome.quote
@@ -366,7 +701,7 @@ async def compare_via_scrapling(
                     transport="scrapling",
                     route_key=route_key,
                     page_text=probe_page_text,
-                    extra={"locale": region.locale, "probe": "playwright"},
+                    extra={"locale": region.locale, "probe": probe_source},
                 )
             quotes.append(probe_quote)
             continue
@@ -395,12 +730,18 @@ async def compare_via_scrapling(
         )
 
         for attempt in stealth_attempts:
+            state_overrides = await _resolve_scrapling_state_overrides(
+                region,
+                url,
+                for_stealth=True,
+            )
             try:
                 page = await fetch_with_stealth(
                     url,
                     region,
                     solve_cloudflare=attempt["solve_cloudflare"],
                     wait_override_ms=attempt["wait_ms"],
+                    state_overrides=state_overrides,
                 )
             except Exception as exc:
                 latest_error = f"Scrapling 抓取失败: {exc}"
@@ -432,6 +773,37 @@ async def compare_via_scrapling(
             latest_quote = extract_page_quote(region, page_url, page_text)
             if latest_quote.price is not None:
                 break
+
+            if (
+                state_overrides
+                and latest_quote.status == "page_parse_failed"
+                and _looks_like_shell_page(page_text)
+            ):
+                try:
+                    dom_page = await fetch_with_stealth(
+                        url,
+                        region,
+                        solve_cloudflare=attempt["solve_cloudflare"],
+                        wait_override_ms=max(attempt["wait_ms"], 12000),
+                        load_dom_override=True,
+                        network_idle_override=True,
+                        state_overrides=state_overrides,
+                    )
+                    dom_page_text = _extract_scrapling_page_text(dom_page)
+                    dom_page_url = (
+                        _coerce_page_snippet(getattr(dom_page, "url", None)) or page_url
+                    )
+                    if dom_page_text:
+                        page_text = dom_page_text
+                        latest_quote = extract_page_quote(
+                            region,
+                            dom_page_url,
+                            dom_page_text,
+                        )
+                        if latest_quote.price is not None:
+                            break
+                except Exception:
+                    pass
 
             if has_captcha and detected_captcha_type != "cloudflare":
                 latest_quote = _build_captcha_quote(
@@ -509,12 +881,19 @@ async def compare_via_scrapling(
 
         if latest_quote is None or latest_quote.price is None:
             try:
+                state_overrides = await _resolve_scrapling_state_overrides(
+                    region,
+                    url,
+                    for_stealth=False,
+                )
                 page = await asyncio.to_thread(
                     Fetcher.get,
                     url,
                     timeout=timeout_seconds,
                     stealthy_headers=True,
                     follow_redirects=True,
+                    headers=_build_request_headers(region),
+                    **state_overrides,
                 )
                 page_text = _extract_scrapling_page_text(page)
                 page_url = _coerce_page_snippet(getattr(page, "url", None)) or url

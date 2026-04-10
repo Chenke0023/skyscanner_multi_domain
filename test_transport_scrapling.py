@@ -1,11 +1,20 @@
 import argparse
 import asyncio
+from pathlib import Path
 import sys
+from tempfile import TemporaryDirectory
 import types
 import unittest
 from unittest.mock import patch
 
-from transport_scrapling import _check_captcha_in_page, compare_via_scrapling
+from transport_scrapling import (
+    _build_cookie_scope_urls,
+    _check_captcha_in_page,
+    _get_persistent_probe_candidates,
+    _get_matching_cdp_page_ws_urls,
+    _resolve_scrapling_state_overrides,
+    compare_via_scrapling,
+)
 from skyscanner_models import RegionConfig
 
 
@@ -21,8 +30,295 @@ class CaptchaDetectionTests(unittest.TestCase):
         self.assertTrue(has_captcha)
         self.assertEqual(captcha_type, "px")
 
+    def test_get_persistent_probe_candidates_prefers_non_empty_profiles(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            edge_binary = temp_path / "Microsoft Edge"
+            chrome_binary = temp_path / "Google Chrome"
+            edge_binary.write_text("", encoding="utf-8")
+            chrome_binary.write_text("", encoding="utf-8")
+
+            edge_profile = temp_path / "runtime" / "edge-cdp-profile"
+            chrome_profile = temp_path / "runtime" / "chrome-cdp-profile"
+            (edge_profile / "Default").mkdir(parents=True)
+            chrome_profile.mkdir(parents=True)
+
+            def fake_get_browser_profile_dir(browser_name: str) -> Path:
+                return {
+                    "edge": edge_profile,
+                    "chrome": chrome_profile,
+                }[browser_name]
+
+            with (
+                patch(
+                    "transport_scrapling._detect_local_browsers",
+                    return_value={
+                        "edge": edge_binary,
+                        "chrome": chrome_binary,
+                    },
+                ),
+                patch(
+                    "transport_scrapling.get_browser_profile_dir",
+                    side_effect=fake_get_browser_profile_dir,
+                ),
+            ):
+                candidates = _get_persistent_probe_candidates()
+
+        self.assertEqual(candidates, (("edge", edge_binary, edge_profile),))
+
+    def test_build_cookie_scope_urls_includes_host_aliases(self) -> None:
+        region = RegionConfig(
+            code="CN",
+            name="中国",
+            domain="https://www.skyscanner.cn",
+            currency="CNY",
+            locale="zh-CN",
+        )
+
+        urls = _build_cookie_scope_urls(
+            region,
+            "https://www.skyscanner.cn/transport/flights/bjsa/ala/260429/?adultsv2=1",
+        )
+
+        self.assertIn("https://www.skyscanner.cn", urls)
+        self.assertIn(
+            "https://www.tianxun.com/transport/flights/bjsa/ala/260429/?adultsv2=1",
+            urls,
+        )
+
+    def test_get_matching_cdp_page_ws_urls_filters_by_path_and_region_aliases(self) -> None:
+        region = RegionConfig(
+            code="CN",
+            name="中国",
+            domain="https://www.skyscanner.cn",
+            currency="CNY",
+            locale="zh-CN",
+        )
+
+        tabs = [
+            {
+                "type": "page",
+                "url": "https://www.tianxun.com/transport/flights/bjsa/ala/260429/",
+                "webSocketDebuggerUrl": "ws://match-cn",
+            },
+            {
+                "type": "page",
+                "url": "https://www.tianxun.com/transport/flights/bjsa/tbs/260429/",
+                "webSocketDebuggerUrl": "ws://wrong-path",
+            },
+            {
+                "type": "page",
+                "url": "https://www.skyscanner.net/transport/flights/bjsa/ala/260429/",
+                "webSocketDebuggerUrl": "ws://wrong-region",
+            },
+        ]
+
+        with patch("transport_scrapling._cdp_get_json", return_value=tabs):
+            ws_urls = _get_matching_cdp_page_ws_urls(
+                region,
+                "https://www.skyscanner.cn/transport/flights/bjsa/ala/260429/?adultsv2=1",
+            )
+
+        self.assertEqual(ws_urls, ("ws://match-cn",))
+
+    def test_resolve_scrapling_state_overrides_prefers_live_cookies(self) -> None:
+        region = RegionConfig(
+            code="HK",
+            name="香港",
+            domain="https://www.skyscanner.com.hk",
+            currency="HKD",
+            locale="zh-HK",
+        )
+
+        async def run_case() -> None:
+            with (
+                patch(
+                    "transport_scrapling._cdp_get_cookie_jar",
+                    return_value=[
+                        {"name": "_px3", "value": "token", "domain": "www.skyscanner.com.hk"},
+                        {"name": "scanner", "value": "abc", "domain": "www.skyscanner.com.hk"},
+                    ],
+                ),
+                patch(
+                    "transport_scrapling._get_persistent_profile_dirs",
+                    return_value=(Path("/tmp/edge-cdp-profile"),),
+                ),
+            ):
+                overrides = await _resolve_scrapling_state_overrides(
+                    region,
+                    "https://www.skyscanner.com.hk/transport/flights/bjsa/ala/260429/",
+                    for_stealth=True,
+                )
+
+            self.assertEqual(
+                overrides,
+                {
+                    "cookies": [
+                        {"name": "_px3", "value": "token", "domain": "www.skyscanner.com.hk"},
+                        {"name": "scanner", "value": "abc", "domain": "www.skyscanner.com.hk"},
+                    ]
+                },
+            )
+
+        asyncio.run(run_case())
+
+    def test_resolve_scrapling_state_overrides_converts_live_cookies_for_http(self) -> None:
+        region = RegionConfig(
+            code="HK",
+            name="香港",
+            domain="https://www.skyscanner.com.hk",
+            currency="HKD",
+            locale="zh-HK",
+        )
+
+        async def run_case() -> None:
+            with (
+                patch(
+                    "transport_scrapling._cdp_get_cookie_jar",
+                    return_value=[
+                        {"name": "_px3", "value": "token"},
+                        {"name": "scanner", "value": "abc"},
+                    ],
+                ),
+                patch(
+                    "transport_scrapling._get_persistent_profile_dirs",
+                    return_value=(Path("/tmp/edge-cdp-profile"),),
+                ),
+            ):
+                overrides = await _resolve_scrapling_state_overrides(
+                    region,
+                    "https://www.skyscanner.com.hk/transport/flights/bjsa/ala/260429/",
+                    for_stealth=False,
+                )
+
+            self.assertEqual(
+                overrides,
+                {"cookies": {"_px3": "token", "scanner": "abc"}},
+            )
+
+        asyncio.run(run_case())
+
+    def test_resolve_scrapling_state_overrides_falls_back_to_profile_dir(self) -> None:
+        region = RegionConfig(
+            code="SG",
+            name="新加坡",
+            domain="https://www.skyscanner.sg",
+            currency="SGD",
+            locale="en-SG",
+        )
+
+        async def run_case() -> None:
+            with (
+                patch(
+                    "transport_scrapling._cdp_get_cookie_jar",
+                    return_value=[],
+                ),
+                patch(
+                    "transport_scrapling._get_persistent_profile_dirs",
+                    return_value=(Path("/tmp/edge-cdp-profile"),),
+                ),
+            ):
+                overrides = await _resolve_scrapling_state_overrides(
+                    region,
+                    "https://www.skyscanner.sg/transport/flights/bjsa/ala/260429/",
+                    for_stealth=True,
+                )
+
+            self.assertEqual(
+                overrides,
+                {"user_data_dir": "/tmp/edge-cdp-profile"},
+            )
+
+        asyncio.run(run_case())
+
 
 class ScraplingRetryTests(unittest.TestCase):
+    def test_compare_via_scrapling_retries_shell_page_with_dom_loading(self) -> None:
+        calls: list[dict[str, object]] = []
+
+        class ShellPage:
+            url = "https://www.skyscanner.com.hk/transport/flights/bjsa/ala/260429/"
+            html = "<html><body><h1>Skyscanner 上從北京到阿拉木圖的便宜機票</h1></body></html>"
+
+        class FullPage:
+            url = "https://www.skyscanner.com.hk/transport/flights/bjsa/ala/260429/"
+            html = """
+            <html>
+              <body>
+                <div>搜尋結果顯示方式</div>
+                <div>最佳</div>
+                <div>HK$3,305</div>
+                <div>最便宜</div>
+                <div>HK$3,072</div>
+              </body>
+            </html>
+            """
+
+        def fake_fetch(url: str, **kwargs):
+            calls.append(kwargs)
+            if len(calls) == 1:
+                return ShellPage()
+            return FullPage()
+
+        fake_scrapling = types.SimpleNamespace(
+            Fetcher=types.SimpleNamespace(get=lambda *a, **k: ShellPage()),
+            StealthyFetcher=types.SimpleNamespace(fetch=fake_fetch),
+        )
+        fake_captcha_solver = types.SimpleNamespace(
+            CaptchaSolverClient=None,
+            CaptchaSolverError=Exception,
+        )
+
+        args = argparse.Namespace(
+            origin="BJSA",
+            destination="ALA",
+            date="2026-04-29",
+            timeout=20,
+            page_wait=5,
+        )
+        region = RegionConfig(
+            code="HK",
+            name="香港",
+            domain="https://www.skyscanner.com.hk",
+            currency="HKD",
+            locale="zh-HK",
+        )
+
+        async def run_case() -> None:
+            with (
+                patch.dict(
+                    sys.modules,
+                    {
+                        "scrapling": fake_scrapling,
+                        "captcha_solver": fake_captcha_solver,
+                    },
+                ),
+                patch("transport_scrapling._probe_existing_cdp_page", return_value=None),
+                patch("transport_scrapling._probe_page_with_playwright", return_value=None),
+                patch(
+                    "transport_scrapling._resolve_scrapling_state_overrides",
+                    return_value={"cookies": {"_px3": "token"}},
+                ),
+            ):
+                quotes = await compare_via_scrapling(
+                    args,
+                    [region],
+                    persist_failures=False,
+                    build_search_url=lambda *_args: (
+                        "https://www.skyscanner.com.hk/transport/flights/bjsa/ala/260429/"
+                    ),
+                    persist_failure_log=lambda *a, **k: a[0],
+                )
+
+            self.assertEqual(len(calls), 2)
+            self.assertFalse(calls[0]["load_dom"])
+            self.assertTrue(calls[1]["load_dom"])
+            self.assertTrue(calls[1]["network_idle"])
+            self.assertEqual(quotes[0].status, "page_text")
+            self.assertEqual(quotes[0].cheapest_price, 3072.0)
+
+        asyncio.run(run_case())
+
     def test_compare_via_scrapling_forwards_probe_page_text_to_failure_log(self) -> None:
         args = argparse.Namespace(
             origin="BJSA",
@@ -42,6 +338,9 @@ class ScraplingRetryTests(unittest.TestCase):
 
         async def run_case() -> None:
             with patch(
+                "transport_scrapling._probe_existing_cdp_page",
+                return_value=None,
+            ), patch(
                 "transport_scrapling._probe_page_with_playwright",
                 return_value=types.SimpleNamespace(
                     region="SG",
@@ -88,6 +387,9 @@ class ScraplingRetryTests(unittest.TestCase):
 
         async def run_case() -> None:
             with patch(
+                "transport_scrapling._probe_existing_cdp_page",
+                return_value=None,
+            ), patch(
                 "transport_scrapling._probe_page_with_playwright",
                 return_value=types.SimpleNamespace(
                     region="SG",
@@ -113,6 +415,65 @@ class ScraplingRetryTests(unittest.TestCase):
             self.assertEqual(len(quotes), 1)
             self.assertEqual(quotes[0].status, "px_challenge")
             self.assertIn("PX", quotes[0].error)
+
+        asyncio.run(run_case())
+
+    def test_compare_via_scrapling_reuses_existing_cdp_page_before_playwright(self) -> None:
+        args = argparse.Namespace(
+            origin="BJSA",
+            destination="ALA",
+            date="2026-04-29",
+            timeout=30,
+            page_wait=8,
+        )
+        region = RegionConfig(
+            code="HK",
+            name="香港",
+            domain="https://www.skyscanner.com.hk",
+            currency="HKD",
+            locale="zh-HK",
+        )
+
+        async def run_case() -> None:
+            with (
+                patch(
+                    "transport_scrapling._probe_existing_cdp_page",
+                    return_value=types.SimpleNamespace(
+                        quote=types.SimpleNamespace(
+                            region="HK",
+                            domain="https://www.skyscanner.com.hk",
+                            price=3305.0,
+                            currency="HKD",
+                            source_url="https://www.skyscanner.com.hk/transport/flights/bjsa/ala/260429/",
+                            status="page_text",
+                            error=None,
+                            cheapest_price=3072.0,
+                            best_price=3305.0,
+                            price_path="cheapest_price",
+                            best_price_path="best_price",
+                            cheapest_price_path="cheapest_price",
+                            debug_log_path=None,
+                        ),
+                        page_text="最優 HK$3,305 最便宜 HK$3,072",
+                    ),
+                ),
+                patch("transport_scrapling._probe_page_with_playwright") as playwright_probe,
+                patch.dict(sys.modules, {"scrapling": None}),
+            ):
+                quotes = await compare_via_scrapling(
+                    args,
+                    [region],
+                    persist_failures=False,
+                    build_search_url=lambda *_args: (
+                        "https://www.skyscanner.com.hk/transport/flights/bjsa/ala/260429/"
+                    ),
+                    persist_failure_log=lambda *a, **k: a[0],
+                )
+
+            playwright_probe.assert_not_called()
+            self.assertEqual(len(quotes), 1)
+            self.assertEqual(quotes[0].price, 3305.0)
+            self.assertEqual(quotes[0].cheapest_price, 3072.0)
 
         asyncio.run(run_case())
 
@@ -169,7 +530,16 @@ class ScraplingRetryTests(unittest.TestCase):
                     "scrapling": fake_scrapling,
                     "captcha_solver": fake_captcha_solver,
                 },
-            ), patch("transport_scrapling._probe_page_with_playwright", return_value=None):
+            ), patch(
+                "transport_scrapling._probe_existing_cdp_page",
+                return_value=None,
+            ), patch(
+                "transport_scrapling._probe_page_with_playwright",
+                return_value=None,
+            ), patch(
+                "transport_scrapling._resolve_scrapling_state_overrides",
+                return_value={},
+            ):
                 quotes = await compare_via_scrapling(
                     args,
                     [region],
@@ -245,7 +615,16 @@ class ScraplingRetryTests(unittest.TestCase):
                     "scrapling": fake_scrapling,
                     "captcha_solver": fake_captcha_solver,
                 },
-            ), patch("transport_scrapling._probe_page_with_playwright", return_value=None):
+            ), patch(
+                "transport_scrapling._probe_existing_cdp_page",
+                return_value=None,
+            ), patch(
+                "transport_scrapling._probe_page_with_playwright",
+                return_value=None,
+            ), patch(
+                "transport_scrapling._resolve_scrapling_state_overrides",
+                return_value={},
+            ):
                 quotes = await compare_via_scrapling(
                     args,
                     [region],
