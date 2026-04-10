@@ -201,7 +201,7 @@ async def run_page_scan(
     transport: str = "scrapling",
     on_region_start: Callable[[RegionConfig], None] | None = None,
 ) -> list[FlightQuote]:
-    from transport_cdp import compare_via_pages, ensure_cdp_ready
+    from transport_cdp import compare_via_pages, detect_cdp_version, ensure_cdp_ready
     from transport_scrapling import compare_via_scrapling
 
     selected_regions = get_selected_regions(region_codes)
@@ -238,25 +238,29 @@ async def run_page_scan(
             if quote.price is None and quote.status in SCRAPLING_FALLBACK_STATUSES
         ]
         if fallback_regions:
-            ensure_cdp_ready(
-                start_url=build_search_url(
-                    fallback_regions[0], origin, destination, date, return_date
+            has_scrapling_success = any(quote.price is not None for quote in quotes)
+            cdp_info = detect_cdp_version()
+            if cdp_info or not has_scrapling_success:
+                if not cdp_info:
+                    ensure_cdp_ready(
+                        start_url=build_search_url(
+                            fallback_regions[0], origin, destination, date, return_date
+                        )
+                    )
+                fallback_quotes = await compare_via_pages(
+                    args, fallback_regions, persist_failures=False
                 )
-            )
-            fallback_quotes = await compare_via_pages(
-                args, fallback_regions, persist_failures=False
-            )
-            fallback_by_region = {
-                quote.region: quote for quote in fallback_quotes if quote is not None
-            }
-            merged_quotes: list[FlightQuote] = []
-            for quote in quotes:
-                fallback_quote = fallback_by_region.get(quote.region)
-                if fallback_quote and fallback_quote.price is not None:
-                    merged_quotes.append(fallback_quote)
-                else:
-                    merged_quotes.append(quote)
-            quotes = merged_quotes
+                fallback_by_region = {
+                    quote.region: quote for quote in fallback_quotes if quote is not None
+                }
+                merged_quotes: list[FlightQuote] = []
+                for quote in quotes:
+                    fallback_quote = fallback_by_region.get(quote.region)
+                    if fallback_quote and fallback_quote.price is not None:
+                        merged_quotes.append(fallback_quote)
+                    else:
+                        merged_quotes.append(quote)
+                quotes = merged_quotes
     else:
         quotes = [
             FlightQuote(

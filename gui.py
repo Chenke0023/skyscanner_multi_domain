@@ -40,6 +40,7 @@ from skyscanner_neo import (
     DEFAULT_REGIONS,
     NeoCli,
     build_effective_region_codes,
+    detect_cdp_version,
     ensure_cdp_ready,
     quotes_to_dicts,
     run_page_scan,
@@ -1430,12 +1431,11 @@ class App:
     def check_environment(self) -> None:
         neo = NeoCli(self.cli.project_root)
         scrapling_ready = importlib.util.find_spec("scrapling") is not None
-        try:
-            cdp = ensure_cdp_ready(wait_timeout=8)
+        cdp = detect_cdp_version()
+        if cdp:
             cdp_line = f"Edge/CDP 回退: {cdp.get('Browser', '已连接')}"
-        except RuntimeError as exc:
-            cdp = None
-            cdp_line = f"Edge/CDP 回退: 未连接（仅影响失败市场自动兜底）({exc})"
+        else:
+            cdp_line = "Edge/CDP 回退: 未连接（仅影响已打开浏览器的复用与失败市场自动兜底）"
         lines = [
             f"Scrapling 主抓取: {'已安装' if scrapling_ready else '未安装'}",
             f"Neo CLI: {'已找到' if neo.available else '未找到'}",

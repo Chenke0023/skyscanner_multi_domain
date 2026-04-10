@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import types
+from unittest.mock import patch
 
 import gui
 
@@ -139,3 +141,29 @@ def test_find_cheapest_highlight_signatures_marks_all_min_rows() -> None:
     assert gui._row_signature(rows[0]) in signatures
     assert gui._row_signature(rows[1]) in signatures
     assert gui._row_signature(rows[2]) not in signatures
+
+
+def test_check_environment_only_detects_cdp_without_auto_launching_browser() -> None:
+    status_updates: list[str] = []
+    log_lines: list[str] = []
+    app = types.SimpleNamespace(
+        cli=types.SimpleNamespace(project_root=Path("/tmp/skyscanner")),
+        status_var=types.SimpleNamespace(set=lambda value: status_updates.append(value)),
+        log=lambda line: log_lines.append(line),
+    )
+
+    with (
+        patch("gui.importlib.util.find_spec", return_value=object()),
+        patch("gui.NeoCli", return_value=types.SimpleNamespace(available=True)),
+        patch("gui.detect_cdp_version", return_value=None) as detect_cdp_mock,
+        patch("gui.ensure_cdp_ready") as ensure_cdp_ready_mock,
+        patch("gui.messagebox.showinfo") as showinfo_mock,
+        patch("gui.messagebox.showwarning"),
+    ):
+        gui.App.check_environment(app)
+
+    detect_cdp_mock.assert_called_once()
+    ensure_cdp_ready_mock.assert_not_called()
+    showinfo_mock.assert_called_once()
+    assert status_updates == ["Scrapling 主抓取: 已安装"]
+    assert any("Edge/CDP 回退: 未连接" in line for line in log_lines)

@@ -35,7 +35,10 @@ LOGS_DIR = APP_HOME_DIR / "logs"
 DATA_DIR = PROJECT_ROOT / "data"
 RUNTIME_DIR = APP_HOME_DIR / "runtime"
 BROWSER_PROFILES_DIR = RUNTIME_DIR / "browser-profiles"
-LEGACY_BROWSER_PROFILES_ROOT = SOURCE_ROOT / "outputs"
+LEGACY_BROWSER_PROFILE_ROOTS = (
+    SOURCE_ROOT / "outputs",
+    SOURCE_ROOT / "data" / "browser-profiles",
+)
 
 
 def ensure_runtime_dirs() -> None:
@@ -74,15 +77,17 @@ def get_gui_state_file() -> Path:
 def get_browser_profile_dir(browser_name: str) -> Path:
     ensure_runtime_dirs()
     target = BROWSER_PROFILES_DIR / f"{browser_name}-cdp-profile"
-    legacy = LEGACY_BROWSER_PROFILES_ROOT / f"{browser_name}-cdp-profile"
-
     if target.exists():
         return target
-    if not legacy.exists():
-        return target
 
-    try:
-        shutil.move(str(legacy), str(target))
-        return target
-    except OSError:
-        return legacy
+    for legacy_root in LEGACY_BROWSER_PROFILE_ROOTS:
+        legacy = legacy_root / f"{browser_name}-cdp-profile"
+        if not legacy.exists():
+            continue
+        try:
+            shutil.move(str(legacy), str(target))
+            return target
+        except OSError:
+            return legacy
+
+    return target

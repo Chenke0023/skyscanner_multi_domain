@@ -275,6 +275,22 @@ def _quote_from_cdp_payload(
     return quote
 
 
+def _get_matching_cdp_tabs(
+    tabs: list[dict[str, Any]],
+    region: RegionConfig,
+    target_url: str,
+) -> list[dict[str, Any]]:
+    expected_path = urlparse(target_url).path
+    allowed_hosts = REGION_HOST_ALIASES.get(region.code, {urlparse(region.domain).netloc})
+    return [
+        tab
+        for tab in tabs
+        if tab.get("type") == "page"
+        and urlparse(str(tab.get("url", ""))).netloc in allowed_hosts
+        and urlparse(str(tab.get("url", ""))).path == expected_path
+    ]
+
+
 # ---------------------------------------------------------------------------
 # compare_via_pages — CDP page transport
 # ---------------------------------------------------------------------------
@@ -301,10 +317,17 @@ async def compare_via_pages(
     total_wait = max(args.timeout, args.page_wait + 60, 45)
     timeout = aiohttp.ClientTimeout(total=total_wait + 15)
     async with aiohttp.ClientSession(timeout=timeout) as session:
-        for region in selected_regions:
-            url = build_search_url(
+        requested_urls = {
+            region.code: build_search_url(
                 region, args.origin, args.destination, args.date, return_date
             )
+            for region in selected_regions
+        }
+        existing_tabs = await cdp_list_tabs(session)
+        for region in selected_regions:
+            url = requested_urls[region.code]
+            if _get_matching_cdp_tabs(existing_tabs, region, url):
+                continue
             await cdp_open_tab(session, url)
 
         await asyncio.sleep(args.page_wait)
@@ -318,34 +341,16 @@ async def compare_via_pages(
             next_pending: dict[str, RegionConfig] = {}
 
             for region in pending_regions.values():
-                expected_path = urlparse(
-                    build_search_url(
-                        region, args.origin, args.destination, args.date, return_date
-                    )
-                ).path
-                allowed_hosts = REGION_HOST_ALIASES.get(
-                    region.code, {urlparse(region.domain).netloc}
-                )
-                candidates = [
-                    tab
-                    for tab in tabs
-                    if tab.get("type") == "page"
-                    and urlparse(str(tab.get("url", ""))).netloc in allowed_hosts
-                    and urlparse(str(tab.get("url", ""))).path == expected_path
-                ]
+                target_url = requested_urls[region.code]
+                expected_path = urlparse(target_url).path
+                candidates = _get_matching_cdp_tabs(tabs, region, target_url)
                 if not candidates:
                     latest_quotes[region.code] = FlightQuote(
                         region=region.code,
                         domain=region.domain,
                         price=None,
                         currency=region.currency,
-                        source_url=build_search_url(
-                            region,
-                            args.origin,
-                            args.destination,
-                            args.date,
-                            return_date,
-                        ),
+                        source_url=target_url,
                         status="page_missing",
                         error="CDP 列表中未找到对应结果页",
                     )
