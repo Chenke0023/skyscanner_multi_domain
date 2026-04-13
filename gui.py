@@ -16,6 +16,8 @@ import json
 import os
 import queue
 import re
+import subprocess
+import sys
 import threading
 import webbrowser
 from datetime import date, datetime, timedelta
@@ -38,8 +40,11 @@ from location_resolver import (
     LocationRecord,
 )
 from scan_history import (
+    AlertConfig,
     annotate_rows_with_history,
     build_history_series,
+    build_query_key,
+    build_query_title,
     ScanHistoryStore,
     get_failed_region_codes,
     get_quotes_for_trip_label,
@@ -135,6 +140,33 @@ _GUI_REGION_CONCURRENCY = 3
 _GUI_DATE_WINDOW_CONCURRENCY = 2
 _GUI_AIRPORT_PAIR_CONCURRENCY = 2
 _TOP_RECOMMENDATION_LIMIT = 5
+_AUTO_REFRESH_POLL_MS = 60_000
+_AUTO_REFRESH_DISABLED = "关闭"
+
+
+def _escape_applescript_text(value: str) -> str:
+    return value.replace("\\", "\\\\").replace('"', '\\"')
+
+
+def _send_desktop_notification(title: str, message: str) -> bool:
+    if sys.platform != "darwin":
+        return False
+    script = (
+        'display notification "{message}" with title "{title}"'
+    ).format(
+        message=_escape_applescript_text(message),
+        title=_escape_applescript_text(title),
+    )
+    try:
+        subprocess.run(
+            ["osascript", "-e", script],
+            check=False,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    except OSError:
+        return False
+    return True
 
 
 def _split_trip_label(trip_label: str) -> tuple[str, str | None]:
@@ -291,7 +323,10 @@ def _build_top_recommendations(
     return sorted(candidates, key=lambda row: _decision_price_key(row, mode))[:limit]
 
 
-def _build_recommendation_payload(rows: list[CombinedQuoteRow]) -> dict[str, str | None]:
+def _build_recommendation_payload(
+    rows: list[CombinedQuoteRow],
+    history_records: list[Any] | None = None,
+) -> dict[str, str | None]:
     recommendations = _build_top_recommendations(rows, mode="cheapest", limit=2)
     if not recommendations:
         return {
@@ -333,7 +368,9 @@ def _build_recommendation_payload(rows: list[CombinedQuoteRow]) -> dict[str, str
         "price": f"¥{float(winner_price):,.2f}",
         "supporting": f"{winner.get('date') or '-'} · {winner.get('route') or '-'}",
         "meta": f"{source_text} · {stability} · {reliability}",
-        "insight": spread_text,
+        "insight": (
+            f"{spread_text} {_build_market_delta_explanation(rows, history_records or [])}".strip()
+        ),
         "link": str(winner.get("link") or ""),
         "button_text": "打开推荐方案",
     }
@@ -423,6 +460,67 @@ def _build_trend_sparkline(prices: list[float]) -> str:
         index = min(len(blocks) - 1, max(0, int(round(ratio * (len(blocks) - 1)))))
         chars.append(blocks[index])
     return "".join(chars)
+
+
+def _build_window_summary_text(
+    rows: list[CombinedQuoteRow],
+    history_records: list[Any],
+) -> str:
+    if not rows:
+        return "等待扫描后生成价格日历。"
+    priced_rows = [
+        row
+        for row in rows
+        if isinstance(row.get("cheapest_cny_price"), (int, float))
+    ]
+    if not priced_rows:
+        return "当前窗口暂无可比较价格，可结合失败列表补扫。"
+    ranked = sorted(priced_rows, key=_decision_price_key)
+    winner = ranked[0]
+    runner_up = ranked[1] if len(ranked) > 1 else None
+    spread_text = ""
+    if runner_up is not None and isinstance(runner_up.get("cheapest_cny_price"), (int, float)):
+        spread = float(runner_up["cheapest_cny_price"]) - float(winner["cheapest_cny_price"])
+        spread_text = f"；比次优组合低 ¥{spread:,.2f}" if spread >= 0.01 else "；与次优组合几乎持平"
+    history_summary = summarize_query_history(history_records) if history_records else None
+    trend_text = ""
+    if history_summary is not None and history_summary.recent_prices:
+        trend_text = (
+            f"；最近走势 {_build_trend_sparkline(history_summary.recent_prices)}"
+        )
+    return (
+        f"窗口最低价: {winner.get('date') or '-'} · {winner.get('region_name') or '-'} · "
+        f"¥{float(winner['cheapest_cny_price']):,.2f}{spread_text}{trend_text}"
+    )
+
+
+def _build_market_delta_explanation(
+    rows: list[CombinedQuoteRow],
+    history_records: list[Any],
+) -> str:
+    priced_rows = [
+        row
+        for row in rows
+        if isinstance(row.get("cheapest_cny_price"), (int, float))
+    ]
+    if len(priced_rows) < 2:
+        return "当前只有 1 个可比较市场。"
+    ranked = sorted(priced_rows, key=_decision_price_key)
+    winner = ranked[0]
+    runner_up = ranked[1]
+    spread = float(runner_up["cheapest_cny_price"]) - float(winner["cheapest_cny_price"])
+    explanation = (
+        f"{winner.get('region_name') or '-'} 比 {runner_up.get('region_name') or '-'} 低 ¥{spread:,.2f}"
+        if spread >= 0.01
+        else f"{winner.get('region_name') or '-'} 与 {runner_up.get('region_name') or '-'} 基本持平"
+    )
+    if history_records:
+        history_summary = summarize_query_history(history_records)
+        winner_market = str(winner.get("region_name") or winner.get("region_code") or "-")
+        win_count = history_summary.market_win_counts.get(winner_market, 0)
+        if win_count > 0:
+            explanation += f"，近 {history_summary.scan_count} 次里该市场赢过 {win_count} 次"
+    return explanation + "。"
 
 
 def _default_query_state(
@@ -1041,6 +1139,9 @@ class App:
         self._previous_scan_record: Any | None = None
         self._selected_calendar_trip_label: str | None = None
         self._quick_filter_mode = "all"
+        self._is_busy = False
+        self._auto_refresh_job: str | None = None
+        self._current_alert_config: AlertConfig | None = None
         self._history_collapsed = True
         self._logs_collapsed = True
 
@@ -1090,6 +1191,13 @@ class App:
         self.stability_mode_var = tk.StringVar(value="all")
         self.history_detail_var = tk.StringVar(value="等待扫描后生成路线复盘。")
         self.calendar_summary_var = tk.StringVar(value="等待扫描后生成价格日历。")
+        self.alert_summary_var = tk.StringVar(value="未设置提醒。")
+        self.alert_target_price_var = tk.StringVar(value="")
+        self.alert_drop_amount_var = tk.StringVar(value="")
+        self.alert_auto_refresh_var = tk.StringVar(value=_AUTO_REFRESH_DISABLED)
+        self.notifications_enabled_var = tk.BooleanVar(value=True)
+        self.notify_on_recovery_var = tk.BooleanVar(value=True)
+        self.notify_on_new_low_var = tk.BooleanVar(value=True)
         self.filter_success_var = tk.BooleanVar(value=True)
         self.filter_failure_var = tk.BooleanVar(value=True)
         self.filter_changed_var = tk.BooleanVar(value=False)
@@ -1144,6 +1252,7 @@ class App:
         self._apply_recommendation_conclusion(_build_recommendation_payload([]))
         self._refresh_history_lists()
         self._set_view_mode(self.view_mode_var.get())
+        self._schedule_auto_refresh_tick()
         if self._state_path.exists():
             self.log("已恢复上次查询条件。")
         self._poll_queue()
@@ -1373,6 +1482,49 @@ class App:
             command=self._refresh_history_lists,
             style="Secondary.TButton",
         ).pack(side=tk.RIGHT)
+
+        alerts = ttk.LabelFrame(top_static, text="提醒与自动复扫", padding=12, style="Panel.TLabelframe")
+        alerts.pack(fill=tk.X, pady=(8, 0))
+        alerts_top = ttk.Frame(alerts)
+        alerts_top.pack(fill=tk.X)
+        ttk.Label(alerts_top, textvariable=self.alert_summary_var, style="Quiet.TLabel").pack(
+            side=tk.LEFT,
+            anchor="w",
+        )
+        alert_grid = ttk.Frame(alerts)
+        alert_grid.pack(fill=tk.X, pady=(8, 0))
+        self._add_labeled_entry(alert_grid, "目标价 ≤", self.alert_target_price_var, 0, 0)
+        self._add_labeled_entry(alert_grid, "再降 ≥", self.alert_drop_amount_var, 0, 1)
+        self._add_labeled_entry(alert_grid, "自动复扫(分钟)", self.alert_auto_refresh_var, 0, 2)
+        ttk.Checkbutton(
+            alert_grid,
+            text="启用桌面通知",
+            variable=self.notifications_enabled_var,
+        ).grid(row=1, column=0, sticky="w", pady=(8, 0))
+        ttk.Checkbutton(
+            alert_grid,
+            text="通知失败恢复",
+            variable=self.notify_on_recovery_var,
+        ).grid(row=1, column=1, sticky="w", pady=(8, 0))
+        ttk.Checkbutton(
+            alert_grid,
+            text="通知刷新历史新低",
+            variable=self.notify_on_new_low_var,
+        ).grid(row=1, column=2, sticky="w", pady=(8, 0))
+        alert_actions = ttk.Frame(alerts)
+        alert_actions.pack(fill=tk.X, pady=(8, 0))
+        ttk.Button(
+            alert_actions,
+            text="保存当前路线设置",
+            command=self._save_current_alert_config,
+            style="Primary.TButton",
+        ).pack(side=tk.LEFT)
+        ttk.Button(
+            alert_actions,
+            text="清除提醒设置",
+            command=self._clear_current_alert_config,
+            style="Secondary.TButton",
+        ).pack(side=tk.LEFT, padx=(8, 0))
 
         status = ttk.LabelFrame(top_static, text="状态", padding=12, style="Panel.TLabelframe")
         status.pack(fill=tk.X, pady=(8, 0))
@@ -1936,6 +2088,7 @@ class App:
         self.destination_country_var.set(bool(identity.get("destination_is_country")))
         self._current_query_payload = payload if isinstance(payload, dict) else None
         self._persist_query_state()
+        self._reload_current_alert_config()
 
     def _apply_selected_history_query(self) -> None:
         record = self._selected_history_record()
@@ -1995,6 +2148,8 @@ class App:
         query_payload = self._current_query_payload or self._build_fallback_current_query_payload()
         is_favorite = self.history_store.toggle_favorite(query_payload)
         self._refresh_history_lists()
+        if not is_favorite:
+            self._apply_alert_config_to_form(None)
         self.log("已收藏当前查询。" if is_favorite else "已取消收藏当前查询。")
 
     def _rerun_failed_from_current_query(self) -> None:
@@ -2442,6 +2597,9 @@ class App:
         if self._state_save_job is not None:
             self.root.after_cancel(self._state_save_job)
             self._state_save_job = None
+        if self._auto_refresh_job is not None:
+            self.root.after_cancel(self._auto_refresh_job)
+            self._auto_refresh_job = None
         self._persist_query_state()
         self.root.destroy()
 
@@ -2559,6 +2717,230 @@ class App:
         self.history_detail_var.set(self._format_history_detail(history_records))
         self._set_view_mode("history_detail")
 
+    def _format_alert_summary(self, config: AlertConfig | None) -> str:
+        if config is None:
+            return "未设置提醒。可为当前路线设置目标价、降价阈值和自动复扫。"
+        parts: list[str] = []
+        if config.target_price is not None:
+            parts.append(f"目标价 ≤ ¥{config.target_price:,.0f}")
+        if config.drop_amount is not None:
+            parts.append(f"再降 ≥ ¥{config.drop_amount:,.0f}")
+        if config.auto_refresh_minutes is not None and config.auto_refresh_minutes > 0:
+            parts.append(f"自动复扫 {config.auto_refresh_minutes} 分钟")
+        if config.notifications_enabled:
+            parts.append("桌面通知开启")
+        return "；".join(parts) if parts else "当前路线已保存提醒，但未启用具体条件。"
+
+    def _apply_alert_config_to_form(self, config: AlertConfig | None) -> None:
+        self._current_alert_config = config
+        self.alert_target_price_var.set(
+            f"{config.target_price:.0f}" if config and config.target_price is not None else ""
+        )
+        self.alert_drop_amount_var.set(
+            f"{config.drop_amount:.0f}" if config and config.drop_amount is not None else ""
+        )
+        self.alert_auto_refresh_var.set(
+            str(config.auto_refresh_minutes)
+            if config and config.auto_refresh_minutes is not None and config.auto_refresh_minutes > 0
+            else _AUTO_REFRESH_DISABLED
+        )
+        self.notifications_enabled_var.set(config.notifications_enabled if config else True)
+        self.notify_on_recovery_var.set(config.notify_on_recovery if config else True)
+        self.notify_on_new_low_var.set(config.notify_on_new_low if config else True)
+        self.alert_summary_var.set(self._format_alert_summary(config))
+
+    def _reload_current_alert_config(self) -> None:
+        query_payload = self._current_query_payload
+        if query_payload is None:
+            self._apply_alert_config_to_form(None)
+            return
+        self._apply_alert_config_to_form(self.history_store.get_alert_config(query_payload))
+
+    def _parse_optional_positive_float(self, raw: str, field_label: str) -> float | None:
+        value = raw.strip()
+        if not value:
+            return None
+        try:
+            parsed = float(value)
+        except ValueError as exc:
+            raise ValueError(f"{field_label}必须是数字。") from exc
+        if parsed <= 0:
+            raise ValueError(f"{field_label}必须大于 0。")
+        return parsed
+
+    def _parse_optional_positive_int(self, raw: str, field_label: str) -> int | None:
+        value = raw.strip()
+        if not value or value == _AUTO_REFRESH_DISABLED:
+            return None
+        try:
+            parsed = int(value)
+        except ValueError as exc:
+            raise ValueError(f"{field_label}必须是整数分钟。") from exc
+        if parsed <= 0:
+            raise ValueError(f"{field_label}必须大于 0。")
+        return parsed
+
+    def _save_current_alert_config(self) -> None:
+        query_payload = self._current_query_payload or self._build_fallback_current_query_payload()
+        try:
+            target_price = self._parse_optional_positive_float(
+                self.alert_target_price_var.get(),
+                "目标价",
+            )
+            drop_amount = self._parse_optional_positive_float(
+                self.alert_drop_amount_var.get(),
+                "再降提醒",
+            )
+            auto_refresh_minutes = self._parse_optional_positive_int(
+                self.alert_auto_refresh_var.get(),
+                "自动复扫",
+            )
+        except ValueError as exc:
+            messagebox.showerror("提醒设置无效", str(exc))
+            return
+        if target_price is None and drop_amount is None and auto_refresh_minutes is None:
+            messagebox.showinfo("没有可保存内容", "至少填写一个提醒条件或自动复扫间隔。")
+            return
+        if not self.history_store.is_favorite_query_key(build_query_key(query_payload)):
+            self.history_store.toggle_favorite(query_payload)
+            self._refresh_history_lists()
+        config = self.history_store.save_alert_config(
+            query_payload,
+            notifications_enabled=bool(self.notifications_enabled_var.get()),
+            target_price=target_price,
+            drop_amount=drop_amount,
+            auto_refresh_minutes=auto_refresh_minutes,
+            notify_on_recovery=bool(self.notify_on_recovery_var.get()),
+            notify_on_new_low=bool(self.notify_on_new_low_var.get()),
+        )
+        self._apply_alert_config_to_form(config)
+        self.log("已保存当前路线的提醒与自动复扫设置。")
+
+    def _clear_current_alert_config(self) -> None:
+        query_payload = self._current_query_payload
+        if query_payload is None:
+            self._apply_alert_config_to_form(None)
+            return
+        self.history_store.delete_alert_config(query_payload)
+        self._apply_alert_config_to_form(None)
+        self.log("已清除当前路线的提醒设置。")
+
+    def _schedule_auto_refresh_tick(self) -> None:
+        if self._auto_refresh_job is not None:
+            self.root.after_cancel(self._auto_refresh_job)
+        self._auto_refresh_job = self.root.after(_AUTO_REFRESH_POLL_MS, self._auto_refresh_tick)
+
+    def _auto_refresh_tick(self) -> None:
+        self._auto_refresh_job = None
+        if self._is_busy:
+            self._schedule_auto_refresh_tick()
+            return
+        due_configs = self.history_store.get_due_auto_refresh_configs(limit=1)
+        if due_configs:
+            config = due_configs[0]
+            self.history_store.mark_alert_auto_refreshed(config.query_payload)
+            self.log(f"自动复扫触发: {config.title}")
+            self._run_saved_query_scan(config.query_payload, reason="自动复扫")
+        self._schedule_auto_refresh_tick()
+
+    def _run_saved_query_scan(self, query_payload: dict[str, Any], *, reason: str) -> None:
+        record = self.history_store.get_latest_scan(query_payload)
+        if record is None:
+            record = type(
+                "_PseudoRecord",
+                (),
+                {"query_payload": query_payload, "title": build_query_title(query_payload)},
+            )()
+        self._apply_history_record_to_form(record)
+        self.log(f"{reason}: {build_query_title(query_payload)}")
+        self.start_scan()
+
+    def _trigger_alert_notifications(
+        self,
+        rows_by_date: list[tuple[str, list[dict[str, str | float | None]]]],
+    ) -> None:
+        query_payload = self._current_query_payload
+        if query_payload is None:
+            return
+        config = self.history_store.get_alert_config(query_payload)
+        if config is None or not config.notifications_enabled:
+            self._apply_alert_config_to_form(config)
+            return
+        current_rows = [
+            {"date": trip_label, **row}
+            for trip_label, rows in rows_by_date
+            for row in rows
+        ]
+        priced_rows = [
+            row for row in current_rows if isinstance(row.get("cheapest_cny_price"), (int, float))
+        ]
+        previous_rows = []
+        if self._previous_scan_record is not None:
+            previous_rows = [
+                {"date": trip_label, **row}
+                for trip_label, rows in getattr(self._previous_scan_record, "rows_by_date", []) or []
+                for row in rows
+            ]
+        notification_lines: list[str] = []
+        notify_price: float | None = None
+
+        if priced_rows:
+            winner = min(priced_rows, key=_decision_price_key)
+            winner_price = float(winner["cheapest_cny_price"])
+            notify_price = winner_price
+            if config.target_price is not None and winner_price <= config.target_price:
+                should_notify = (
+                    config.last_notified_price is None
+                    or winner_price < config.last_notified_price - 0.01
+                )
+                if should_notify:
+                    notification_lines.append(
+                        f"达到目标价：{winner.get('region_name') or '-'} ¥{winner_price:,.2f}"
+                    )
+            previous_priced = [
+                row
+                for row in previous_rows
+                if isinstance(row.get("cheapest_cny_price"), (int, float))
+            ]
+            if (
+                config.drop_amount is not None
+                and previous_priced
+            ):
+                previous_winner = min(previous_priced, key=_decision_price_key)
+                previous_price = float(previous_winner["cheapest_cny_price"])
+                if previous_price - winner_price >= config.drop_amount:
+                    notification_lines.append(
+                        f"较上次再降 ¥{previous_price - winner_price:,.2f}"
+                    )
+            if config.notify_on_new_low and self._history_records_for_current_query:
+                previous_history = self._history_records_for_current_query[1:]
+                previous_summary = summarize_query_history(previous_history) if previous_history else None
+                previous_low = previous_summary.history_low_price if previous_summary is not None else None
+                if previous_low is not None and winner_price < previous_low - 0.01:
+                    notification_lines.append(f"刷新历史新低：¥{winner_price:,.2f}")
+
+        if config.notify_on_recovery:
+            previous_success = any(
+                isinstance(row.get("cheapest_cny_price"), (int, float))
+                for row in previous_rows
+            )
+            current_success = bool(priced_rows)
+            if current_success and not previous_success and previous_rows:
+                notification_lines.append("失败市场已恢复为可用价格结果")
+
+        if notification_lines:
+            title = f"机票提醒：{build_query_title(query_payload)}"
+            message = "；".join(notification_lines[:3])
+            delivered = _send_desktop_notification(title, message)
+            self.log(f"已触发提醒: {message}")
+            if not delivered:
+                self.log("桌面通知发送失败，已仅记录在日志。")
+            self.history_store.mark_alert_notified(
+                query_payload,
+                last_notified_price=notify_price,
+            )
+            self._apply_alert_config_to_form(self.history_store.get_alert_config(query_payload))
+
     def log(self, message: str) -> None:
         timestamp = datetime.now().strftime("%H:%M:%S")
         self.log_text.insert(tk.END, f"[{timestamp}] {message}\n")
@@ -2606,6 +2988,7 @@ class App:
         if not history_records:
             return "暂无路线历史。完成至少一次扫描后，这里会展示历史最低价、成功市场和价格趋势。"
         summary = summarize_query_history(history_records)
+        config = self.history_store.get_alert_config(history_records[0].query_payload)
         lines = [
             f"近 {summary.scan_count} 次扫描，最近一次: {summary.latest_scan_at or '-'}",
             (
@@ -2639,6 +3022,8 @@ class App:
                 f"最近价格走势: {_build_trend_sparkline(summary.recent_prices)} "
                 f"({', '.join(f'¥{price:,.0f}' for price in summary.recent_prices)})"
             )
+        if config is not None:
+            lines.append(f"提醒设置: {self._format_alert_summary(config)}")
         return "\n".join(lines)
 
     def _render_top_recommendations(self, rows: list[CombinedQuoteRow]) -> None:
@@ -2686,7 +3071,10 @@ class App:
         )
         one_way = not return_dates
         if one_way:
-            self.calendar_summary_var.set("点击日期卡片可只看该日结果。")
+            self.calendar_summary_var.set(
+                _build_window_summary_text(rows, self._history_records_for_current_query)
+                + "\n点击日期卡片可只看该日结果。"
+            )
             max_columns = 4
             for index, departure in enumerate(departures):
                 row_index = index // max_columns
@@ -2708,7 +3096,10 @@ class App:
                 self.calendar_grid.columnconfigure(column_index, weight=1)
             return
 
-        self.calendar_summary_var.set("往返矩阵：点击已填价格单元格可只看对应去返程组合。")
+        self.calendar_summary_var.set(
+            _build_window_summary_text(rows, self._history_records_for_current_query)
+            + "\n往返矩阵：点击已填价格单元格可只看对应去返程组合。"
+        )
         ttk.Label(self.calendar_grid, text="出发\\返程", style="Quiet.TLabel").grid(
             row=0, column=0, sticky="w", padx=4, pady=4
         )
@@ -2771,7 +3162,12 @@ class App:
         self._refresh_result_views()
 
     def _update_decision_views(self) -> None:
-        self._apply_recommendation_conclusion(_build_recommendation_payload(self._display_rows))
+        self._apply_recommendation_conclusion(
+            _build_recommendation_payload(
+                self._display_rows,
+                self._history_records_for_current_query,
+            )
+        )
         self._render_top_recommendations(self._display_rows)
         self._render_calendar_view(self._display_rows)
         self._render_compare_view(self._display_rows)
@@ -2985,6 +3381,7 @@ class App:
         return float("inf")
 
     def set_busy(self, busy: bool) -> None:
+        self._is_busy = busy
         state = tk.DISABLED if busy else tk.NORMAL
         self.run_button.config(state=state)
         self.doctor_button.config(state=state)
@@ -3248,6 +3645,7 @@ class App:
             exact_airport=bool(self.exact_airport_var.get()),
         )
         self._current_query_payload = query_payload
+        self._reload_current_alert_config()
         self._history_records_for_current_query = self.history_store.get_query_history(
             query_payload,
             limit=10,
@@ -3369,6 +3767,7 @@ class App:
             airport_limit=COUNTRY_ROUTE_DEFAULT_AIRPORT_LIMIT,
         )
         self._current_query_payload = query_payload
+        self._reload_current_alert_config()
         self._history_records_for_current_query = self.history_store.get_query_history(
             query_payload,
             limit=10,
@@ -4239,6 +4638,8 @@ class App:
             "rows_by_date"
         ]
         self._set_display_rows_from_grouped(rows_by_date)
+        self._trigger_alert_notifications(rows_by_date)
+        self._reload_current_alert_config()
         combined_rows = list(self._display_rows)
 
         best_candidates = [

@@ -197,3 +197,54 @@ def test_query_history_summary_tracks_low_price_and_market_distribution(tmp_path
     assert summary.market_win_counts["新加坡"] == 1
     assert len(series) == 2
     assert series[-1].cheapest_cny_price == 920.0 or series[-1].cheapest_cny_price == 860.0
+
+
+def test_alert_config_round_trip_and_due_refresh(tmp_path: Path) -> None:
+    store = ScanHistoryStore(tmp_path / "scan_history.sqlite3")
+    query_payload = {
+        "identity": {"mode": "point_to_point", "origin_code": "PEK", "destination_code": "HKG"},
+        "display": {"title": "北京 -> 香港"},
+    }
+
+    store.toggle_favorite(query_payload)
+    saved = store.save_alert_config(
+        query_payload,
+        notifications_enabled=True,
+        target_price=999.0,
+        drop_amount=120.0,
+        auto_refresh_minutes=30,
+        notify_on_recovery=True,
+        notify_on_new_low=True,
+    )
+
+    fetched = store.get_alert_config(query_payload)
+    due = store.get_due_auto_refresh_configs(limit=5)
+
+    assert saved.target_price == 999.0
+    assert fetched is not None
+    assert fetched.drop_amount == 120.0
+    assert len(due) == 1
+    assert due[0].query_key == fetched.query_key
+
+    store.mark_alert_auto_refreshed(query_payload)
+    assert store.get_due_auto_refresh_configs(limit=5) == []
+
+
+def test_toggle_favorite_removes_alert_config(tmp_path: Path) -> None:
+    store = ScanHistoryStore(tmp_path / "scan_history.sqlite3")
+    query_payload = {
+        "identity": {"mode": "point_to_point", "origin_code": "PEK", "destination_code": "SIN"},
+        "display": {"title": "北京 -> 新加坡"},
+    }
+
+    assert store.toggle_favorite(query_payload) is True
+    store.save_alert_config(
+        query_payload,
+        notifications_enabled=True,
+        target_price=1500.0,
+        drop_amount=None,
+        auto_refresh_minutes=None,
+    )
+
+    assert store.toggle_favorite(query_payload) is False
+    assert store.get_alert_config(query_payload) is None
