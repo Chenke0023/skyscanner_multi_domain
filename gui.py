@@ -1152,8 +1152,11 @@ class App:
         outer = ttk.Frame(self.root, padding=14)
         outer.pack(fill=tk.BOTH, expand=True)
 
+        top_static = ttk.Frame(outer)
+        top_static.pack(fill=tk.X)
+
         hero = tk.Frame(
-            outer,
+            top_static,
             bg=_PANEL_BG,
             relief="groove",
             borderwidth=2,
@@ -1185,7 +1188,7 @@ class App:
         stripe_bar2.pack(fill=tk.X, pady=(3, 0))
         stripe_bar2.bind("<Configure>", lambda e: _draw_pinstripes(stripe_bar2, e))
 
-        form = ttk.LabelFrame(outer, text="查询参数", padding=12, style="Panel.TLabelframe")
+        form = ttk.LabelFrame(top_static, text="查询参数", padding=12, style="Panel.TLabelframe")
         form.pack(fill=tk.X)
 
         self._add_labeled_entry(
@@ -1267,7 +1270,7 @@ class App:
         )
         self.favorite_button.pack(side=tk.LEFT, padx=(8, 0))
 
-        history = ttk.LabelFrame(outer, text="最近查询与收藏路线", padding=12, style="Panel.TLabelframe")
+        history = ttk.LabelFrame(top_static, text="最近查询与收藏路线", padding=12, style="Panel.TLabelframe")
         history.pack(fill=tk.X, pady=(8, 0))
         history_top = ttk.Frame(history)
         history_top.pack(fill=tk.X)
@@ -1371,7 +1374,7 @@ class App:
             style="Secondary.TButton",
         ).pack(side=tk.RIGHT)
 
-        status = ttk.LabelFrame(outer, text="状态", padding=12, style="Panel.TLabelframe")
+        status = ttk.LabelFrame(top_static, text="状态", padding=12, style="Panel.TLabelframe")
         status.pack(fill=tk.X, pady=(8, 0))
         status_top = ttk.Frame(status)
         status_top.pack(fill=tk.X)
@@ -1385,7 +1388,50 @@ class App:
         self.progress_bar.pack(fill=tk.X, pady=(6, 0))
         self.progress_bar.pack_forget()
 
-        results = ttk.LabelFrame(outer, text="结果", padding=12, style="Panel.TLabelframe")
+        content_shell = ttk.Frame(outer)
+        content_shell.pack(fill=tk.BOTH, expand=True, pady=(8, 0))
+
+        results_shell = ttk.Frame(content_shell)
+        results_shell.pack(fill=tk.BOTH, expand=True)
+
+        self.results_canvas = tk.Canvas(
+            results_shell,
+            bg=_PAPER_GRAIN,
+            highlightthickness=0,
+            borderwidth=0,
+        )
+        self.results_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        self.results_scrollbar = ttk.Scrollbar(
+            results_shell,
+            orient=tk.VERTICAL,
+            command=self.results_canvas.yview,
+        )
+        self.results_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        self.results_canvas.configure(yscrollcommand=self.results_scrollbar.set)
+
+        results_inner = ttk.Frame(self.results_canvas)
+        self.results_window_id = self.results_canvas.create_window(
+            (0, 0),
+            window=results_inner,
+            anchor="nw",
+        )
+        results_inner.bind(
+            "<Configure>",
+            lambda _event: self.results_canvas.configure(
+                scrollregion=self.results_canvas.bbox("all")
+            ),
+        )
+        self.results_canvas.bind(
+            "<Configure>",
+            lambda event: self.results_canvas.itemconfigure(
+                self.results_window_id,
+                width=event.width,
+            ),
+        )
+        self._bind_mousewheel(self.results_canvas, self.results_canvas)
+        self._bind_mousewheel(results_inner, self.results_canvas)
+
+        results = ttk.LabelFrame(results_inner, text="结果", padding=12, style="Panel.TLabelframe")
         results.pack(fill=tk.BOTH, expand=True, pady=(8, 0))
 
         cards_row = ttk.Frame(results)
@@ -1785,7 +1831,7 @@ class App:
             style="Secondary.TButton",
         ).pack(side=tk.LEFT, padx=(8, 0))
 
-        logs = ttk.LabelFrame(outer, text="运行日志", padding=12, style="Panel.TLabelframe")
+        logs = ttk.LabelFrame(content_shell, text="运行日志", padding=12, style="Panel.TLabelframe")
         logs.pack(fill=tk.X, expand=False, pady=(8, 0))
         logs_top = ttk.Frame(logs)
         logs_top.pack(fill=tk.X)
@@ -1800,15 +1846,52 @@ class App:
         )
         self.logs_toggle_button.pack(side=tk.RIGHT)
         self.logs_content = ttk.Frame(logs)
+        log_scrollbar = ttk.Scrollbar(self.logs_content, orient=tk.VERTICAL)
+        log_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
         self.log_text = tk.Text(
             self.logs_content, height=6, wrap="word", font=_FONT_MONO,
             bg=_PLATINUM_LIGHT, fg=_INK, insertbackground=_INK,
             relief="sunken", borderwidth=2,
+            yscrollcommand=log_scrollbar.set,
         )
-        self.log_text.pack(fill=tk.X, expand=False)
+        self.log_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        log_scrollbar.config(command=self.log_text.yview)
         self.log("界面已启动。可先点“检查环境”确认主抓取与回退环境，再开始比价。")
         self._apply_history_panel_state()
         self._apply_logs_panel_state()
+
+    def _bind_mousewheel(self, widget: tk.Misc, canvas: tk.Canvas) -> None:
+        widget.bind(
+            "<MouseWheel>",
+            lambda event, target=canvas: self._on_mousewheel(event, target),
+            add="+",
+        )
+        widget.bind(
+            "<Button-4>",
+            lambda _event, target=canvas: self._on_mousewheel_linux_up(target),
+            add="+",
+        )
+        widget.bind(
+            "<Button-5>",
+            lambda _event, target=canvas: self._on_mousewheel_linux_down(target),
+            add="+",
+        )
+
+    def _on_mousewheel(self, event: tk.Event, canvas: tk.Canvas) -> str:
+        delta = getattr(event, "delta", 0)
+        if not delta:
+            return "break"
+        step = -1 * int(delta / 120) if abs(delta) >= 120 else (-1 if delta > 0 else 1)
+        canvas.yview_scroll(step, "units")
+        return "break"
+
+    def _on_mousewheel_linux_up(self, canvas: tk.Canvas) -> str:
+        canvas.yview_scroll(-1, "units")
+        return "break"
+
+    def _on_mousewheel_linux_down(self, canvas: tk.Canvas) -> str:
+        canvas.yview_scroll(1, "units")
+        return "break"
 
     def _refresh_history_lists(self) -> None:
         self._favorite_records = self.history_store.get_favorites()
