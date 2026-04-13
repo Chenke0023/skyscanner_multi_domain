@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import argparse
+import inspect
 import json
 import re
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable, Optional
+from typing import Any, Awaitable, Callable, Optional, Union
 
 from app_paths import get_failure_log_file
 from skyscanner_models import FlightQuote, RegionConfig
@@ -23,6 +24,7 @@ SCRAPLING_FALLBACK_STATUSES = {
     "scrapling_parse_failed",
     "captcha_solve_failed",
 }
+ScanProgressCallback = Callable[[dict[str, Any]], Union[Awaitable[None], None]]
 
 
 def parse_date(date_str: str) -> tuple[datetime, str, str]:
@@ -185,6 +187,7 @@ def quotes_to_dicts(quotes: list[FlightQuote]) -> list[dict[str, Any]]:
             "cheapest_price": quote.cheapest_price,
             "cheapest_price_path": quote.cheapest_price_path,
             "error": quote.error,
+            "source_kind": quote.source_kind,
         }
         for quote in quotes
     ]
@@ -200,13 +203,72 @@ async def run_page_scan(
     timeout: int = 30,
     transport: str = "scrapling",
     on_region_start: Callable[[RegionConfig], None] | None = None,
+    scan_mode: str = "full_scan",
+    rerun_scope: str = "all",
+    selected_region_codes: list[str] | None = None,
+    region_concurrency: int = 3,
+    query_payload: dict[str, Any] | None = None,
+    history_store: Any | None = None,
+    on_progress: ScanProgressCallback | None = None,
+    allow_browser_fallback: bool = True,
 ) -> list[FlightQuote]:
     from transport_cdp import compare_via_pages, detect_cdp_version, ensure_cdp_ready
     from transport_scrapling import compare_via_scrapling
+    from date_window import format_trip_date_label
+    from scan_history import ScanHistoryStore, get_quotes_for_trip_label, select_preview_region_batches
 
+    normalized_rerun_scope = (rerun_scope or "all").lower()
+    normalized_scan_mode = (scan_mode or "full_scan").lower()
+    normalized_selected_codes = {
+        code.strip().upper()
+        for code in (selected_region_codes or [])
+        if code and code.strip()
+    }
     selected_regions = get_selected_regions(region_codes)
+    if normalized_rerun_scope in {"failed_only", "selected_regions"} and normalized_selected_codes:
+        selected_regions = [
+            region for region in selected_regions if region.code in normalized_selected_codes
+        ]
     if not selected_regions:
         return []
+
+    async def emit_progress(
+        *,
+        stage: str,
+        quotes: list[FlightQuote],
+        completed_regions: list[str],
+        is_final: bool = False,
+        used_cached_preview: bool = False,
+    ) -> None:
+        if on_progress is None:
+            return
+        result = on_progress(
+            {
+                "stage": stage,
+                "quotes": quotes_to_dicts(quotes),
+                "completed_regions": list(completed_regions),
+                "is_final": bool(is_final),
+                "used_cached_preview": bool(used_cached_preview),
+            }
+        )
+        if inspect.isawaitable(result):
+            await result
+
+    def merge_quotes_by_region(
+        base_quotes: list[FlightQuote],
+        updates: list[FlightQuote],
+    ) -> list[FlightQuote]:
+        ordered_regions: list[str] = []
+        merged: dict[str, FlightQuote] = {}
+        for quote in base_quotes:
+            if quote.region not in merged:
+                ordered_regions.append(quote.region)
+            merged[quote.region] = quote
+        for quote in updates:
+            if quote.region not in merged:
+                ordered_regions.append(quote.region)
+            merged[quote.region] = quote
+        return [merged[region_code] for region_code in ordered_regions]
 
     normalized_transport = (transport or "scrapling").lower()
     if normalized_transport == "page":
@@ -225,19 +287,24 @@ async def run_page_scan(
         timeout=timeout,
     )
 
-    if normalized_transport == "page":
-        quotes = await compare_via_pages(args, selected_regions)
-    elif normalized_transport == "scrapling":
+    async def run_scrapling_pass(
+        batch_regions: list[RegionConfig],
+        *,
+        enable_browser_fallback: bool,
+    ) -> list[FlightQuote]:
         quotes = await compare_via_scrapling(
-            args, selected_regions, persist_failures=False,
+            args,
+            batch_regions,
+            persist_failures=False,
             on_region_start=on_region_start,
+            region_concurrency=max(int(region_concurrency), 1),
         )
         fallback_regions = [
             region
-            for region, quote in zip(selected_regions, quotes)
+            for region, quote in zip(batch_regions, quotes)
             if quote.price is None and quote.status in SCRAPLING_FALLBACK_STATUSES
         ]
-        if fallback_regions:
+        if fallback_regions and enable_browser_fallback:
             has_scrapling_success = any(quote.price is not None for quote in quotes)
             cdp_info = detect_cdp_version()
             if cdp_info or not has_scrapling_success:
@@ -261,6 +328,130 @@ async def run_page_scan(
                     else:
                         merged_quotes.append(quote)
                 quotes = merged_quotes
+        return quotes
+
+    if normalized_transport == "page":
+        quotes = await compare_via_pages(args, selected_regions)
+        await emit_progress(
+            stage="final",
+            quotes=quotes,
+            completed_regions=[region.code for region in selected_regions],
+            is_final=True,
+        )
+    elif normalized_transport == "scrapling":
+        if normalized_scan_mode == "preview_first":
+            resolved_history_store = history_store or (ScanHistoryStore() if query_payload else None)
+            latest_record = (
+                resolved_history_store.get_latest_scan(query_payload)
+                if resolved_history_store is not None and query_payload is not None
+                else None
+            )
+            preview_record = (
+                resolved_history_store.get_cached_preview(query_payload)
+                if resolved_history_store is not None and query_payload is not None
+                else None
+            )
+            trip_label = format_trip_date_label(date, return_date)
+            if preview_record is not None:
+                preview_quotes = [
+                    FlightQuote(
+                        region=str(quote.get("region") or ""),
+                        domain=str(quote.get("domain") or ""),
+                        price=quote.get("price"),
+                        currency=quote.get("currency"),
+                        source_url=str(quote.get("source_url") or ""),
+                        status=str(quote.get("status") or ""),
+                        price_path=quote.get("price_path"),
+                        best_price=quote.get("best_price"),
+                        best_price_path=quote.get("best_price_path"),
+                        cheapest_price=quote.get("cheapest_price"),
+                        cheapest_price_path=quote.get("cheapest_price_path"),
+                        error=quote.get("error"),
+                        source_kind="cached",
+                    )
+                    for quote in get_quotes_for_trip_label(preview_record.quotes_by_date, trip_label)
+                ]
+                if preview_quotes:
+                    await emit_progress(
+                        stage="preview_cache",
+                        quotes=preview_quotes,
+                        completed_regions=[],
+                        used_cached_preview=True,
+                    )
+
+            first_batch_codes, remaining_region_codes = select_preview_region_batches(
+                [region.code for region in selected_regions],
+                latest_record.rows_by_date if latest_record is not None else None,
+                first_batch_size=max(int(region_concurrency), 1),
+            )
+            region_by_code = {region.code: region for region in selected_regions}
+            batches: list[list[RegionConfig]] = []
+            if first_batch_codes:
+                batches.append(
+                    [region_by_code[code] for code in first_batch_codes if code in region_by_code]
+                )
+            chunk_size = max(int(region_concurrency), 1)
+            for index in range(0, len(remaining_region_codes), chunk_size):
+                chunk_codes = remaining_region_codes[index : index + chunk_size]
+                batches.append(
+                    [region_by_code[code] for code in chunk_codes if code in region_by_code]
+                )
+
+            merged_quotes: list[FlightQuote] = []
+            live_success_count = 0
+            for batch_index, batch_regions in enumerate(batches):
+                if not batch_regions:
+                    continue
+                batch_quotes = await run_scrapling_pass(
+                    batch_regions,
+                    enable_browser_fallback=False,
+                )
+                merged_quotes = merge_quotes_by_region(merged_quotes, batch_quotes)
+                live_success_count += sum(
+                    1 for quote in batch_quotes if quote.price is not None
+                )
+                await emit_progress(
+                    stage="quick_live" if batch_index == 0 else "background_live",
+                    quotes=merged_quotes,
+                    completed_regions=[quote.region for quote in merged_quotes],
+                    used_cached_preview=preview_record is not None,
+                )
+
+            if allow_browser_fallback and live_success_count == 0:
+                fallback_regions = [
+                    region
+                    for region in selected_regions
+                    if any(
+                        quote.region == region.code
+                        and quote.price is None
+                        and quote.status in SCRAPLING_FALLBACK_STATUSES
+                        for quote in merged_quotes
+                    )
+                ]
+                if fallback_regions:
+                    fallback_quotes = await run_scrapling_pass(
+                        fallback_regions,
+                        enable_browser_fallback=True,
+                    )
+                    merged_quotes = merge_quotes_by_region(merged_quotes, fallback_quotes)
+                    await emit_progress(
+                        stage="background_live",
+                        quotes=merged_quotes,
+                        completed_regions=[quote.region for quote in merged_quotes],
+                        used_cached_preview=preview_record is not None,
+                    )
+            quotes = merged_quotes
+        else:
+            quotes = await run_scrapling_pass(
+                selected_regions,
+                enable_browser_fallback=allow_browser_fallback,
+            )
+        await emit_progress(
+            stage="final",
+            quotes=quotes,
+            completed_regions=[quote.region for quote in quotes],
+            is_final=True,
+        )
     else:
         quotes = [
             FlightQuote(
@@ -276,6 +467,12 @@ async def run_page_scan(
             )
             for region in selected_regions
         ]
+        await emit_progress(
+            stage="final",
+            quotes=quotes,
+            completed_regions=[region.code for region in selected_regions],
+            is_final=True,
+        )
 
     route_key = build_route_key(origin, destination, date, return_date)
     for quote in quotes:

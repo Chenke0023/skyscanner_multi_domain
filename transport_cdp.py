@@ -1,4 +1,4 @@
-"""Edge CDP (Chrome DevTools Protocol) browser transport."""
+"""Browser CDP (Chrome DevTools Protocol) transport."""
 
 from __future__ import annotations
 
@@ -52,6 +52,7 @@ PROFILE_CACHE_PATHS = (
 
 def detect_browsers() -> dict[str, Path]:
     candidates = {
+        "comet": Path("/Applications/Comet.app/Contents/MacOS/Comet"),
         "chrome": Path("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"),
         "edge": Path("/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge"),
     }
@@ -118,7 +119,7 @@ def launch_browser_with_cdp(
     port: int = 9222, start_url: str = "https://www.skyscanner.co.uk"
 ) -> str:
     browsers = detect_browsers()
-    for browser_name in ("edge", "chrome"):
+    for browser_name in ("comet", "edge", "chrome"):
         binary = browsers.get(browser_name)
         if not binary:
             continue
@@ -149,7 +150,7 @@ def launch_browser_with_cdp(
         except OSError as exc:
             return f"找到 {browser_name.capitalize()}，但启动失败: {exc}"
 
-    return "没有找到可自动启动的 Edge 或 Chrome"
+    return "没有找到可自动启动的 Comet、Edge 或 Chrome"
 
 
 def ensure_cdp_ready(
@@ -170,9 +171,9 @@ def ensure_cdp_ready(
             return cdp_info
 
     raise RuntimeError(
-        "未检测到 Edge 调试端口 9222。"
+        "未检测到浏览器调试端口 9222。"
         + (f" {launch_note}。" if launch_note else "")
-        + " 请关闭已打开的浏览器后重试，或手动启动带 --remote-debugging-port=9222 的 Edge。"
+        + " 请关闭已打开的浏览器后重试，或手动启动带 --remote-debugging-port=9222 的 Comet / Edge / Chrome。"
     )
 
 
@@ -258,6 +259,7 @@ def _quote_from_cdp_payload(
     page_url = str(payload.get("url", fallback_url))
     page_text = str(payload.get("text", ""))
     quote = extract_page_quote(region, page_url, page_text)
+    quote.source_kind = "browser_fallback"
     if quote.price is not None:
         return quote
 
@@ -266,12 +268,14 @@ def _quote_from_cdp_payload(
         SimpleNamespace(url=page_url),
     )
     if has_captcha:
-        return _build_captcha_quote(
+        quote = _build_captcha_quote(
             region,
             page_url,
             captcha_type,
             source_label="页面模式",
         )
+        quote.source_kind = "browser_fallback"
+        return quote
     return quote
 
 

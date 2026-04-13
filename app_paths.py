@@ -74,6 +74,11 @@ def get_gui_state_file() -> Path:
     return RUNTIME_DIR / "gui_last_query.json"
 
 
+def get_scan_history_file() -> Path:
+    ensure_runtime_dirs()
+    return RUNTIME_DIR / "scan_history.sqlite3"
+
+
 def get_browser_profile_dir(browser_name: str) -> Path:
     ensure_runtime_dirs()
     target = BROWSER_PROFILES_DIR / f"{browser_name}-cdp-profile"
