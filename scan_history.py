@@ -541,6 +541,22 @@ class QueryHistorySummary:
     market_total_counts: dict[str, int]
 
 
+@dataclass(frozen=True)
+class AlertConfig:
+    query_key: str
+    title: str
+    query_payload: dict[str, Any]
+    notifications_enabled: bool
+    target_price: float | None
+    drop_amount: float | None
+    auto_refresh_minutes: int | None
+    notify_on_recovery: bool
+    notify_on_new_low: bool
+    last_notified_price: float | None
+    last_notified_at: str | None
+    last_auto_refresh_at: str | None
+
+
 class ScanHistoryStore:
     def __init__(self, db_path: Path | None = None) -> None:
         self.db_path = db_path or get_scan_history_file()
@@ -574,6 +590,21 @@ class ScanHistoryStore:
                     updated_at TEXT NOT NULL,
                     query_payload_json TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS alert_configs (
+                    query_key TEXT PRIMARY KEY,
+                    title TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    query_payload_json TEXT NOT NULL,
+                    notifications_enabled INTEGER NOT NULL DEFAULT 1,
+                    target_price REAL,
+                    drop_amount REAL,
+                    auto_refresh_minutes INTEGER,
+                    notify_on_recovery INTEGER NOT NULL DEFAULT 1,
+                    notify_on_new_low INTEGER NOT NULL DEFAULT 1,
+                    last_notified_price REAL,
+                    last_notified_at TEXT,
+                    last_auto_refresh_at TEXT
+                );
                 """
             )
 
@@ -591,6 +622,28 @@ class ScanHistoryStore:
             rows_by_date=_deserialize_grouped_rows(str(row["rows_by_date_json"])),
             quotes_by_date=_deserialize_grouped_rows(str(row["quotes_by_date_json"])),
             is_favorite=is_favorite,
+        )
+
+    def _row_to_alert_config(self, row: sqlite3.Row) -> AlertConfig:
+        return AlertConfig(
+            query_key=str(row["query_key"]),
+            title=str(row["title"]),
+            query_payload=json.loads(str(row["query_payload_json"])),
+            notifications_enabled=bool(int(row["notifications_enabled"])),
+            target_price=float(row["target_price"]) if row["target_price"] is not None else None,
+            drop_amount=float(row["drop_amount"]) if row["drop_amount"] is not None else None,
+            auto_refresh_minutes=(
+                int(row["auto_refresh_minutes"]) if row["auto_refresh_minutes"] is not None else None
+            ),
+            notify_on_recovery=bool(int(row["notify_on_recovery"])),
+            notify_on_new_low=bool(int(row["notify_on_new_low"])),
+            last_notified_price=(
+                float(row["last_notified_price"]) if row["last_notified_price"] is not None else None
+            ),
+            last_notified_at=str(row["last_notified_at"]) if row["last_notified_at"] is not None else None,
+            last_auto_refresh_at=(
+                str(row["last_auto_refresh_at"]) if row["last_auto_refresh_at"] is not None else None
+            ),
         )
 
     def record_scan(
@@ -650,6 +703,10 @@ class ScanHistoryStore:
                     "DELETE FROM favorites WHERE query_key = ?",
                     (query_key,),
                 )
+                connection.execute(
+                    "DELETE FROM alert_configs WHERE query_key = ?",
+                    (query_key,),
+                )
                 return False
             connection.execute(
                 """
@@ -668,6 +725,164 @@ class ScanHistoryStore:
                 ),
             )
             return True
+
+    def get_alert_config(self, query_payload: dict[str, Any]) -> AlertConfig | None:
+        query_key = build_query_key(query_payload)
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT *
+                FROM alert_configs
+                WHERE query_key = ?
+                LIMIT 1
+                """,
+                (query_key,),
+            ).fetchone()
+        if row is None:
+            return None
+        return self._row_to_alert_config(row)
+
+    def save_alert_config(
+        self,
+        query_payload: dict[str, Any],
+        *,
+        notifications_enabled: bool,
+        target_price: float | None,
+        drop_amount: float | None,
+        auto_refresh_minutes: int | None,
+        notify_on_recovery: bool = True,
+        notify_on_new_low: bool = True,
+    ) -> AlertConfig:
+        query_key = build_query_key(query_payload)
+        title = build_query_title(query_payload)
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT OR REPLACE INTO alert_configs (
+                    query_key,
+                    title,
+                    updated_at,
+                    query_payload_json,
+                    notifications_enabled,
+                    target_price,
+                    drop_amount,
+                    auto_refresh_minutes,
+                    notify_on_recovery,
+                    notify_on_new_low,
+                    last_notified_price,
+                    last_notified_at,
+                    last_auto_refresh_at
+                ) VALUES (
+                    ?,
+                    ?,
+                    ?,
+                    ?,
+                    ?,
+                    ?,
+                    ?,
+                    ?,
+                    ?,
+                    ?,
+                    COALESCE((SELECT last_notified_price FROM alert_configs WHERE query_key = ?), NULL),
+                    COALESCE((SELECT last_notified_at FROM alert_configs WHERE query_key = ?), NULL),
+                    COALESCE((SELECT last_auto_refresh_at FROM alert_configs WHERE query_key = ?), NULL)
+                )
+                """,
+                (
+                    query_key,
+                    title,
+                    datetime.now().isoformat(timespec="seconds"),
+                    json.dumps(query_payload, ensure_ascii=False, sort_keys=True),
+                    1 if notifications_enabled else 0,
+                    target_price,
+                    drop_amount,
+                    auto_refresh_minutes,
+                    1 if notify_on_recovery else 0,
+                    1 if notify_on_new_low else 0,
+                    query_key,
+                    query_key,
+                    query_key,
+                ),
+            )
+        config = self.get_alert_config(query_payload)
+        assert config is not None
+        return config
+
+    def delete_alert_config(self, query_payload: dict[str, Any]) -> None:
+        query_key = build_query_key(query_payload)
+        with self._connect() as connection:
+            connection.execute(
+                "DELETE FROM alert_configs WHERE query_key = ?",
+                (query_key,),
+            )
+
+    def list_alert_configs(self, *, notifications_only: bool = False) -> list[AlertConfig]:
+        query = "SELECT * FROM alert_configs"
+        params: tuple[Any, ...] = ()
+        if notifications_only:
+            query += " WHERE notifications_enabled = 1"
+        query += " ORDER BY updated_at DESC"
+        with self._connect() as connection:
+            rows = connection.execute(query, params).fetchall()
+        return [self._row_to_alert_config(row) for row in rows]
+
+    def mark_alert_notified(
+        self,
+        query_payload: dict[str, Any],
+        *,
+        last_notified_price: float | None,
+    ) -> None:
+        query_key = build_query_key(query_payload)
+        with self._connect() as connection:
+            connection.execute(
+                """
+                UPDATE alert_configs
+                SET last_notified_price = ?, last_notified_at = ?
+                WHERE query_key = ?
+                """,
+                (
+                    last_notified_price,
+                    datetime.now().isoformat(timespec="seconds"),
+                    query_key,
+                ),
+            )
+
+    def mark_alert_auto_refreshed(self, query_payload: dict[str, Any]) -> None:
+        query_key = build_query_key(query_payload)
+        with self._connect() as connection:
+            connection.execute(
+                """
+                UPDATE alert_configs
+                SET last_auto_refresh_at = ?
+                WHERE query_key = ?
+                """,
+                (
+                    datetime.now().isoformat(timespec="seconds"),
+                    query_key,
+                ),
+            )
+
+    def get_due_auto_refresh_configs(self, *, limit: int = 1) -> list[AlertConfig]:
+        now = datetime.now()
+        due_configs: list[AlertConfig] = []
+        for config in self.list_alert_configs():
+            if config.auto_refresh_minutes is None or config.auto_refresh_minutes <= 0:
+                continue
+            if not self.is_favorite_query_key(config.query_key):
+                continue
+            if not config.last_auto_refresh_at:
+                due_configs.append(config)
+                continue
+            try:
+                last_run = datetime.fromisoformat(config.last_auto_refresh_at)
+            except ValueError:
+                due_configs.append(config)
+                continue
+            if now - last_run >= timedelta(minutes=config.auto_refresh_minutes):
+                due_configs.append(config)
+            if len(due_configs) >= limit:
+                break
+        return due_configs
 
     def get_latest_scan(self, query_payload: dict[str, Any]) -> ScanRecord | None:
         query_key = build_query_key(query_payload)

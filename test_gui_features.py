@@ -220,6 +220,73 @@ def test_build_compare_rows_identifies_failure_recovery() -> None:
     assert rows[0]["change"] == "由失败变成功"
 
 
+def test_build_window_summary_text_mentions_winner_and_spread() -> None:
+    text = gui._build_window_summary_text(
+        [
+            {
+                "date": "2026-05-01",
+                "route": "PEK -> HKG",
+                "region_name": "香港",
+                "cheapest_cny_price": 840.0,
+            },
+            {
+                "date": "2026-05-02",
+                "route": "PEK -> HKG",
+                "region_name": "新加坡",
+                "cheapest_cny_price": 920.0,
+            },
+        ],
+        [],
+    )
+
+    assert "窗口最低价" in text
+    assert "香港" in text
+    assert "¥80.00" in text
+
+
+def test_build_market_delta_explanation_mentions_history_wins() -> None:
+    history_records = [
+        types.SimpleNamespace(
+            scan_count=0,
+            created_at="2026-04-10T10:00:00",
+            id=1,
+            rows_by_date=[
+                (
+                    "2026-05-01",
+                    [
+                        {
+                            "region_name": "香港",
+                            "route": "PEK -> HKG",
+                            "cheapest_cny_price": 800.0,
+                        }
+                    ],
+                )
+            ],
+        )
+    ]
+
+    text = gui._build_market_delta_explanation(
+        [
+            {
+                "date": "2026-05-01",
+                "route": "PEK -> HKG",
+                "region_name": "香港",
+                "cheapest_cny_price": 840.0,
+            },
+            {
+                "date": "2026-05-01",
+                "route": "PEK -> HKG",
+                "region_name": "新加坡",
+                "cheapest_cny_price": 920.0,
+            },
+        ],
+        history_records,
+    )
+
+    assert "香港 比 新加坡 低" in text
+    assert "赢过 1 次" in text
+
+
 def test_upsert_rows_by_date_replaces_existing_trip() -> None:
     updated = gui._upsert_rows_by_date(
         [("2026-05-20", [{"region_name": "香港"}])],
