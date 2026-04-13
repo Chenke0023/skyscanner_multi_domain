@@ -24,6 +24,7 @@ from skyscanner_regions import REGION_HOST_ALIASES
 PLAYWRIGHT_PROBE_TEXT_LIMIT = 12000
 BROWSER_CDP_PORT = 9222
 BROWSER_BINARY_CANDIDATES = {
+    "comet": Path("/Applications/Comet.app/Contents/MacOS/Comet"),
     "chrome": Path("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"),
     "edge": Path("/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge"),
 }
@@ -52,7 +53,7 @@ def _profile_has_state(profile_dir: Path) -> bool:
 def _get_persistent_probe_candidates() -> tuple[tuple[str, Path, Path], ...]:
     browsers = _detect_local_browsers()
     candidates: list[tuple[str, Path, Path]] = []
-    for browser_name in ("edge", "chrome"):
+    for browser_name in ("comet", "edge", "chrome"):
         binary = browsers.get(browser_name)
         if binary is None:
             continue
@@ -64,7 +65,7 @@ def _get_persistent_probe_candidates() -> tuple[tuple[str, Path, Path], ...]:
 
 def _get_persistent_profile_dirs() -> tuple[Path, ...]:
     profile_dirs: list[Path] = []
-    for browser_name in ("edge", "chrome"):
+    for browser_name in ("comet", "edge", "chrome"):
         profile_dir = get_browser_profile_dir(browser_name)
         if _profile_has_state(profile_dir):
             profile_dirs.append(profile_dir)
@@ -266,6 +267,7 @@ async def _probe_existing_cdp_page(
             continue
 
         quote = extract_page_quote(region, page_url, page_text)
+        quote.source_kind = "cdp_reuse"
         if quote.price is not None:
             return ProbeOutcome(quote=quote, page_text=page_text)
 
@@ -511,6 +513,7 @@ async def _probe_page_with_playwright(
                 page_text = ""
 
         quote = extract_page_quote(region, final_url, page_text)
+        quote.source_kind = "browser_fallback"
         if quote.price is not None:
             return ProbeOutcome(quote=quote, page_text=page_text)
 
@@ -528,6 +531,7 @@ async def _probe_page_with_playwright(
 
         if quote.status == "page_loading":
             quote.error = "Playwright 预探测显示结果页仍在加载"
+            quote.source_kind = "browser_fallback"
             return ProbeOutcome(quote=quote, page_text=page_text)
 
         if timed_out and page_text:
@@ -613,6 +617,7 @@ async def compare_via_scrapling(
     on_region_start: Callable[[RegionConfig], None] | None = None,
     build_search_url: Callable[..., str] | None = None,
     persist_failure_log: Callable[..., FlightQuote] | None = None,
+    region_concurrency: int = 1,
 ) -> list[FlightQuote]:
     # Lazy import to avoid hard dependency at module level
     if build_search_url is None:
@@ -628,7 +633,6 @@ async def compare_via_scrapling(
         CaptchaSolverClient = None
         CaptchaSolverError = Exception
 
-    quotes: list[FlightQuote] = []
     timeout_ms = max(int(getattr(args, "timeout", 30) * 1000), 10000)
     wait_ms = max(int(getattr(args, "page_wait", 8) * 1000), 3000)
     timeout_seconds = max(int(getattr(args, "timeout", 30)), 10)
@@ -637,42 +641,7 @@ async def compare_via_scrapling(
     if return_date:
         route_key = f"{route_key}_rt{return_date.replace('-', '')}"
 
-    async def fetch_with_stealth(
-        url: str,
-        region: RegionConfig,
-        *,
-        solve_cloudflare: bool,
-        wait_override_ms: int | None = None,
-        load_dom_override: bool | None = None,
-        network_idle_override: bool | None = None,
-        state_overrides: dict[str, Any] | None = None,
-    ) -> Any:
-        if state_overrides is None:
-            state_overrides = await _resolve_scrapling_state_overrides(
-                region,
-                url,
-                for_stealth=True,
-            )
-        return await asyncio.to_thread(
-            StealthyFetcher.fetch,
-            url,
-            headless=True,
-            network_idle=(
-                network_idle_override
-                if network_idle_override is not None
-                else False
-            ),
-            load_dom=load_dom_override if load_dom_override is not None else False,
-            timeout=timeout_ms,
-            wait=wait_override_ms or wait_ms,
-            solve_cloudflare=solve_cloudflare,
-            google_search=False,
-            locale=region.locale,
-            extra_headers=_build_request_headers(region),
-            **state_overrides,
-        )
-
-    for region in selected_regions:
+    async def scan_region(region: RegionConfig) -> FlightQuote:
         if on_region_start is not None:
             on_region_start(region)
         url = build_search_url(
@@ -695,6 +664,8 @@ async def compare_via_scrapling(
             else:
                 probe_quote = probe_outcome
                 probe_page_text = getattr(probe_outcome, "page_text", "")
+            if probe_source == "playwright" and not getattr(probe_quote, "source_kind", None):
+                probe_quote.source_kind = "browser_fallback"
             if persist_failures and probe_quote.price is None:
                 persist_failure_log(
                     probe_quote,
@@ -703,25 +674,55 @@ async def compare_via_scrapling(
                     page_text=probe_page_text,
                     extra={"locale": region.locale, "probe": probe_source},
                 )
-            quotes.append(probe_quote)
-            continue
+            return probe_quote
 
         try:
             from scrapling import Fetcher, StealthyFetcher
         except ImportError:
             install_hint = '未安装 Scrapling，请先执行: pip install "scrapling[fetchers]"'
-            quotes.append(
-                FlightQuote(
-                    region=region.code,
-                    domain=region.domain,
-                    price=None,
-                    currency=region.currency,
-                    source_url=url,
-                    status="scrapling_unavailable",
-                    error=install_hint,
-                )
+            return FlightQuote(
+                region=region.code,
+                domain=region.domain,
+                price=None,
+                currency=region.currency,
+                source_url=url,
+                status="scrapling_unavailable",
+                error=install_hint,
             )
-            continue
+
+        async def fetch_with_stealth(
+            *,
+            solve_cloudflare: bool,
+            wait_override_ms: int | None = None,
+            load_dom_override: bool | None = None,
+            network_idle_override: bool | None = None,
+            state_overrides: dict[str, Any] | None = None,
+        ) -> Any:
+            current_state_overrides = state_overrides
+            if current_state_overrides is None:
+                current_state_overrides = await _resolve_scrapling_state_overrides(
+                    region,
+                    url,
+                    for_stealth=True,
+                )
+            return await asyncio.to_thread(
+                StealthyFetcher.fetch,
+                url,
+                headless=True,
+                network_idle=(
+                    network_idle_override
+                    if network_idle_override is not None
+                    else False
+                ),
+                load_dom=load_dom_override if load_dom_override is not None else False,
+                timeout=timeout_ms,
+                wait=wait_override_ms or wait_ms,
+                solve_cloudflare=solve_cloudflare,
+                google_search=False,
+                locale=region.locale,
+                extra_headers=_build_request_headers(region),
+                **current_state_overrides,
+            )
 
         stealth_attempts = (
             {"solve_cloudflare": False, "wait_ms": wait_ms},
@@ -737,8 +738,6 @@ async def compare_via_scrapling(
             )
             try:
                 page = await fetch_with_stealth(
-                    url,
-                    region,
                     solve_cloudflare=attempt["solve_cloudflare"],
                     wait_override_ms=attempt["wait_ms"],
                     state_overrides=state_overrides,
@@ -757,6 +756,7 @@ async def compare_via_scrapling(
                     detected_captcha_type,
                     source_label="Scrapling",
                 )
+                latest_quote.source_kind = "live"
                 break
             if not page_text:
                 latest_quote = FlightQuote(
@@ -767,10 +767,12 @@ async def compare_via_scrapling(
                     source_url=url,
                     status="scrapling_parse_failed",
                     error="Scrapling 返回内容为空，未提取到可解析文本",
+                    source_kind="live",
                 )
                 continue
 
             latest_quote = extract_page_quote(region, page_url, page_text)
+            latest_quote.source_kind = latest_quote.source_kind or "live"
             if latest_quote.price is not None:
                 break
 
@@ -781,8 +783,6 @@ async def compare_via_scrapling(
             ):
                 try:
                     dom_page = await fetch_with_stealth(
-                        url,
-                        region,
                         solve_cloudflare=attempt["solve_cloudflare"],
                         wait_override_ms=max(attempt["wait_ms"], 12000),
                         load_dom_override=True,
@@ -800,6 +800,7 @@ async def compare_via_scrapling(
                             dom_page_url,
                             dom_page_text,
                         )
+                        latest_quote.source_kind = latest_quote.source_kind or "live"
                         if latest_quote.price is not None:
                             break
                 except Exception:
@@ -812,6 +813,7 @@ async def compare_via_scrapling(
                     detected_captcha_type,
                     source_label="Scrapling",
                 )
+                latest_quote.source_kind = "live"
                 break
 
             if latest_quote.status not in {
@@ -823,11 +825,9 @@ async def compare_via_scrapling(
 
         if latest_quote is not None:
             if latest_quote.price is not None:
-                quotes.append(latest_quote)
-                continue
+                return latest_quote
             if latest_quote.status == "px_challenge":
-                quotes.append(latest_quote)
-                continue
+                return latest_quote
 
         # Check if page contains captcha and try to solve it
         has_captcha, captcha_type = _check_captcha_in_page(page_text)
@@ -857,14 +857,13 @@ async def compare_via_scrapling(
 
                     if token:
                         page = await fetch_with_stealth(
-                            url,
-                            region,
                             solve_cloudflare=True,
                             wait_override_ms=max(wait_ms * 2, 15000),
                         )
                         page_text = _extract_scrapling_page_text(page)
                         if page_text:
                             latest_quote = extract_page_quote(region, url, page_text)
+                            latest_quote.source_kind = latest_quote.source_kind or "live"
                 await captcha_solver.close()
             except CaptchaSolverError as exc:
                 latest_quote = FlightQuote(
@@ -875,6 +874,7 @@ async def compare_via_scrapling(
                     source_url=url,
                     status="captcha_solve_failed",
                     error=f"Captcha解决失败 ({captcha_type}): {exc}",
+                    source_kind="live",
                 )
             except Exception:
                 pass
@@ -909,8 +909,10 @@ async def compare_via_scrapling(
                             detected_captcha_type,
                             source_label="Scrapling fallback",
                         )
+                        latest_quote.source_kind = "live"
                     else:
                         latest_quote = extract_page_quote(region, page_url, page_text)
+                        latest_quote.source_kind = latest_quote.source_kind or "live"
                 elif latest_quote is None:
                     latest_quote = FlightQuote(
                         region=region.code,
@@ -920,6 +922,7 @@ async def compare_via_scrapling(
                         source_url=url,
                         status="scrapling_parse_failed",
                         error="Scrapling 返回内容为空，未提取到可解析文本",
+                        source_kind="live",
                     )
             except Exception as exc:
                 latest_error = latest_error or f"Scrapling 抓取失败: {exc}"
@@ -933,9 +936,12 @@ async def compare_via_scrapling(
                 source_url=url,
                 status="scrapling_failed",
                 error=latest_error or "Scrapling 抓取失败",
+                source_kind="live",
             )
         elif latest_quote.price is None and latest_error and not latest_quote.error:
             latest_quote.error = latest_error
+        if latest_quote is not None and not latest_quote.source_kind:
+            latest_quote.source_kind = "live"
 
         if persist_failures and latest_quote.price is None:
             persist_failure_log(
@@ -946,6 +952,17 @@ async def compare_via_scrapling(
                 extra={"locale": region.locale},
             )
 
-        quotes.append(latest_quote)
+        return latest_quote
 
-    return quotes
+    concurrency = max(int(region_concurrency), 1)
+    semaphore = asyncio.Semaphore(concurrency)
+
+    async def run_with_limit(index: int, region: RegionConfig) -> tuple[int, FlightQuote]:
+        async with semaphore:
+            return (index, await scan_region(region))
+
+    ordered_results = await asyncio.gather(
+        *(run_with_limit(index, region) for index, region in enumerate(selected_regions))
+    )
+    ordered_results.sort(key=lambda item: item[0])
+    return [quote for _, quote in ordered_results]

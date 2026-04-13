@@ -63,6 +63,28 @@ class CliParserTests(unittest.TestCase):
         self.assertEqual(args.origin, "北京")
         self.assertEqual(args.destination_country, "乌兹别克斯坦")
 
+    def test_page_command_accepts_preview_and_rerun_flags(self) -> None:
+        parser = build_parser()
+
+        args = parser.parse_args(
+            [
+                "page",
+                "-o",
+                "北京",
+                "-d",
+                "阿拉木图",
+                "-t",
+                "2026-05-20",
+                "--preview-only",
+                "--rerun-failed",
+                "--show-delta",
+            ]
+        )
+
+        self.assertTrue(args.preview_only)
+        self.assertTrue(args.rerun_failed)
+        self.assertTrue(args.show_delta)
+
     def test_replay_failures_command_accepts_custom_directory(self) -> None:
         parser = build_parser()
 

@@ -143,6 +143,126 @@ def test_find_cheapest_highlight_signatures_marks_all_min_rows() -> None:
     assert gui._row_signature(rows[2]) not in signatures
 
 
+def test_build_recommendation_payload_uses_lowest_candidate() -> None:
+    payload = gui._build_recommendation_payload(
+        [
+            {
+                "date": "2026-05-01",
+                "route": "PEK -> HKG",
+                "region_name": "香港",
+                "cheapest_cny_price": 840.0,
+                "source_label": "实时直连",
+                "stability_label": "近期稳定",
+                "market_reliability_label": "稳定可下单",
+                "link": "https://example.com/hk",
+            },
+            {
+                "date": "2026-05-02",
+                "route": "PEK -> HKG",
+                "region_name": "新加坡",
+                "cheapest_cny_price": 900.0,
+                "source_label": "实时直连",
+                "stability_label": "近期稳定",
+                "market_reliability_label": "稳定可下单",
+                "link": "https://example.com/sg",
+            },
+        ]
+    )
+
+    assert payload["headline"] == "推荐优先打开 香港"
+    assert payload["price"] == "¥840.00"
+    assert payload["link"] == "https://example.com/hk"
+    assert "¥60.00" in str(payload["insight"])
+
+
+def test_build_calendar_summary_supports_round_trip_matrix() -> None:
+    summary = gui._build_calendar_summary(
+        [
+            {
+                "date": "2026-05-01 -> 2026-05-05",
+                "route": "PEK -> HKG",
+                "region_name": "香港",
+                "cheapest_cny_price": 840.0,
+            },
+            {
+                "date": "2026-05-02 -> 2026-05-06",
+                "route": "PEK -> HKG",
+                "region_name": "新加坡",
+                "cheapest_cny_price": 900.0,
+            },
+        ]
+    )
+
+    assert summary["2026-05-01"]["2026-05-05"]["region_name"] == "香港"
+    assert summary["2026-05-02"]["2026-05-06"]["region_name"] == "新加坡"
+
+
+def test_build_compare_rows_identifies_failure_recovery() -> None:
+    rows = gui._build_compare_rows(
+        [
+            {
+                "date": "2026-05-01",
+                "route": "PEK -> HKG",
+                "region_name": "香港",
+                "cheapest_cny_price": 840.0,
+            }
+        ],
+        [
+            {
+                "date": "2026-05-01",
+                "route": "PEK -> HKG",
+                "region_name": "香港",
+                "cheapest_cny_price": None,
+            }
+        ],
+    )
+
+    assert rows[0]["change"] == "由失败变成功"
+
+
+def test_upsert_rows_by_date_replaces_existing_trip() -> None:
+    updated = gui._upsert_rows_by_date(
+        [("2026-05-20", [{"region_name": "香港"}])],
+        "2026-05-20",
+        [{"region_name": "新加坡"}],
+    )
+
+    assert updated == [("2026-05-20", [{"region_name": "新加坡"}])]
+
+
+def test_upsert_quotes_by_date_appends_new_trip() -> None:
+    updated = gui._upsert_quotes_by_date(
+        [("2026-05-20", [{"region": "HK"}])],
+        "2026-05-21",
+        [{"region": "SG"}],
+    )
+
+    assert updated == [
+        ("2026-05-20", [{"region": "HK"}]),
+        ("2026-05-21", [{"region": "SG"}]),
+    ]
+
+
+def test_retry_queue_deduplicates_by_trip_route_and_region() -> None:
+    logs: list[str] = []
+    app = types.SimpleNamespace(
+        _pending_retry_targets={},
+        _selected_failure_row=lambda: {
+            "date": "2026-05-20",
+            "route": "PEK -> HKG",
+            "region_code": "HK",
+            "region_name": "香港",
+        },
+        log=lambda line: logs.append(line),
+    )
+
+    gui.App._queue_selected_failure_market(app)
+    gui.App._queue_selected_failure_market(app)
+
+    assert len(app._pending_retry_targets) == 1
+    assert any("当前待补扫 1 个" in line for line in logs)
+
+
 def test_check_environment_only_detects_cdp_without_auto_launching_browser() -> None:
     status_updates: list[str] = []
     log_lines: list[str] = []
@@ -166,4 +286,4 @@ def test_check_environment_only_detects_cdp_without_auto_launching_browser() -> 
     ensure_cdp_ready_mock.assert_not_called()
     showinfo_mock.assert_called_once()
     assert status_updates == ["Scrapling 主抓取: 已安装"]
-    assert any("Edge/CDP 回退: 未连接" in line for line in log_lines)
+    assert any("浏览器/CDP 回退: 未连接" in line for line in log_lines)

@@ -37,19 +37,19 @@
 - GUI 当前也默认走 Scrapling
 - Scrapling 失败市场会自动 fallback 到 `page`
 
-## 仓库整理状态（2026-03-13）
+## 仓库整理状态（2026-04-09）
 
-本次已完成分支整理：
+当前仓库以 `main` 为唯一活跃主线：
 
-- `refactor/split-skyscanner-neo` 已合并进 `main`
-- `876ac14`（README / AI_AGENT_HANDOFF 更新到四模块结构）已随上述分支进入 `main`
-- 历史分支 `codex/restore-date-window-and-split-parser` 已保留合并记录
-- 历史分支 `worktree/skyscanner-multi-domain` 已保留合并记录
-- 文档分支 `docs/update-progress-cancel-links` 已清理
-- 已发布功能分支 `feat/gui-progress-cancel-links` 已清理
-- 已发布功能分支 `feat/scrapling-transport` 已清理
+- 历史功能分支已合并并清理
+- 本地分支当前只保留 `main`
+- 远端分支当前只保留 `origin/main`
 
-当前仓库主线以 `main` 为准；上述分支对应成果已保留在 `main` 历史中，分支本身已清理。
+当前建议工作方式：
+
+- 新功能使用短生命周期分支开发
+- 合并进 `main` 后立即删除本地 / 远端功能分支
+- 不再长期保留已合并的历史分支
 
 ## 启动方式
 
@@ -65,6 +65,9 @@ CLI：
 python3 cli.py page -o 北京 -d 阿拉木图 -t 2026-04-29
 python3 cli.py page -o 北京 -d 阿拉木图 -t 2026-04-29 --date-window 0
 python3 cli.py page -o 北京 -d 阿拉木图 -t 2026-04-29 --transport page
+python3 cli.py page -o 北京 -d 香港 -t 2026-05-20 --return-date 2026-05-25
+python3 cli.py page -o 北京 --destination-country 乌兹别克斯坦 -t 2026-05-20
+python3 cli.py page --origin-country 中国 --destination-country 乌兹别克斯坦 -t 2026-05-20 --country-airport-limit 8
 ```
 
 如果已经构建过 macOS App，也可以双击打开 `Skyscanner 多市场比价.app`。
@@ -90,15 +93,25 @@ python3 cli.py page -o 北京 -d 阿拉木图 -t 2026-04-29 --transport page
 - 当单个市场在 Scrapling 下仍失败时，自动回退到 `page` 方案重试该市场
 - 在需要时可切换到 `page` 方案，自动连接或拉起带 `9222` 调试端口的 Edge
 - 按路线智能拼出实际比较地区（基线地区 + 出发/目的地所属市场 + 手动追加地区）
-- 支持日期窗口扫描（默认 `±3` 天，`--date-window 0` 表示只扫单日）
+- 支持单程与往返
+- 支持日期窗口扫描（默认 `±3` 天，`--date-window 0` 表示只扫单日；往返时保持停留天数）
+- 支持地点解析：
+  - 地点 -> 地点
+  - 地点 -> 国家
+  - 国家 -> 地点
+  - 国家 -> 国家
+- 国家端点会自动展开为候选主机场集合，逐航段扫描后按市场聚合最优结果
 - 解析真实结果页中的 Best / Cheapest 排序区块
 - 同时提取 Best / Cheapest
 - 按汇率统一换算为人民币
 - 保存 Markdown 报告，便于直接对比
+- 结果表 / Markdown 报告包含“航段”列，能看到实际命中的机场组合
 - GUI 结果表格支持点击列头排序（价格列按数值排序，支持升序/降序切换）
 - GUI 扫描进度条：逐市场实时更新状态（如 `正在扫描 2026-04-29 [中国] (3/49)`），附 `ttk.Progressbar`
 - GUI 取消按钮：扫描期间可随时中断，worker 线程在日期/地区间隙安全退出
 - GUI 链接可点击：双击结果表"链接"列可在默认浏览器中打开对应 Skyscanner 结果页
+- GUI 支持独立勾选“出发地按国家”与“目的地按国家”
+- GUI 内置出发 / 返程日期选择器
 
 ## 输出与运行时路径
 
@@ -133,6 +146,7 @@ python3 cli.py page -o 北京 -d 阿拉木图 -t 2026-04-29 --transport page
 
 当前 Markdown 表格列为：
 
+- 航段
 - 地区
 - 最佳（原币）
 - 最佳（人民币）
@@ -145,6 +159,7 @@ python3 cli.py page -o 北京 -d 阿拉木图 -t 2026-04-29 --transport page
 示例文件：
 
 - `outputs/reports/edge_page_BJSA_ALA_20260429.md`
+- `outputs/reports/edge_page_BJSA_UZ_ANY_20260520.md`
 
 如果启用日期窗口，还会额外生成一个窗口汇总文件，例如：
 
@@ -172,6 +187,7 @@ pip install -r requirements.txt
 运行测试：
 
 ```bash
+python3 -m pytest -q test_location_resolver.py test_cli.py
 python3 -m pytest -q test_skyscanner_neo.py
 python3 -m pytest -q test_date_window.py
 ```

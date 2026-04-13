@@ -1,11 +1,41 @@
 # AI Agent Handoff
 
-Last updated: 2026-03-13
+Last updated: 2026-04-09
 Project root: `skyscanner_multi_domain`
 
 ## 0. Current Development Status (branch: `main`)
 
 ### Completed changes (latest)
+
+- Added trip-mode support across CLI and GUI:
+  - one-way and round-trip flows share the same scan pipeline
+  - round-trip date windows preserve stay length
+  - GUI includes departure / return date picker controls
+- Added expanded endpoint support in CLI and GUI:
+  - location -> location
+  - location -> country
+  - country -> location
+  - country -> country
+- Added country expansion logic in `location_resolver.py`:
+  - country alias / ISO resolution
+  - curated candidate-airport selection per country
+  - mixed endpoint expansion into concrete airport pairs
+- Added mixed-route aggregation behavior:
+  - when one or both endpoints are countries, the app scans candidate airport pairs
+  - per-market results are aggregated back to the best available route per market
+  - output now preserves the winning `航段` for each market row
+- Added CLI support for:
+  - `--origin-country`
+  - `--destination-country`
+  - `--country-airport-limit`
+- Updated GUI support for:
+  - `出发地按国家`
+  - `目的地按国家`
+  - mixed location/country combinations without forcing both endpoints into country mode
+- Added regression coverage in `test_location_resolver.py` and new `test_cli.py`
+- Repository housekeeping completed:
+  - current active local branch set is only `main`
+  - current active remote branch set is only `origin/main`
 
 - Refactored `skyscanner_neo.py` (1664 lines) into four focused modules:
   - `transport_scrapling.py` (330 lines): Scrapling fetch, captcha detection, `compare_via_scrapling`
@@ -106,24 +136,27 @@ This project compares Skyscanner prices across multiple markets by fetching and 
 Current workflow:
 
 1. Expand the requested date into a date window when enabled
-2. Open the same route/date on multiple Skyscanner market domains
-3. Use Scrapling to fetch page content and extract visible text
-4. Parse both Best and Cheapest prices from the sort/results section
-5. Convert prices to CNY when FX is available
-6. Save per-day Markdown reports plus an optional window summary
-7. Automatically retry only failed markets via local Edge CDP when Scrapling hits retryable final states
+2. Resolve each endpoint as either a single location or a country-expanded airport set
+3. Open the same route/date on multiple Skyscanner market domains
+4. Use Scrapling to fetch page content and extract visible text
+5. Parse both Best and Cheapest prices from the sort/results section
+6. Convert prices to CNY when FX is available
+7. Save per-day Markdown reports plus an optional window summary
+8. Automatically retry only failed markets via local Edge CDP when Scrapling hits retryable final states
 
 ## 2. Active Entry Points
 
 - `gui.py`
   - Main UI for non-technical users
   - Tkinter app
+  - Supports one-way / round-trip
+  - Supports mixed location/country endpoint expansion
   - Supports column-header click-to-sort across all dates
   - Per-region progress bar with cancel support
   - Double-click link column to open in browser
 - `cli.py`
   - CLI wrapper around the same scan flow
-  - Handles location resolution, smart effective regions, FX conversion, and Markdown output
+  - Handles location/country resolution, smart effective regions, FX conversion, and Markdown output
 - `skyscanner_neo.py`
   - Neo compatibility layer: NeoCli wrapper, capture replay, URL rewriting, payload mutation
   - Re-exports all moved symbols for backward compatibility
@@ -154,6 +187,7 @@ Saved report path:
 
 Current Markdown columns:
 
+- 航段
 - 地区
 - 最佳（原币）
 - 最佳（人民币）
@@ -165,6 +199,12 @@ Current Markdown columns:
 
 GUI table is aligned with the same fields.
 CLI also prints Best and Cheapest winners when available.
+
+Mixed endpoint behavior:
+
+- when one side is a country, file tokens use `<ISO>_ANY`
+- example: `edge_page_BJSA_UZ_ANY_20260520.md`
+- result rows preserve the concrete winning route, such as `BJSA -> TAS`
 
 Date-window behavior:
 
@@ -211,6 +251,12 @@ Effective regions are built from:
 - destination country
 - user-provided extra region codes
 
+When endpoint expansion is enabled:
+
+- single-location endpoints still contribute their resolved country to smart regions
+- country endpoints contribute their ISO country code directly
+- mixed location/country routes therefore keep the same smart-region behavior
+
 ### Current baseline default regions
 
 - `CN`
@@ -227,6 +273,14 @@ Important:
 
 - GUI field means extra regions, not full replacement
 - CLI `-r/--regions` also appends to smart defaults, not replaces them
+
+### Endpoint expansion semantics
+
+- point-to-point mode remains the default when no country argument/toggle is enabled
+- GUI can enable country expansion independently for origin and destination
+- CLI can enable country expansion independently via `--origin-country` and `--destination-country`
+- country expansion is intentionally capped by `--country-airport-limit` / the GUI default limit to avoid route-count explosion
+- mixed-route scans aggregate per-market winners back into one row per market
 
 ### Date window semantics
 
@@ -300,9 +354,11 @@ It now prefers valid parsed prices over transient loading text when both appear 
 - `skyscanner_neo.py`
   - start here for Neo CLI, capture replay, URL rewriting; also holds backward-compat re-exports
 - `cli.py`
-  - start here for output rendering, date-window scanning, and CLI summary behavior
+  - start here for output rendering, endpoint expansion, date-window scanning, and CLI summary behavior
 - `gui.py`
-  - start here for UI behavior, date-window controls, scan-thread orchestration, progress/cancel, and link opening
+  - start here for UI behavior, date-window controls, endpoint-mode toggles, scan-thread orchestration, progress/cancel, and link opening
+- `location_resolver.py`
+  - start here for airport/metro/country resolution and candidate-airport expansion
 - `date_window.py`
   - start here for date-range generation behavior
 

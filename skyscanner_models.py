@@ -28,3 +28,4 @@ class FlightQuote:
     cheapest_price_path: Optional[str] = None
     error: Optional[str] = None
     debug_log_path: Optional[str] = None
+    source_kind: Optional[str] = None

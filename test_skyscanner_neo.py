@@ -2,6 +2,7 @@ import asyncio
 import tempfile
 import unittest
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from unittest.mock import AsyncMock, patch
 
 from skyscanner_neo import (
@@ -15,6 +16,7 @@ from skyscanner_neo import (
 )
 from skyscanner_models import FlightQuote
 from skyscanner_page_parser import slice_page_text_for_scan
+from scan_history import ScanHistoryStore
 
 
 class ExtractPageQuoteTests(unittest.TestCase):
@@ -523,6 +525,195 @@ class RunPageScanFallbackTests(unittest.TestCase):
                 self.assertEqual(quotes, [])
                 args = scrapling_mock.await_args.args[0]
                 self.assertEqual(args.return_date, "2026-05-03")
+
+        asyncio.run(run_case())
+
+    def test_run_page_scan_filters_selected_regions_and_forwards_concurrency(self) -> None:
+        async def run_case() -> None:
+            with patch(
+                "transport_scrapling.compare_via_scrapling",
+                new=AsyncMock(return_value=[]),
+            ) as scrapling_mock:
+                quotes = await run_page_scan(
+                    origin="BJSA",
+                    destination="ALA",
+                    date="2026-04-29",
+                    region_codes=["CN", "HK", "SG"],
+                    transport="scrapling",
+                    rerun_scope="selected_regions",
+                    selected_region_codes=["HK", "SG"],
+                    region_concurrency=3,
+                )
+
+                self.assertEqual(quotes, [])
+                selected_regions = scrapling_mock.await_args.args[1]
+                self.assertEqual([region.code for region in selected_regions], ["HK", "SG"])
+                self.assertEqual(
+                    scrapling_mock.await_args.kwargs["region_concurrency"],
+                    3,
+                )
+
+        asyncio.run(run_case())
+
+    def test_run_page_scan_preview_first_emits_cached_then_live_progress(self) -> None:
+        progress_events: list[dict[str, object]] = []
+
+        async def run_case() -> None:
+            with TemporaryDirectory() as tmpdir:
+                store = ScanHistoryStore(Path(tmpdir) / "scan_history.sqlite3")
+                query_payload = {
+                    "identity": {
+                        "mode": "point_to_point",
+                        "origin_code": "BJSA",
+                        "destination_code": "ALA",
+                        "date": "2026-04-29",
+                        "return_date": None,
+                    },
+                    "display": {"title": "北京 -> 阿拉木图 (2026-04-29)"},
+                }
+                store.record_scan(
+                    query_payload,
+                    [
+                        (
+                            "2026-04-29",
+                            [
+                                {
+                                    "region_code": "HK",
+                                    "region_name": "香港",
+                                    "route": "BJSA -> ALA",
+                                    "cheapest_cny_price": 900.0,
+                                    "source_kind": "cached",
+                                }
+                            ],
+                        )
+                    ],
+                    [
+                        (
+                            "2026-04-29",
+                            [
+                                {
+                                    "region": "HK",
+                                    "domain": "https://www.skyscanner.com.hk",
+                                    "price": 900.0,
+                                    "currency": "HKD",
+                                    "source_url": "https://example.com/hk",
+                                    "status": "page_text",
+                                }
+                            ],
+                        )
+                    ],
+                    scan_mode="preview_first",
+                )
+
+                live_quotes = [
+                    FlightQuote(
+                        region="HK",
+                        domain="https://www.skyscanner.com.hk",
+                        price=850.0,
+                        currency="HKD",
+                        source_url="https://example.com/hk",
+                        status="page_text",
+                        cheapest_price=850.0,
+                    ),
+                    FlightQuote(
+                        region="CN",
+                        domain="https://www.skyscanner.cn",
+                        price=820.0,
+                        currency="CNY",
+                        source_url="https://example.com/cn",
+                        status="page_text",
+                        cheapest_price=820.0,
+                    ),
+                ]
+
+                async def on_progress(payload: dict[str, object]) -> None:
+                    progress_events.append(payload)
+
+                with (
+                    patch(
+                        "transport_scrapling.compare_via_scrapling",
+                        new=AsyncMock(return_value=live_quotes),
+                    ),
+                    patch("transport_cdp.compare_via_pages", new=AsyncMock(return_value=[])),
+                ):
+                    quotes = await run_page_scan(
+                        origin="BJSA",
+                        destination="ALA",
+                        date="2026-04-29",
+                        region_codes=["CN", "HK"],
+                    transport="scrapling",
+                    scan_mode="preview_first",
+                    query_payload=query_payload,
+                    history_store=store,
+                    on_progress=on_progress,
+                )
+
+                self.assertEqual(len(quotes), 2)
+                self.assertEqual(
+                    [event["stage"] for event in progress_events[:2]],
+                    ["preview_cache", "quick_live"],
+                )
+                self.assertEqual(progress_events[-1]["stage"], "final")
+
+        asyncio.run(run_case())
+
+    def test_run_page_scan_preview_first_skips_browser_fallback_after_live_success(self) -> None:
+        async def run_case() -> None:
+            progress_events: list[dict[str, object]] = []
+
+            async def compare_side_effect(_args, selected_regions, **_kwargs):
+                region_codes = [region.code for region in selected_regions]
+                if region_codes == ["CN"]:
+                    return [
+                        FlightQuote(
+                            region="CN",
+                            domain="https://www.skyscanner.cn",
+                            price=820.0,
+                            currency="CNY",
+                            source_url="https://example.com/cn",
+                            status="page_text",
+                            cheapest_price=820.0,
+                        )
+                    ]
+                return [
+                    FlightQuote(
+                        region="HK",
+                        domain="https://www.skyscanner.com.hk",
+                        price=None,
+                        currency="HKD",
+                        source_url="https://example.com/hk",
+                        status="page_loading",
+                        error="still loading",
+                    )
+                ]
+
+            async def on_progress(payload: dict[str, object]) -> None:
+                progress_events.append(payload)
+
+            with (
+                patch(
+                    "transport_scrapling.compare_via_scrapling",
+                    new=AsyncMock(side_effect=compare_side_effect),
+                ) as scrapling_mock,
+                patch("transport_cdp.compare_via_pages", new=AsyncMock(return_value=[])) as page_mock,
+                patch("transport_cdp.ensure_cdp_ready") as ensure_cdp_ready_mock,
+            ):
+                quotes = await run_page_scan(
+                    origin="BJSA",
+                    destination="ALA",
+                    date="2026-04-29",
+                    region_codes=["CN", "HK"],
+                    transport="scrapling",
+                    scan_mode="preview_first",
+                    region_concurrency=1,
+                    on_progress=on_progress,
+                )
+
+            self.assertEqual(len(quotes), 2)
+            self.assertEqual(scrapling_mock.await_count, 2)
+            page_mock.assert_not_awaited()
+            ensure_cdp_ready_mock.assert_not_called()
+            self.assertIn("quick_live", [event["stage"] for event in progress_events])
 
         asyncio.run(run_case())
 
