@@ -21,3 +21,8 @@ Skyscanner 多市场比价-Standalone.spec
 build/
 dist/
 runtime/
+webui/node_modules/
+webui/dist/
+webui/*.tsbuildinfo
+webui/*.js
+webui/*.d.ts

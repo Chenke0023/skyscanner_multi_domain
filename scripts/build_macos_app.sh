@@ -9,6 +9,8 @@ MACOS_DIR="${CONTENTS_DIR}/MacOS"
 RESOURCES_DIR="${CONTENTS_DIR}/Resources"
 LAUNCHER_PATH="${MACOS_DIR}/launch_gui"
 
+"${PROJECT_ROOT}/scripts/build_web_ui.sh"
+
 rm -rf "${APP_DIR}"
 mkdir -p "${MACOS_DIR}" "${RESOURCES_DIR}"
 
