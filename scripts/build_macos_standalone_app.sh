@@ -12,6 +12,8 @@ if ! python3 -c "import PyInstaller" >/dev/null 2>&1; then
   exit 1
 fi
 
+"${PROJECT_ROOT}/scripts/build_web_ui.sh"
+
 python3 -m PyInstaller \
   --noconfirm \
   --clean \
@@ -19,8 +21,10 @@ python3 -m PyInstaller \
   --name "${APP_NAME}" \
   --osx-bundle-identifier "${BUNDLE_ID}" \
   --collect-data "apify_fingerprint_datapoints" \
+  --collect-submodules "webview" \
   --add-data "data:data" \
-  gui.py
+  --add-data "webui/dist:webui/dist" \
+  desktop_webview.py
 
 APP_PATH="${PROJECT_ROOT}/dist/${APP_NAME}.app/Contents/MacOS/${APP_NAME}"
 if [[ -x "${APP_PATH}" ]]; then
