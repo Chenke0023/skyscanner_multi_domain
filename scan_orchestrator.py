@@ -203,6 +203,7 @@ async def run_page_scan(
     timeout: int = 30,
     transport: str = "scrapling",
     on_region_start: Callable[[RegionConfig], None] | None = None,
+    on_region_complete: Callable[[RegionConfig, FlightQuote], None] | None = None,
     scan_mode: str = "full_scan",
     rerun_scope: str = "all",
     selected_region_codes: list[str] | None = None,
@@ -291,12 +292,14 @@ async def run_page_scan(
         batch_regions: list[RegionConfig],
         *,
         enable_browser_fallback: bool,
+        on_region_complete: Callable[[RegionConfig, FlightQuote], None] | None = None,
     ) -> list[FlightQuote]:
         quotes = await compare_via_scrapling(
             args,
             batch_regions,
             persist_failures=False,
             on_region_start=on_region_start,
+            on_region_complete=on_region_complete,
             region_concurrency=max(int(region_concurrency), 1),
         )
         fallback_regions = [
@@ -399,12 +402,28 @@ async def run_page_scan(
 
             merged_quotes: list[FlightQuote] = []
             live_success_count = 0
+
+            async def on_region_complete_wrapper(region: RegionConfig, quote: FlightQuote) -> None:
+                nonlocal merged_quotes, live_success_count
+                if on_region_complete is not None:
+                    on_region_complete(region, quote)
+                merged_quotes = merge_quotes_by_region(merged_quotes, [quote])
+                if quote.price is not None:
+                    live_success_count += 1
+                await emit_progress(
+                    stage="region_update",
+                    quotes=list(merged_quotes),
+                    completed_regions=[q.region for q in merged_quotes],
+                    used_cached_preview=preview_record is not None,
+                )
+
             for batch_index, batch_regions in enumerate(batches):
                 if not batch_regions:
                     continue
                 batch_quotes = await run_scrapling_pass(
                     batch_regions,
                     enable_browser_fallback=False,
+                    on_region_complete=on_region_complete_wrapper,
                 )
                 merged_quotes = merge_quotes_by_region(merged_quotes, batch_quotes)
                 live_success_count += sum(

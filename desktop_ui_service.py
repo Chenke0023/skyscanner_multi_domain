@@ -1111,7 +1111,10 @@ class DesktopUIService:
                 "date": date,
                 "regionName": region_name,
             }
-            self._status_message = f"正在扫描 {date} [{region_name}] ({step}/{total})"
+            self._status_message = (
+                f"正在扫描 {date} [{region_name}] "
+                f"(attempts/expected: {step}/{total})"
+            )
 
     def _update_partial_scan(
         self,
@@ -1568,16 +1571,19 @@ class DesktopUIService:
                             partial_rows = get_rows_for_trip_label(merged_rows_by_date, trip_label)
                             partial_quotes = get_quotes_for_trip_label(merged_quotes_by_date, trip_label)
                             stage = str(progress_payload.get("stage") or "").strip().lower()
+                            completed_regions = progress_payload.get("completed_regions") or []
                             status_map = {
                                 "preview_cache": f"{trip_label} 预览缓存已展示。",
                                 "quick_live": f"{trip_label} 已返回高优先级市场结果，正在补全其余市场...",
                                 "background_live": f"{trip_label} 正在后台补全其余市场...",
+                                "region_update": f"{trip_label} 正在扫描 ({len(completed_regions)}/{total_steps})...",
                                 "final": f"{trip_label} 已完成，继续处理其余日期...",
                             }
                             log_map = {
                                 "preview_cache": f"{trip_label} 已展示预览缓存。",
                                 "quick_live": f"{trip_label} 已先刷新高优先级市场的实时结果。",
                                 "background_live": f"{trip_label} 已补充更多市场的实时结果。",
+                                "region_update": f"{trip_label} 正在扫描...",
                                 "final": f"{trip_label} 已完成实时刷新。",
                             }
                             await update_partial_view(

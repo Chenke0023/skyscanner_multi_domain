@@ -4599,7 +4599,8 @@ class App:
                     p = payload
                     self.progress_bar["value"] = p["step"]
                     self.status_var.set(
-                        f"正在扫描 {p['date']} [{p['region_name']}] ({p['step']}/{p['total']})"
+                        f"正在扫描 {p['date']} [{p['region_name']}] "
+                        f"(attempts/expected: {p['step']}/{p['total']})"
                     )
                 elif kind == "refresh_history":
                     self._refresh_history_lists()

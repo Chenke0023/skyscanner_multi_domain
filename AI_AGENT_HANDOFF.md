@@ -82,7 +82,7 @@ Project root: `skyscanner_multi_domain`
   - sort state resets on new scan
 - Added GUI per-region progress bar and status:
   - `ttk.Progressbar` shows overall scan progress
-  - status text updates per-region: `正在扫描 2026-04-29 [中国] (3/49)`
+  - status text updates per-region: `正在扫描 2026-04-29 [中国] (attempts/expected: 3/49)`
   - `run_page_scan` and `compare_via_scrapling` accept `on_region_start` callback
 - Added GUI cancel button:
   - "取消" button appears in status bar during scanning

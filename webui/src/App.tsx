@@ -3,6 +3,7 @@ import {
   useDeferredValue,
   useEffect,
   useMemo,
+  useRef,
   useState,
 } from "react";
 import { desktopApi } from "./desktopApi";
@@ -36,70 +37,181 @@ const emptySuggestions: SuggestionMap = {
   destination: [],
 };
 
+const weekdayLabels = ["一", "二", "三", "四", "五", "六", "日"];
+
 function formatMoney(value: unknown): string {
   return typeof value === "number" ? `¥${value.toLocaleString("zh-CN", { maximumFractionDigits: 2 })}` : "-";
 }
 
-function SummaryCard({
-  eyebrow,
-  headline,
-  price,
-  supporting,
-  meta,
-  insight,
-  buttonText,
-  action,
-  accent,
-}: {
-  eyebrow: string;
-  headline?: string;
-  price?: string;
-  supporting?: string;
-  meta?: string;
-  insight?: string;
-  buttonText?: string;
-  action?: () => void;
-  accent: "gold" | "stone";
-}) {
-  return (
-    <section className={`summary-card summary-card-${accent}`}>
-      <p className="eyebrow">{eyebrow}</p>
-      <h2>{headline ?? "等待结果"}</h2>
-      <div className="summary-price">{price ?? "-"}</div>
-      <p className="summary-supporting">{supporting ?? ""}</p>
-      <p className="summary-meta">{meta ?? ""}</p>
-      <p className="summary-insight">{insight ?? ""}</p>
-      <button className="primary-button subtle" onClick={action} type="button">
-        {buttonText ?? "等待结果"}
-      </button>
-    </section>
-  );
+function parseIsoDate(value: string): Date | null {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) {
+    return null;
+  }
+  const [year, month, day] = value.split("-").map(Number);
+  const date = new Date(year, month - 1, day);
+  if (
+    Number.isNaN(date.getTime()) ||
+    date.getFullYear() !== year ||
+    date.getMonth() !== month - 1 ||
+    date.getDate() !== day
+  ) {
+    return null;
+  }
+  date.setHours(12, 0, 0, 0);
+  return date;
 }
 
-function SectionCard({
-  title,
-  subtitle,
-  actions,
-  children,
-  className,
+function formatIsoDate(date: Date): string {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
+function shiftIsoDate(value: string, days: number): string {
+  const base = parseIsoDate(value) ?? new Date();
+  const shifted = new Date(base);
+  shifted.setDate(shifted.getDate() + days);
+  return formatIsoDate(shifted);
+}
+
+function buildCalendarDays(viewMonth: Date): Date[] {
+  const firstDay = new Date(viewMonth.getFullYear(), viewMonth.getMonth(), 1);
+  firstDay.setHours(12, 0, 0, 0);
+  const startOffset = (firstDay.getDay() + 6) % 7;
+  const startDate = new Date(firstDay);
+  startDate.setDate(firstDay.getDate() - startOffset);
+  return Array.from({ length: 42 }, (_, index) => {
+    const cell = new Date(startDate);
+    cell.setDate(startDate.getDate() + index);
+    return cell;
+  });
+}
+
+function DateField({
+  label,
+  value,
+  onChange,
+  min,
 }: {
-  title: string;
-  subtitle?: string;
-  actions?: React.ReactNode;
-  children: React.ReactNode;
-  className?: string;
+  label: string;
+  value: string;
+  onChange: (value: string) => void;
+  min?: string;
 }) {
+  const rootRef = useRef<HTMLDivElement>(null);
+  const parsedValue = parseIsoDate(value);
+  const minDate = min ? parseIsoDate(min) : null;
+  const [open, setOpen] = useState(false);
+  const [draft, setDraft] = useState(value);
+  const [viewMonth, setViewMonth] = useState<Date>(parsedValue ?? minDate ?? new Date());
+  const calendarDays = useMemo(() => buildCalendarDays(viewMonth), [viewMonth]);
+
+  useEffect(() => {
+    const nextParsedValue = parseIsoDate(value);
+    setDraft(value);
+    if (nextParsedValue) {
+      setViewMonth(nextParsedValue);
+    }
+  }, [value]);
+
+  useClickOutside(rootRef, () => setOpen(false));
+
+  const commitDraft = () => {
+    const nextValue = draft.trim();
+    const parsed = parseIsoDate(nextValue);
+    if (!parsed) {
+      setDraft(value);
+      return;
+    }
+    if (minDate && parsed < minDate) {
+      const clamped = formatIsoDate(minDate);
+      setDraft(clamped);
+      onChange(clamped);
+      return;
+    }
+    onChange(nextValue);
+  };
+
+  const applyQuickShift = (days: number) => {
+    const nextValue = shiftIsoDate(value || formatIsoDate(new Date()), days);
+    if (minDate && parseIsoDate(nextValue)! < minDate) {
+      onChange(formatIsoDate(minDate));
+      return;
+    }
+    onChange(nextValue);
+  };
+
   return (
-    <section className={`section-card ${className ?? ""}`.trim()}>
-      <div className="section-card-header">
-        <div>
-          <h3>{title}</h3>
-          {subtitle ? <p>{subtitle}</p> : null}
-        </div>
-        {actions ? <div className="section-actions">{actions}</div> : null}
+    <div className="date-field" ref={rootRef}>
+      <label className="block text-xs font-medium tracking-wider uppercase text-stone-400 mb-1.5">{label}</label>
+      <div className="date-input-shell">
+        <input
+          className="date-text-input"
+          inputMode="numeric"
+          placeholder="YYYY-MM-DD"
+          value={draft}
+          onChange={(e) => setDraft(e.target.value)}
+          onBlur={commitDraft}
+          onFocus={() => setOpen(true)}
+        />
+        <button className="date-picker-toggle" type="button" onClick={() => setOpen((current) => !current)}>
+          选日期
+        </button>
       </div>
-      {children}
-    </section>
+      <div className="date-quick-actions">
+        <button type="button" onClick={() => applyQuickShift(-1)}>前一天</button>
+        <button type="button" onClick={() => applyQuickShift(1)}>后一天</button>
+        <button type="button" onClick={() => onChange(formatIsoDate(new Date()))}>今天</button>
+      </div>
+      {open ? (
+        <div className="date-popover">
+          <div className="date-popover-head">
+            <strong>{viewMonth.getFullYear()}年{viewMonth.getMonth() + 1}月</strong>
+            <div className="date-popover-nav">
+              <button
+                type="button"
+                onClick={() => setViewMonth(new Date(viewMonth.getFullYear(), viewMonth.getMonth() - 1, 1))}
+              >
+                上月
+              </button>
+              <button
+                type="button"
+                onClick={() => setViewMonth(new Date(viewMonth.getFullYear(), viewMonth.getMonth() + 1, 1))}
+              >
+                下月
+              </button>
+            </div>
+          </div>
+          <div className="date-weekdays">
+            {weekdayLabels.map((weekday) => (
+              <span key={weekday}>{weekday}</span>
+            ))}
+          </div>
+          <div className="date-grid">
+            {calendarDays.map((day) => {
+              const isoDate = formatIsoDate(day);
+              const inMonth = day.getMonth() === viewMonth.getMonth();
+              const disabled = Boolean(minDate && day < minDate);
+              return (
+                <button
+                  key={isoDate}
+                  type="button"
+                  className={`date-grid-cell ${inMonth ? "" : "muted"} ${isoDate === value ? "active" : ""}`}
+                  disabled={disabled}
+                  onClick={() => {
+                    onChange(isoDate);
+                    setOpen(false);
+                  }}
+                >
+                  {day.getDate()}
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      ) : null}
+    </div>
   );
 }
 
@@ -143,6 +255,79 @@ function BootScreen({
         <p className="loading-kicker">{error ? "Startup Error" : "Desktop Loading"}</p>
         <h1>{title}</h1>
         <p>{detail}</p>
+      </div>
+    </div>
+  );
+}
+
+function Switch({
+  checked,
+  onChange,
+  label,
+}: {
+  checked: boolean;
+  onChange: (v: boolean) => void;
+  label: string;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={() => onChange(!checked)}
+      className="group flex items-center gap-3 cursor-pointer select-none"
+    >
+      <span
+        className={
+          "relative inline-flex h-6 w-11 shrink-0 items-center rounded-full border transition-colors duration-200 " +
+          (checked
+            ? "bg-stone-900 border-stone-900"
+            : "bg-stone-200 border-stone-300")
+        }
+      >
+        <span
+          className={
+            "inline-block h-4 w-4 rounded-full bg-white shadow transition-transform duration-200 " +
+            (checked ? "translate-x-5" : "translate-x-1")
+          }
+        />
+      </span>
+      <span className="text-sm text-stone-600">{label}</span>
+    </button>
+  );
+}
+
+function Collapsible({
+  open,
+  onToggle,
+  trigger,
+  children,
+}: {
+  open: boolean;
+  onToggle: () => void;
+  trigger: React.ReactNode;
+  children: React.ReactNode;
+}) {
+  return (
+    <div>
+      <button
+        type="button"
+        onClick={onToggle}
+        className="flex items-center gap-1 text-sm text-stone-500 hover:text-stone-800 transition-colors cursor-pointer"
+      >
+        {trigger}
+        <svg
+          className={`w-4 h-4 transition-transform duration-200 ${open ? "rotate-180" : ""}`}
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="2"
+          viewBox="0 0 24 24"
+        >
+          <path strokeLinecap="round" strokeLinejoin="round" d="M19 9l-7 7-7-7" />
+        </svg>
+      </button>
+      <div
+        className={`grid transition-all duration-300 ease-out ${open ? "grid-rows-[1fr] opacity-100 mt-6 pt-6 border-t border-stone-100" : "grid-rows-[0fr] opacity-0 mt-0 pt-0 border-t border-transparent"}`}
+      >
+        <div className="overflow-hidden">{children}</div>
       </div>
     </div>
   );
@@ -201,12 +386,12 @@ function DataTable({
                 <td>
                   <div className="row-actions">
                     {typeof row.link === "string" && row.link.startsWith("http") ? (
-                      <button className="ghost-button" onClick={() => onOpenLink(String(row.link))} type="button">
+                      <button className="toolbar-button" onClick={() => onOpenLink(String(row.link))} type="button">
                         打开
                       </button>
                     ) : null}
                     {highlightFailure && onQueueRetry ? (
-                      <button className="ghost-button" onClick={() => onQueueRetry(row)} type="button">
+                      <button className="toolbar-button" onClick={() => onQueueRetry(row)} type="button">
                         加入补扫
                       </button>
                     ) : null}
@@ -254,12 +439,28 @@ function HistoryList({
   );
 }
 
+function useClickOutside(ref: React.RefObject<HTMLElement | null>, handler: () => void) {
+  useEffect(() => {
+    const listener = (event: MouseEvent) => {
+      if (!ref.current || ref.current.contains(event.target as Node)) {
+        return;
+      }
+      handler();
+    };
+    document.addEventListener("mousedown", listener);
+    return () => document.removeEventListener("mousedown", listener);
+  }, [ref, handler]);
+}
+
 function App() {
   const [uiState, setUiState] = useState<UIState | null>(null);
   const [form, setForm] = useState<FormState | null>(null);
   const [bootstrapError, setBootstrapError] = useState("");
   const [alertDraft, setAlertDraft] = useState<AlertDraft>(defaultAlertDraft);
-  const [insightTab, setInsightTab] = useState<"calendar" | "compare" | "history" | "table">("calendar");
+  const [leftDrawerOpen, setLeftDrawerOpen] = useState(false);
+  const [rightDrawerOpen, setRightDrawerOpen] = useState(false);
+  const [showDetails, setShowDetails] = useState(false);
+  const [detailTab, setDetailTab] = useState<"table" | "calendar" | "compare" | "history">("table");
   const [showSuccess, setShowSuccess] = useState(true);
   const [showFailure, setShowFailure] = useState(true);
   const [showChangedOnly, setShowChangedOnly] = useState(false);
@@ -270,18 +471,32 @@ function App() {
   const [activeField, setActiveField] = useState<"origin" | "destination" | null>(null);
   const [suggestions, setSuggestions] = useState<SuggestionMap>(emptySuggestions);
   const [isPending, setIsPending] = useState(false);
+  const [advancedOpen, setAdvancedOpen] = useState(false);
 
   const originDeferred = useDeferredValue(form?.origin ?? "");
   const destinationDeferred = useDeferredValue(form?.destination ?? "");
+  const originRef = useRef<HTMLDivElement>(null);
+  const destRef = useRef<HTMLDivElement>(null);
+
+  useClickOutside(originRef, () => {
+    if (activeField === "origin") {
+      setActiveField(null);
+      setSuggestions((c) => ({ ...c, origin: [] }));
+    }
+  });
+  useClickOutside(destRef, () => {
+    if (activeField === "destination") {
+      setActiveField(null);
+      setSuggestions((c) => ({ ...c, destination: [] }));
+    }
+  });
 
   useEffect(() => {
     let cancelled = false;
     desktopApi
       .get_initial_state()
       .then((state) => {
-        if (cancelled) {
-          return;
-        }
+        if (cancelled) return;
         setUiState(state);
         setForm(state.form);
         setAlertDraft({
@@ -296,21 +511,16 @@ function App() {
         });
       })
       .catch((error: unknown) => {
-        if (cancelled) {
-          return;
-        }
+        if (cancelled) return;
         setBootstrapError(error instanceof Error ? error.message : "桌面桥接初始化失败。");
       });
-
     return () => {
       cancelled = true;
     };
   }, []);
 
   useEffect(() => {
-    if (!uiState) {
-      return;
-    }
+    if (!uiState) return;
     const timer = window.setInterval(() => {
       desktopApi.get_ui_state().then((nextState) => {
         startTransition(() => {
@@ -318,21 +528,15 @@ function App() {
         });
       });
     }, 1000);
-    return () => {
-      window.clearInterval(timer);
-    };
+    return () => window.clearInterval(timer);
   }, [uiState]);
 
   useEffect(() => {
-    if (!form) {
-      return;
-    }
+    if (!form) return;
     const timer = window.setTimeout(() => {
       desktopApi.update_query_state(form).catch(() => undefined);
     }, 400);
-    return () => {
-      window.clearTimeout(timer);
-    };
+    return () => window.clearTimeout(timer);
   }, [form]);
 
   useEffect(() => {
@@ -397,32 +601,17 @@ function App() {
       successRows = successRows.filter((row) => String(row.link ?? "").startsWith("http"));
       failureRows = [];
     }
-    if (!showSuccess) {
-      successRows = [];
-    }
-    if (!showFailure) {
-      failureRows = [];
-    }
+    if (!showSuccess) successRows = [];
+    if (!showFailure) failureRows = [];
     return { successRows, failureRows };
   }, [selectedTripLabel, showChangedOnly, showFailure, showLowestOnly, showSuccess, sourceFilter, uiState]);
 
   if (bootstrapError) {
-    return (
-      <BootScreen
-        title="桌面桥接初始化失败"
-        detail={bootstrapError}
-        error
-      />
-    );
+    return <BootScreen title="桌面桥接初始化失败" detail={bootstrapError} error />;
   }
 
   if (!uiState || !form) {
-    return (
-      <BootScreen
-        title="正在连接桌面服务"
-        detail="界面骨架、历史状态和本地 Python bridge 正在同步。首次启动会稍慢一些。"
-      />
-    );
+    return <BootScreen title="正在连接桌面服务" detail="首次启动会稍慢一些。" />;
   }
 
   const applyFormPatch = (patch: Partial<FormState>) => {
@@ -454,14 +643,12 @@ function App() {
     const nextState = await desktopApi.apply_history_record(record.id ?? record.queryKey);
     setUiState(nextState);
     setForm(nextState.form);
+    setLeftDrawerOpen(false);
   };
 
   const handleSaveAlerts = async () => {
     try {
-      await desktopApi.save_alert_config({
-        form,
-        ...alertDraft,
-      });
+      await desktopApi.save_alert_config({ form, ...alertDraft });
       const nextState = await desktopApi.get_ui_state();
       setUiState(nextState);
       setActionMessage("提醒设置已保存。");
@@ -484,248 +671,222 @@ function App() {
 
   const cheapestCard = uiState.results.cheapestConclusion;
   const recommendationCard = uiState.results.recommendationConclusion;
-  const successCount = uiState.results.successRows.length;
-  const failureCount = uiState.results.failureRows.length;
-  const marketCount = uiState.hints.effectiveRegions.length;
+  const hasAnyResults =
+    uiState.results.successRows.length > 0 ||
+    uiState.results.failureRows.length > 0 ||
+    uiState.results.topRecommendations.length > 0;
+
+  const filterSummaryParts: string[] = [];
+  if (sourceFilter !== "all") filterSummaryParts.push(sourceFilter === "live" ? "仅实时" : "仅可下单");
+  if (showLowestOnly) filterSummaryParts.push("仅最低价");
+  if (showChangedOnly) filterSummaryParts.push("仅变化");
+  if (selectedTripLabel) filterSummaryParts.push(selectedTripLabel);
 
   return (
-    <div className="app-shell">
-      <header className="app-header">
-        <div className="hero-block">
-          <p className="hero-kicker">Skyscanner Multi-Market Desk</p>
-          <h1>多市场比价与复扫台</h1>
-          <p className="hero-copy">
-            保留现有 Python 抓取内核，把查询、最低价决策、历史复盘和自动复扫整合进一个更克制的桌面工作台。
-          </p>
-          <div className="hero-metrics">
-            <div className="hero-metric">
-              <span>本次市场</span>
-              <strong>{marketCount}</strong>
-            </div>
-            <div className="hero-metric">
-              <span>成功结果</span>
-              <strong>{successCount}</strong>
-            </div>
-            <div className="hero-metric">
-              <span>失败市场</span>
-              <strong>{failureCount}</strong>
-            </div>
-          </div>
-        </div>
-        <div className="header-actions">
-          <button className="ghost-button" onClick={handleEnvironmentCheck} type="button">
-            检查环境
-          </button>
-          <button
-            className="ghost-button"
-            onClick={() => desktopApi.toggle_favorite_current_query({ form }).then(() => desktopApi.get_ui_state().then(setUiState))}
-            type="button"
-          >
-            收藏当前查询
-          </button>
-          <button className="primary-button" disabled={uiState.status.busy || isPending} onClick={() => handleStartScan()} type="button">
-            {uiState.status.busy ? "扫描中…" : "开始比价"}
-          </button>
-        </div>
+    <div className="min-h-dvh flex flex-col">
+      {/* Topbar ---------------------------------------------------------- */}
+      <header className="shrink-0 flex items-center justify-between gap-3 px-4 py-3 border-b border-stone-200/60">
+        <button
+          className="px-3 py-2 rounded-xl border border-stone-200 bg-white/70 text-stone-500 text-sm hover:text-stone-800 hover:border-stone-300 transition cursor-pointer"
+          onClick={() => setLeftDrawerOpen(true)}
+          type="button"
+        >
+          历史
+        </button>
+        <span className="text-base font-semibold tracking-tight text-stone-900">Skyscanner</span>
+        <button
+          className="px-3 py-2 rounded-xl border border-stone-200 bg-white/70 text-stone-500 text-sm hover:text-stone-800 hover:border-stone-300 transition cursor-pointer"
+          onClick={() => setRightDrawerOpen(true)}
+          type="button"
+        >
+          设置
+        </button>
       </header>
 
-      <div className="status-strip">
-        <div>
-          <strong>{uiState.status.message}</strong>
-          {uiState.status.progress.total > 0 ? (
-            <span>
-              {uiState.status.progress.step}/{uiState.status.progress.total}
-            </span>
-          ) : null}
-        </div>
-        <div>{actionMessage}</div>
-        {uiState.status.busy ? (
-          <button className="ghost-button" onClick={() => desktopApi.cancel_scan()} type="button">
-            取消
-          </button>
-        ) : null}
-      </div>
-
-      <main className="workspace-grid">
-        <aside className="left-column">
-          <SectionCard className="query-card" title="查询参数" subtitle="常用参数在上，高级开关在下。">
-            <div className="form-grid">
-              <label>
-                <span>出发地</span>
-                <input
-                  value={form.origin}
-                  onChange={(event) => applyFormPatch({ origin: event.target.value })}
-                  onFocus={() => setActiveField("origin")}
-                />
-                <small>{uiState.hints.origin}</small>
-                {activeField === "origin" && suggestions.origin.length ? (
-                  <div className="suggestion-list">
-                    {suggestions.origin.map((item) => (
-                      <button
-                        key={`${item.code}-${item.name}`}
-                        type="button"
-                        onClick={() => {
-                          applyFormPatch({ origin: item.name });
-                          setSuggestions((current) => ({ ...current, origin: [] }));
-                        }}
-                      >
-                        {item.label}
-                      </button>
-                    ))}
-                  </div>
-                ) : null}
-              </label>
-
-              <label>
-                <span>目的地</span>
-                <input
-                  value={form.destination}
-                  onChange={(event) => applyFormPatch({ destination: event.target.value })}
-                  onFocus={() => setActiveField("destination")}
-                />
-                <small>{uiState.hints.destination}</small>
-                {activeField === "destination" && suggestions.destination.length ? (
-                  <div className="suggestion-list">
-                    {suggestions.destination.map((item) => (
-                      <button
-                        key={`${item.code}-${item.name}`}
-                        type="button"
-                        onClick={() => {
-                          applyFormPatch({ destination: item.name });
-                          setSuggestions((current) => ({ ...current, destination: [] }));
-                        }}
-                      >
-                        {item.label}
-                      </button>
-                    ))}
-                  </div>
-                ) : null}
-              </label>
-
-              <label>
-                <span>行程类型</span>
-                <select value={form.trip_type} onChange={(event) => applyFormPatch({ trip_type: event.target.value })}>
-                  <option value="one_way">单程</option>
-                  <option value="round_trip">往返</option>
-                </select>
-              </label>
-
-              <label>
-                <span>出发日期</span>
-                <input type="date" value={form.date} onChange={(event) => applyFormPatch({ date: event.target.value })} />
-              </label>
-
-              {form.trip_type === "round_trip" ? (
-                <label>
-                  <span>返程日期</span>
-                  <input
-                    type="date"
-                    value={form.return_date}
-                    onChange={(event) => applyFormPatch({ return_date: event.target.value })}
-                  />
-                </label>
-              ) : null}
-
-              <label>
-                <span>等待秒数</span>
-                <input value={form.wait} onChange={(event) => applyFormPatch({ wait: event.target.value })} />
-              </label>
-
-              <label className="wide">
-                <span>额外地区代码</span>
-                <input value={form.regions} onChange={(event) => applyFormPatch({ regions: event.target.value })} />
-                <small>{uiState.hints.regions}</small>
-              </label>
-
-              <label>
-                <span>±天数</span>
-                <input value={form.date_window} onChange={(event) => applyFormPatch({ date_window: event.target.value })} />
-              </label>
+      {/* Main ------------------------------------------------------------ */}
+      <main className={`flex-1 flex flex-col gap-5 px-4 py-6 ${hasAnyResults ? "" : "items-center justify-center"}`}>
+        {/* Query Card ------------------------------------------------------ */}
+        <div className="w-full max-w-2xl mx-auto p-8 md:p-10 bg-[#FFFCF7]/90 backdrop-blur-md rounded-3xl shadow-[0_20px_60px_-15px_rgba(63,44,18,0.05)] border border-stone-100">
+          {/* Core four-square grid */}
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-6 gap-y-6">
+            <div className="relative" ref={originRef}>
+              <label className="block text-xs font-medium tracking-wider uppercase text-stone-400 mb-1.5">出发地</label>
+              <input
+                className="w-full rounded-xl border border-stone-200 bg-white px-3.5 py-2.5 text-stone-800 placeholder:text-stone-300 outline-none transition focus-visible:ring-2 focus-visible:ring-stone-400/20 focus-visible:border-stone-300"
+                value={form.origin}
+                onChange={(e) => applyFormPatch({ origin: e.target.value })}
+                onFocus={() => setActiveField("origin")}
+                placeholder="例如：北京"
+              />
+              {activeField === "origin" && suggestions.origin.length > 0 && (
+                <div className="suggestion-list">
+                  {suggestions.origin.map((item) => (
+                    <button
+                      key={`${item.code}-${item.name}`}
+                      type="button"
+                      onClick={() => {
+                        applyFormPatch({ origin: item.name });
+                        setSuggestions((c) => ({ ...c, origin: [] }));
+                      }}
+                    >
+                      {item.label}
+                    </button>
+                  ))}
+                </div>
+              )}
             </div>
 
-            <div className="toggle-grid">
-              <label><input checked={form.combined_summary} onChange={(event) => applyFormPatch({ combined_summary: event.target.checked })} type="checkbox" /> 保存多日期汇总</label>
-              <label><input checked={form.exact_airport} onChange={(event) => applyFormPatch({ exact_airport: event.target.checked })} type="checkbox" /> 严格机场代码</label>
-              <label><input checked={form.origin_country} onChange={(event) => applyFormPatch({ origin_country: event.target.checked })} type="checkbox" /> 出发地按国家</label>
-              <label><input checked={form.destination_country} onChange={(event) => applyFormPatch({ destination_country: event.target.checked })} type="checkbox" /> 目的地按国家</label>
+            <div className="relative" ref={destRef}>
+              <label className="block text-xs font-medium tracking-wider uppercase text-stone-400 mb-1.5">目的地</label>
+              <input
+                className="w-full rounded-xl border border-stone-200 bg-white px-3.5 py-2.5 text-stone-800 placeholder:text-stone-300 outline-none transition focus-visible:ring-2 focus-visible:ring-stone-400/20 focus-visible:border-stone-300"
+                value={form.destination}
+                onChange={(e) => applyFormPatch({ destination: e.target.value })}
+                onFocus={() => setActiveField("destination")}
+                placeholder="例如：东京"
+              />
+              {activeField === "destination" && suggestions.destination.length > 0 && (
+                <div className="suggestion-list">
+                  {suggestions.destination.map((item) => (
+                    <button
+                      key={`${item.code}-${item.name}`}
+                      type="button"
+                      onClick={() => {
+                        applyFormPatch({ destination: item.name });
+                        setSuggestions((c) => ({ ...c, destination: [] }));
+                      }}
+                    >
+                      {item.label}
+                    </button>
+                  ))}
+                </div>
+              )}
             </div>
-          </SectionCard>
 
-          <SectionCard
-            className="sidebar-card"
-            title="历史与收藏"
-            subtitle="直接应用旧查询，或先载入再重跑。"
-            actions={
-              <button className="ghost-button" onClick={() => desktopApi.list_history().then(() => desktopApi.get_ui_state().then(setUiState))} type="button">
-                刷新
-              </button>
-            }
-          >
-            <HistoryList title="收藏路线" records={uiState.history.favorites} onApply={handleApplyHistory} />
-            <HistoryList title="最近查询" records={uiState.history.recent} onApply={handleApplyHistory} />
-          </SectionCard>
-        </aside>
+            <div>
+              <label className="block text-xs font-medium tracking-wider uppercase text-stone-400 mb-1.5">行程</label>
+              <select
+                className="w-full rounded-xl border border-stone-200 bg-white px-3.5 py-2.5 text-stone-800 outline-none transition focus-visible:ring-2 focus-visible:ring-stone-400/20 focus-visible:border-stone-300 cursor-pointer"
+                value={form.trip_type}
+                onChange={(e) => applyFormPatch({ trip_type: e.target.value })}
+              >
+                <option value="one_way">单程</option>
+                <option value="round_trip">往返</option>
+              </select>
+            </div>
 
-        <section className="center-column">
-          <div className="summary-grid">
-            <SummaryCard
-              accent="gold"
-              eyebrow="最低价结论"
-              headline={String(cheapestCard.headline ?? "")}
-              price={String(cheapestCard.price ?? "")}
-              supporting={String(cheapestCard.supporting ?? "")}
-              meta={String(cheapestCard.meta ?? "")}
-              insight={String(cheapestCard.insight ?? "")}
-              buttonText={String(cheapestCard.button_text ?? "等待结果")}
-              action={() => cheapestCard.link && desktopApi.open_link(String(cheapestCard.link))}
-            />
-            <SummaryCard
-              accent="stone"
-              eyebrow="推荐下单方案"
-              headline={String(recommendationCard.headline ?? "")}
-              price={String(recommendationCard.price ?? "")}
-              supporting={String(recommendationCard.supporting ?? "")}
-              meta={String(recommendationCard.meta ?? "")}
-              insight={String(recommendationCard.insight ?? "")}
-              buttonText={String(recommendationCard.button_text ?? "等待结果")}
-              action={() => recommendationCard.link && desktopApi.open_link(String(recommendationCard.link))}
-            />
+            <DateField label="出发日期" value={form.date} onChange={(value) => applyFormPatch({ date: value })} />
+
+            {form.trip_type === "round_trip" ? (
+              <div className="sm:col-span-2">
+                <DateField
+                  label="返程日期"
+                  value={form.return_date}
+                  min={form.date}
+                  onChange={(value) => applyFormPatch({ return_date: value })}
+                />
+              </div>
+            ) : null}
           </div>
 
-          <SectionCard
-            className="workspace-card"
-            title="结果工作区"
-            subtitle="先看结论与 top 方案，再决定是否进入价格日历或失败补扫。"
-            actions={
-              <>
-                <button className="ghost-button" onClick={() => desktopApi.open_outputs()} type="button">
-                  打开结果目录
-                </button>
-                <button className="ghost-button" onClick={() => desktopApi.export_decision_summary()} type="button">
-                  导出决策摘要
-                </button>
-              </>
-            }
-          >
-            <div className="toolbar">
-              <ToolbarButton active={!selectedTripLabel && sourceFilter === "all"} label="全部结果" onClick={() => { setSelectedTripLabel(""); setSourceFilter("all"); }} />
-              <ToolbarButton active={sourceFilter === "live"} label="仅实时结果" onClick={() => setSourceFilter("live")} />
-              <ToolbarButton active={sourceFilter === "bookable"} label="仅可下单" onClick={() => setSourceFilter("bookable")} />
-              <ToolbarButton active={showLowestOnly} label="仅最低价候选" onClick={() => setShowLowestOnly((current) => !current)} />
-              <ToolbarButton active={showChangedOnly} label="仅价格变化" onClick={() => setShowChangedOnly((current) => !current)} />
-            </div>
+          {/* Advanced collapsible */}
+          <div className="mt-6">
+            <Collapsible
+              open={advancedOpen}
+              onToggle={() => setAdvancedOpen((c) => !c)}
+              trigger={<span>高级搜索设置</span>}
+            >
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-6 gap-y-6">
+                <div>
+                  <label className="block text-xs font-medium tracking-wider uppercase text-stone-400 mb-1.5">等待秒数</label>
+                  <input
+                    className="w-full rounded-xl border border-stone-200 bg-white px-3.5 py-2.5 text-stone-800 outline-none transition focus-visible:ring-2 focus-visible:ring-stone-400/20 focus-visible:border-stone-300"
+                    value={form.wait}
+                    onChange={(e) => applyFormPatch({ wait: e.target.value })}
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-medium tracking-wider uppercase text-stone-400 mb-1.5">±天数</label>
+                  <input
+                    className="w-full rounded-xl border border-stone-200 bg-white px-3.5 py-2.5 text-stone-800 outline-none transition focus-visible:ring-2 focus-visible:ring-stone-400/20 focus-visible:border-stone-300"
+                    value={form.date_window}
+                    onChange={(e) => applyFormPatch({ date_window: e.target.value })}
+                  />
+                </div>
+                <div className="sm:col-span-2">
+                  <label className="block text-xs font-medium tracking-wider uppercase text-stone-400 mb-1.5">额外地区</label>
+                  <input
+                    className="w-full rounded-xl border border-stone-200 bg-white px-3.5 py-2.5 text-stone-800 outline-none transition focus-visible:ring-2 focus-visible:ring-stone-400/20 focus-visible:border-stone-300"
+                    value={form.regions}
+                    onChange={(e) => applyFormPatch({ regions: e.target.value })}
+                  />
+                  <p className="text-xs text-stone-400 mt-1.5">{uiState.hints.regions}</p>
+                </div>
+              </div>
+            </Collapsible>
+          </div>
 
-            <div className="toggle-row">
-              <label><input checked={showSuccess} onChange={(event) => setShowSuccess(event.target.checked)} type="checkbox" /> 成功结果</label>
-              <label><input checked={showFailure} onChange={(event) => setShowFailure(event.target.checked)} type="checkbox" /> 失败市场</label>
+          {/* Switches + CTA */}
+          <div className="mt-10 pt-6 border-t border-stone-100/60 flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-5">
+            <div className="flex flex-wrap gap-x-6 gap-y-3">
+              <Switch checked={form.combined_summary} onChange={(v) => applyFormPatch({ combined_summary: v })} label="保存汇总" />
+              <Switch checked={form.exact_airport} onChange={(v) => applyFormPatch({ exact_airport: v })} label="严格机场" />
+              <Switch checked={form.origin_country} onChange={(v) => applyFormPatch({ origin_country: v })} label="出发按国家" />
+              <Switch checked={form.destination_country} onChange={(v) => applyFormPatch({ destination_country: v })} label="目的按国家" />
             </div>
+            <button
+              className="shrink-0 px-8 py-3 rounded-full bg-stone-900 text-white text-sm font-medium shadow-md hover:-translate-y-0.5 hover:bg-stone-800 active:translate-y-0 transition disabled:opacity-50 disabled:cursor-not-allowed disabled:transform-none cursor-pointer"
+              disabled={uiState.status.busy || isPending}
+              onClick={() => handleStartScan()}
+              type="button"
+            >
+              {uiState.status.busy ? "扫描中…" : "开始比价"}
+            </button>
+          </div>
+        </div>
 
-            <div className="top-rec-grid">
-              <div className="top-rec-list">
+        {/* Results --------------------------------------------------------- */}
+        {hasAnyResults && (
+          <div className="result-stream w-full max-w-2xl mx-auto">
+            <section className="summary-card">
+              <p className="eyebrow">最低价结论</p>
+              <h2>{String(cheapestCard.headline ?? "-")}</h2>
+              <div className="summary-price">{String(cheapestCard.price ?? "-")}</div>
+              <p className="summary-supporting">{String(cheapestCard.supporting ?? "")}</p>
+              <p className="summary-meta">{String(cheapestCard.meta ?? "")}</p>
+              <p className="summary-insight">{String(cheapestCard.insight ?? "")}</p>
+              {cheapestCard.link ? (
+                <button className="primary-button subtle" onClick={() => desktopApi.open_link(String(cheapestCard.link))} type="button">
+                  {String(cheapestCard.button_text ?? "打开链接")}
+                </button>
+              ) : null}
+            </section>
+
+            <section className="summary-card alt">
+              <p className="eyebrow">推荐下单方案</p>
+              <h2>{String(recommendationCard.headline ?? "-")}</h2>
+              <div className="summary-price">{String(recommendationCard.price ?? "-")}</div>
+              <p className="summary-supporting">{String(recommendationCard.supporting ?? "")}</p>
+              <p className="summary-meta">{String(recommendationCard.meta ?? "")}</p>
+              <p className="summary-insight">{String(recommendationCard.insight ?? "")}</p>
+              {recommendationCard.link ? (
+                <button className="primary-button subtle" onClick={() => desktopApi.open_link(String(recommendationCard.link))} type="button">
+                  {String(recommendationCard.button_text ?? "打开链接")}
+                </button>
+              ) : null}
+            </section>
+
+            {uiState.results.topRecommendations.length > 0 && (
+              <div className="top-rec-panel">
                 <div className="panel-label">Top 方案</div>
-                {uiState.results.topRecommendations.length ? (
-                  uiState.results.topRecommendations.map((row, index) => (
-                    <button key={`${String(row.date)}-${String(row.region_code)}-${index}`} className="top-rec-item" onClick={() => row.link && desktopApi.open_link(String(row.link))} type="button">
+                <div className="top-rec-list">
+                  {uiState.results.topRecommendations.map((row, index) => (
+                    <button
+                      key={`${String(row.date)}-${String(row.region_code)}-${index}`}
+                      className="top-rec-item"
+                      onClick={() => row.link && desktopApi.open_link(String(row.link))}
+                      type="button"
+                    >
                       <span>{index + 1}</span>
                       <div>
                         <strong>{String(row.region_name ?? "-")}</strong>
@@ -733,23 +894,95 @@ function App() {
                       </div>
                       <em>{formatMoney(row.cheapest_cny_price)}</em>
                     </button>
-                  ))
-                ) : (
-                  <EmptyState text="扫描后会在这里显示最值得优先打开的市场。" />
-                )}
+                  ))}
+                </div>
               </div>
+            )}
 
-              <div className="insight-panel">
+            {!showDetails ? (
+              <button className="ghost-button wide-button" onClick={() => setShowDetails(true)} type="button">
+                查看详细结果
+              </button>
+            ) : (
+              <div className="details-panel">
                 <div className="toolbar">
-                  <ToolbarButton active={insightTab === "calendar"} label="价格日历" onClick={() => setInsightTab("calendar")} />
-                  <ToolbarButton active={insightTab === "compare"} label="历史对比" onClick={() => setInsightTab("compare")} />
-                  <ToolbarButton active={insightTab === "history"} label="路线复盘" onClick={() => setInsightTab("history")} />
-                  <ToolbarButton active={insightTab === "table"} label="表格聚焦" onClick={() => setInsightTab("table")} />
+                  <ToolbarButton active={detailTab === "table"} label="表格" onClick={() => setDetailTab("table")} />
+                  <ToolbarButton active={detailTab === "calendar"} label="日历" onClick={() => setDetailTab("calendar")} />
+                  <ToolbarButton active={detailTab === "compare"} label="对比" onClick={() => setDetailTab("compare")} />
+                  <ToolbarButton active={detailTab === "history"} label="历史" onClick={() => setDetailTab("history")} />
                 </div>
 
-                {insightTab === "calendar" ? (
+                {detailTab === "table" && (
+                  <>
+                    <div className="filter-bar">
+                      <div className="filter-chips">
+                        <ToolbarButton active={!selectedTripLabel && sourceFilter === "all"} label="全部" onClick={() => { setSelectedTripLabel(""); setSourceFilter("all"); }} />
+                        <ToolbarButton active={sourceFilter === "live"} label="仅实时" onClick={() => setSourceFilter("live")} />
+                        <ToolbarButton active={sourceFilter === "bookable"} label="仅可下单" onClick={() => setSourceFilter("bookable")} />
+                        <ToolbarButton active={showLowestOnly} label="仅最低价" onClick={() => setShowLowestOnly((c) => !c)} />
+                        <ToolbarButton active={showChangedOnly} label="仅变化" onClick={() => setShowChangedOnly((c) => !c)} />
+                      </div>
+                      {filterSummaryParts.length > 0 && (
+                        <div className="filter-summary">
+                          <span>{filterSummaryParts.join(" · ")}</span>
+                          <button className="text-button" onClick={() => { setSelectedTripLabel(""); setSourceFilter("all"); setShowLowestOnly(false); setShowChangedOnly(false); }} type="button">清除</button>
+                        </div>
+                      )}
+                      <div className="toggle-row">
+                        <label><input checked={showSuccess} onChange={(e) => setShowSuccess(e.target.checked)} type="checkbox" /> 成功</label>
+                        <label><input checked={showFailure} onChange={(e) => setShowFailure(e.target.checked)} type="checkbox" /> 失败</label>
+                      </div>
+                    </div>
+
+                    <div className="table-section">
+                      <h4>成功结果 <small>{filteredResults.successRows.length}</small></h4>
+                      <DataTable
+                        columns={[
+                          { key: "date", label: "日期" },
+                          { key: "route", label: "航段" },
+                          { key: "region_name", label: "地区" },
+                          { key: "source_label", label: "来源" },
+                          { key: "best_cny_price", label: "最佳价", align: "right" },
+                          { key: "cheapest_cny_price", label: "最低价", align: "right" },
+                          { key: "delta_label", label: "变化" },
+                        ]}
+                        rows={filteredResults.successRows}
+                        onOpenLink={(url) => desktopApi.open_link(url)}
+                      />
+                    </div>
+
+                    <div className="table-section">
+                      <h4>
+                        失败市场 <small>{filteredResults.failureRows.length}</small>
+                        <button
+                          className="text-button"
+                          onClick={() => desktopApi.run_retry_queue().then(() => handleStartScan({ rerunScopeOverride: "selected_regions", allowBrowserFallback: false }))}
+                          type="button"
+                        >
+                          运行补扫队列
+                        </button>
+                      </h4>
+                      <DataTable
+                        columns={[
+                          { key: "date", label: "日期" },
+                          { key: "route", label: "航段" },
+                          { key: "region_name", label: "地区" },
+                          { key: "failure_category", label: "失败分类" },
+                          { key: "failure_action", label: "建议动作" },
+                          { key: "status", label: "状态" },
+                        ]}
+                        rows={filteredResults.failureRows}
+                        onOpenLink={(url) => desktopApi.open_link(url)}
+                        highlightFailure
+                        onQueueRetry={handleQueueFailure}
+                      />
+                    </div>
+                  </>
+                )}
+
+                {detailTab === "calendar" && (
                   <div className="calendar-panel">
-                    <p className="panel-note">{uiState.results.calendar.summaryText ?? "等待扫描后生成价格日历。"}</p>
+                    <p className="panel-note">{uiState.results.calendar.summaryText ?? "选择日期组合进行筛选。"}</p>
                     {uiState.results.calendar.kind === "empty" ? (
                       <EmptyState text="当前没有日历数据。" />
                     ) : (
@@ -758,7 +991,7 @@ function App() {
                           <button
                             key={cell.tripLabel}
                             className={`calendar-cell ${selectedTripLabel === cell.tripLabel ? "active" : ""}`}
-                            onClick={() => setSelectedTripLabel((current) => (current === cell.tripLabel ? "" : cell.tripLabel))}
+                            onClick={() => setSelectedTripLabel((c) => (c === cell.tripLabel ? "" : cell.tripLabel))}
                             type="button"
                           >
                             <strong>{cell.tripLabel}</strong>
@@ -769,9 +1002,9 @@ function App() {
                       </div>
                     )}
                   </div>
-                ) : null}
+                )}
 
-                {insightTab === "compare" ? (
+                {detailTab === "compare" && (
                   <div className="compare-list">
                     {uiState.results.compareRows.length ? (
                       uiState.results.compareRows.map((row, index) => (
@@ -791,115 +1024,134 @@ function App() {
                       <EmptyState text="暂无历史对比数据。" />
                     )}
                   </div>
-                ) : null}
+                )}
 
-                {insightTab === "history" ? (
+                {detailTab === "history" && (
                   <pre className="history-detail">{uiState.history.historyDetail}</pre>
-                ) : null}
+                )}
 
-                {insightTab === "table" ? (
-                  <p className="panel-note">表格聚焦模式下，使用上方筛选和下方结果表快速定位目标市场。</p>
-                ) : null}
-              </div>
-            </div>
-
-            <SectionCard className="table-card" title="成功结果" subtitle={`${filteredResults.successRows.length} 条可展示价格结果`}>
-              <DataTable
-                columns={[
-                  { key: "date", label: "日期" },
-                  { key: "route", label: "航段" },
-                  { key: "region_name", label: "地区" },
-                  { key: "source_label", label: "来源" },
-                  { key: "best_cny_price", label: "最佳价", align: "right" },
-                  { key: "cheapest_cny_price", label: "最低价", align: "right" },
-                  { key: "delta_label", label: "变化" },
-                ]}
-                rows={filteredResults.successRows}
-                onOpenLink={(url) => desktopApi.open_link(url)}
-              />
-            </SectionCard>
-
-            <SectionCard
-              className="table-card danger-card"
-              title="失败市场"
-              subtitle={`${filteredResults.failureRows.length} 条需人工补救或复扫`}
-              actions={
-                <button className="ghost-button" onClick={() => desktopApi.run_retry_queue().then(() => handleStartScan({ rerunScopeOverride: "selected_regions", allowBrowserFallback: false }))} type="button">
-                  运行补扫队列
+                <button className="ghost-button wide-button" onClick={() => setShowDetails(false)} type="button">
+                  收起详细结果
                 </button>
-              }
-            >
-              <DataTable
-                columns={[
-                  { key: "date", label: "日期" },
-                  { key: "route", label: "航段" },
-                  { key: "region_name", label: "地区" },
-                  { key: "failure_category", label: "失败分类" },
-                  { key: "failure_action", label: "建议动作" },
-                  { key: "status", label: "状态" },
-                ]}
-                rows={filteredResults.failureRows}
-                onOpenLink={(url) => desktopApi.open_link(url)}
-                highlightFailure
-                onQueueRetry={handleQueueFailure}
-              />
-            </SectionCard>
-          </SectionCard>
-        </section>
-
-        <aside className="right-column">
-          <SectionCard className="sidebar-card" title="提醒与自动复扫" subtitle={uiState.alerts.summary}>
-            <div className="form-grid single-column">
-              <label>
-                <span>目标价 ≤</span>
-                <input value={alertDraft.targetPrice} onChange={(event) => setAlertDraft((current) => ({ ...current, targetPrice: event.target.value }))} />
-              </label>
-              <label>
-                <span>再降 ≥</span>
-                <input value={alertDraft.dropAmount} onChange={(event) => setAlertDraft((current) => ({ ...current, dropAmount: event.target.value }))} />
-              </label>
-              <label>
-                <span>自动复扫(分钟)</span>
-                <input value={alertDraft.autoRefreshMinutes} onChange={(event) => setAlertDraft((current) => ({ ...current, autoRefreshMinutes: event.target.value }))} />
-              </label>
-            </div>
-            <div className="toggle-grid single-column">
-              <label><input checked={alertDraft.notificationsEnabled} onChange={(event) => setAlertDraft((current) => ({ ...current, notificationsEnabled: event.target.checked }))} type="checkbox" /> 启用桌面通知</label>
-              <label><input checked={alertDraft.notifyOnRecovery} onChange={(event) => setAlertDraft((current) => ({ ...current, notifyOnRecovery: event.target.checked }))} type="checkbox" /> 通知失败恢复</label>
-              <label><input checked={alertDraft.notifyOnNewLow} onChange={(event) => setAlertDraft((current) => ({ ...current, notifyOnNewLow: event.target.checked }))} type="checkbox" /> 通知刷新历史新低</label>
-            </div>
-            <div className="section-actions flush-top">
-              <button className="primary-button subtle" onClick={handleSaveAlerts} type="button">保存设置</button>
-              <button className="ghost-button" onClick={() => desktopApi.clear_alert_config({ form }).then(() => desktopApi.get_ui_state().then(setUiState))} type="button">清除</button>
-            </div>
-          </SectionCard>
-
-          <SectionCard className="sidebar-card" title="环境状态" subtitle="主抓取、回退链路和项目路径。">
-            {uiState.environment.lines.length ? (
-              <ul className="line-list">
-                {uiState.environment.lines.map((line) => <li key={line}>{line}</li>)}
-              </ul>
-            ) : (
-              <EmptyState text="还未执行环境检查。" />
-            )}
-          </SectionCard>
-
-          <SectionCard className="sidebar-card log-card" title="运行日志" subtitle="保留最近日志，便于排障。">
-            {uiState.logs.length ? (
-              <div className="log-list">
-                {uiState.logs.slice(-18).map((item) => (
-                  <div key={`${item.timestamp}-${item.message}`} className="log-item">
-                    <span>{item.timestamp}</span>
-                    <p>{item.message}</p>
-                  </div>
-                ))}
               </div>
-            ) : (
-              <EmptyState text="暂无日志。" />
             )}
-          </SectionCard>
-        </aside>
+          </div>
+        )}
       </main>
+
+      {/* Status bar ------------------------------------------------------ */}
+      <footer className="shrink-0 flex items-center justify-between gap-3 px-4 py-3 border-t border-stone-200/60">
+        <div className="flex items-center gap-2.5">
+          <span
+            className={
+              "inline-block w-2 h-2 rounded-full " +
+              (uiState.environment.lines.length > 0 ? "bg-green-600" : "bg-stone-300")
+            }
+          />
+          <span className="text-sm text-stone-500">{uiState.status.message}</span>
+          {uiState.status.progress.total > 0 ? (
+            <span className="text-xs text-stone-400">
+              {uiState.status.progress.step}/{uiState.status.progress.total}
+            </span>
+          ) : null}
+        </div>
+        <div className="flex items-center gap-2">
+          {actionMessage ? <span className="text-sm text-stone-500">{actionMessage}</span> : null}
+          {uiState.status.busy ? (
+            <button
+              className="px-3 py-1.5 rounded-lg border border-stone-200 bg-white/70 text-stone-500 text-sm hover:text-stone-800 hover:border-stone-300 transition cursor-pointer"
+              onClick={() => desktopApi.cancel_scan()}
+              type="button"
+            >
+              取消
+            </button>
+          ) : null}
+        </div>
+      </footer>
+
+      {/* Drawers --------------------------------------------------------- */}
+      {leftDrawerOpen && (
+        <div className="drawer-overlay" onClick={() => setLeftDrawerOpen(false)}>
+          <aside className="drawer drawer-left" onClick={(e) => e.stopPropagation()}>
+            <div className="drawer-header">
+              <h3>历史与收藏</h3>
+              <button className="toolbar-button" onClick={() => setLeftDrawerOpen(false)} type="button">关闭</button>
+            </div>
+            <div className="drawer-body">
+              <HistoryList title="收藏路线" records={uiState.history.favorites} onApply={handleApplyHistory} />
+              <HistoryList title="最近查询" records={uiState.history.recent} onApply={handleApplyHistory} />
+              <div className="drawer-actions">
+                <button className="toolbar-button" onClick={() => desktopApi.open_outputs()} type="button">打开结果目录</button>
+                <button className="toolbar-button" onClick={() => desktopApi.export_decision_summary()} type="button">导出决策摘要</button>
+                <button className="toolbar-button" onClick={() => desktopApi.toggle_favorite_current_query({ form }).then(() => desktopApi.get_ui_state().then(setUiState))} type="button">收藏当前查询</button>
+                <button className="toolbar-button" onClick={() => desktopApi.list_history().then(() => desktopApi.get_ui_state().then(setUiState))} type="button">刷新历史</button>
+              </div>
+            </div>
+          </aside>
+        </div>
+      )}
+
+      {rightDrawerOpen && (
+        <div className="drawer-overlay" onClick={() => setRightDrawerOpen(false)}>
+          <aside className="drawer drawer-right" onClick={(e) => e.stopPropagation()}>
+            <div className="drawer-header">
+              <h3>设置</h3>
+              <button className="toolbar-button" onClick={() => setRightDrawerOpen(false)} type="button">关闭</button>
+            </div>
+            <div className="drawer-body">
+              <div className="drawer-section">
+                <h4>提醒与自动复扫</h4>
+                <p className="drawer-hint">{uiState.alerts.summary}</p>
+                <div className="grid gap-3">
+                  <label className="block text-xs font-medium tracking-wider uppercase text-stone-400 mb-1">目标价 ≤</label>
+                  <input className="w-full rounded-xl border border-stone-200 bg-white px-3.5 py-2.5 text-stone-800 outline-none transition focus-visible:ring-2 focus-visible:ring-stone-400/20 focus-visible:border-stone-300" value={alertDraft.targetPrice} onChange={(e) => setAlertDraft((c) => ({ ...c, targetPrice: e.target.value }))} />
+                  <label className="block text-xs font-medium tracking-wider uppercase text-stone-400 mb-1">再降 ≥</label>
+                  <input className="w-full rounded-xl border border-stone-200 bg-white px-3.5 py-2.5 text-stone-800 outline-none transition focus-visible:ring-2 focus-visible:ring-stone-400/20 focus-visible:border-stone-300" value={alertDraft.dropAmount} onChange={(e) => setAlertDraft((c) => ({ ...c, dropAmount: e.target.value }))} />
+                  <label className="block text-xs font-medium tracking-wider uppercase text-stone-400 mb-1">自动复扫(分钟)</label>
+                  <input className="w-full rounded-xl border border-stone-200 bg-white px-3.5 py-2.5 text-stone-800 outline-none transition focus-visible:ring-2 focus-visible:ring-stone-400/20 focus-visible:border-stone-300" value={alertDraft.autoRefreshMinutes} onChange={(e) => setAlertDraft((c) => ({ ...c, autoRefreshMinutes: e.target.value }))} />
+                </div>
+                <div className="mt-4 flex flex-col gap-3">
+                  <Switch checked={alertDraft.notificationsEnabled} onChange={(v) => setAlertDraft((c) => ({ ...c, notificationsEnabled: v }))} label="启用桌面通知" />
+                  <Switch checked={alertDraft.notifyOnRecovery} onChange={(v) => setAlertDraft((c) => ({ ...c, notifyOnRecovery: v }))} label="通知失败恢复" />
+                  <Switch checked={alertDraft.notifyOnNewLow} onChange={(v) => setAlertDraft((c) => ({ ...c, notifyOnNewLow: v }))} label="通知刷新历史新低" />
+                </div>
+                <div className="drawer-actions">
+                  <button className="toolbar-button active" onClick={handleSaveAlerts} type="button">保存设置</button>
+                  <button className="toolbar-button" onClick={() => desktopApi.clear_alert_config({ form }).then(() => desktopApi.get_ui_state().then(setUiState))} type="button">清除</button>
+                </div>
+              </div>
+
+              <div className="drawer-section">
+                <h4>环境状态</h4>
+                <button className="toolbar-button" onClick={handleEnvironmentCheck} type="button">检查环境</button>
+                {uiState.environment.lines.length ? (
+                  <ul className="line-list">
+                    {uiState.environment.lines.map((line) => <li key={line}>{line}</li>)}
+                  </ul>
+                ) : (
+                  <EmptyState text="还未执行环境检查。" />
+                )}
+              </div>
+
+              <div className="drawer-section">
+                <h4>运行日志</h4>
+                {uiState.logs.length ? (
+                  <div className="log-list">
+                    {uiState.logs.slice(-30).map((item) => (
+                      <div key={`${item.timestamp}-${item.message}`} className="log-item">
+                        <span>{item.timestamp}</span>
+                        <p>{item.message}</p>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <EmptyState text="暂无日志。" />
+                )}
+              </div>
+            </div>
+          </aside>
+        </div>
+      )}
     </div>
   );
 }

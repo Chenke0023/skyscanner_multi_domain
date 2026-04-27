@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import os
+import socket
+import threading
 from pathlib import Path
+from http.server import ThreadingHTTPServer, SimpleHTTPRequestHandler
 from typing import Any
 from urllib.parse import quote
 
@@ -11,6 +14,50 @@ from desktop_ui_service import DesktopUIService
 
 def _frontend_index_path() -> Path:
     return PROJECT_ROOT / "webui" / "dist" / "index.html"
+
+
+class _AssetRequestHandler(SimpleHTTPRequestHandler):
+    def __init__(self, *args: Any, directory: str, **kwargs: Any) -> None:
+        super().__init__(*args, directory=directory, **kwargs)
+
+    def log_message(self, format: str, *args: Any) -> None:  # noqa: A003
+        return
+
+
+class _FrontendAssetServer:
+    def __init__(self, dist_dir: Path) -> None:
+        self._dist_dir = dist_dir
+        self._httpd: ThreadingHTTPServer | None = None
+        self._thread: threading.Thread | None = None
+        self.url: str | None = None
+
+    def start(self) -> str:
+        if self._httpd is not None and self.url is not None:
+            return self.url
+
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            sock.bind(("127.0.0.1", 0))
+            host, port = sock.getsockname()
+
+        handler = lambda *args, **kwargs: _AssetRequestHandler(  # noqa: E731
+            *args,
+            directory=str(self._dist_dir),
+            **kwargs,
+        )
+        self._httpd = ThreadingHTTPServer(("127.0.0.1", port), handler)
+        self._thread = threading.Thread(target=self._httpd.serve_forever, daemon=True)
+        self._thread.start()
+        self.url = f"http://{host}:{port}/index.html"
+        return self.url
+
+    def stop(self) -> None:
+        if self._httpd is None:
+            return
+        self._httpd.shutdown()
+        self._httpd.server_close()
+        self._httpd = None
+        self.url = None
+        self._thread = None
 
 
 class DesktopBridge:
@@ -170,9 +217,11 @@ def main() -> None:
         )
 
     if frontend_index.exists():
-        window_url = frontend_index.as_uri()
+        asset_server = _FrontendAssetServer(frontend_index.parent)
+        window_url = asset_server.start()
         bridge: DesktopBridge | None = DesktopBridge()
     else:
+        asset_server = None
         window_url = _error_page_uri(
             "未找到前端静态资源",
             "桌面入口已停止静默回退到旧 Tk 界面。请先构建 webui/dist 后再启动。",
@@ -184,17 +233,19 @@ def main() -> None:
         "Skyscanner 多市场比价",
         url=window_url,
         js_api=bridge,
-        width=1440,
-        height=920,
-        min_size=(1200, 760),
+        width=1000,
+        height=680,
+        min_size=(760, 520),
         text_select=True,
-        background_color="#efe6d6",
+        background_color="#faf8f5",
     )
     webview.start(
         debug=bool(os.environ.get("SKYSCANNER_WEBVIEW_DEBUG")),
         private_mode=False,
         gui="cocoa",
     )
+    if asset_server is not None:
+        asset_server.stop()
 
 
 if __name__ == "__main__":

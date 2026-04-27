@@ -7,7 +7,7 @@ type DesktopApiShape = {
   get_location_suggestions(
     field: "origin" | "destination",
     query: string,
-    options: Record<string, unknown>
+    options?: Record<string, unknown>
   ): Promise<SuggestionResponse>;
   start_scan(payload?: Record<string, unknown>): Promise<{ ok: boolean }>;
   cancel_scan(): Promise<{ ok: boolean }>;
@@ -27,7 +27,7 @@ type DesktopApiShape = {
 declare global {
   interface Window {
     pywebview?: {
-      api: DesktopApiShape;
+      api?: Partial<DesktopApiShape>;
     };
   }
 }
@@ -112,15 +112,30 @@ class MockDesktopApi implements DesktopApiShape {
 
   async get_location_suggestions(
     field: "origin" | "destination",
-    query: string
+    query: string,
+    options?: Record<string, unknown>
   ): Promise<SuggestionResponse> {
+    const useCountry =
+      field === "origin"
+        ? Boolean(options?.originCountry)
+        : Boolean(options?.destinationCountry);
+    if (!query.trim()) {
+      return { field, items: [] };
+    }
+    if (useCountry) {
+      return {
+        field,
+        items: [
+          { name: "菲律宾", code: "PH", kind: "country", label: "菲律宾 (国家)" },
+          { name: "芬兰", code: "FI", kind: "country", label: "芬兰 (国家)" },
+        ].filter((i) => i.name.includes(query)),
+      };
+    }
     return {
       field,
-      items: query
-        ? [
-            { name: query, code: "MOCK", kind: "metro", label: `${query} (MOCK, 城市)` },
-          ]
-        : [],
+      items: [
+        { name: query, code: "MOCK", kind: "metro", label: `${query} (MOCK, 城市)` },
+      ],
     };
   }
 
@@ -177,4 +192,69 @@ class MockDesktopApi implements DesktopApiShape {
   }
 }
 
-export const desktopApi: DesktopApiShape = window.pywebview?.api ?? new MockDesktopApi();
+const mockApi = new MockDesktopApi();
+
+function getRealApi(): Partial<DesktopApiShape> | undefined {
+  return window.pywebview?.api;
+}
+
+function hasApiMethod(
+  api: Partial<DesktopApiShape> | undefined,
+  methodName: keyof DesktopApiShape
+): api is DesktopApiShape {
+  return typeof api?.[methodName] === "function";
+}
+
+async function waitForPywebviewApi(methodName: keyof DesktopApiShape, timeoutMs = 1500): Promise<DesktopApiShape | undefined> {
+  const existing = getRealApi();
+  if (hasApiMethod(existing, methodName)) {
+    return existing;
+  }
+
+  if (!window.pywebview) {
+    return undefined;
+  }
+
+  return new Promise((resolve) => {
+    let settled = false;
+
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      window.removeEventListener("pywebviewready", handleReady as EventListener);
+      window.clearTimeout(timer);
+      const nextApi = getRealApi();
+      resolve(hasApiMethod(nextApi, methodName) ? nextApi : undefined);
+    };
+
+    const handleReady = () => {
+      finish();
+    };
+
+    const timer = window.setTimeout(finish, timeoutMs);
+    window.addEventListener("pywebviewready", handleReady as EventListener, { once: true });
+
+    const recheckApi = getRealApi();
+    if (hasApiMethod(recheckApi, methodName)) {
+      finish();
+    }
+  });
+}
+
+export const desktopApi: DesktopApiShape = new Proxy({} as DesktopApiShape, {
+  get(_, prop: string | symbol) {
+    if (typeof prop !== "string") return undefined;
+    const methodName = prop as keyof DesktopApiShape;
+    const realApi = getRealApi();
+    const target = hasApiMethod(realApi, methodName) ? realApi : mockApi;
+    const value = (target as any)[prop];
+    if (typeof value === "function") {
+      return async function (this: unknown, ...args: unknown[]) {
+        const resolvedApi = await waitForPywebviewApi(methodName);
+        const t = resolvedApi && hasApiMethod(resolvedApi, methodName) ? resolvedApi : mockApi;
+        return (t as any)[prop].apply(t, args);
+      };
+    }
+    return value;
+  },
+});
