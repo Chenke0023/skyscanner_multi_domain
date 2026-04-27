@@ -233,6 +233,103 @@ class CaptchaDetectionTests(unittest.TestCase):
 
 
 class ScraplingRetryTests(unittest.TestCase):
+    def test_compare_via_scrapling_serializes_shared_profile_dir_usage(self) -> None:
+        active_calls = 0
+        max_active_calls = 0
+
+        class FullPage:
+            url = "https://www.skyscanner.com.hk/transport/flights/bjsa/ala/260429/"
+            html = """
+            <html>
+              <body>
+                <div>搜尋結果顯示方式</div>
+                <div>最佳</div>
+                <div>HK$3,305</div>
+                <div>最便宜</div>
+                <div>HK$3,072</div>
+              </body>
+            </html>
+            """
+
+        def fake_fetch(url: str, **kwargs):
+            nonlocal active_calls, max_active_calls
+            self.assertEqual(kwargs.get("user_data_dir"), "/tmp/shared-profile")
+            active_calls += 1
+            max_active_calls = max(max_active_calls, active_calls)
+            try:
+                import time
+
+                time.sleep(0.05)
+                return FullPage()
+            finally:
+                active_calls -= 1
+
+        fake_scrapling = types.SimpleNamespace(
+            Fetcher=types.SimpleNamespace(get=lambda *a, **k: FullPage()),
+            StealthyFetcher=types.SimpleNamespace(fetch=fake_fetch),
+        )
+        fake_captcha_solver = types.SimpleNamespace(
+            CaptchaSolverClient=None,
+            CaptchaSolverError=Exception,
+        )
+
+        args = argparse.Namespace(
+            origin="BJSA",
+            destination="ALA",
+            date="2026-04-29",
+            timeout=20,
+            page_wait=5,
+        )
+        regions = [
+            RegionConfig(
+                code="HK",
+                name="香港",
+                domain="https://www.skyscanner.com.hk",
+                currency="HKD",
+                locale="zh-HK",
+            ),
+            RegionConfig(
+                code="SG",
+                name="Singapore",
+                domain="https://www.skyscanner.sg",
+                currency="SGD",
+                locale="en-SG",
+            ),
+        ]
+
+        async def run_case() -> None:
+            with (
+                patch.dict(
+                    sys.modules,
+                    {
+                        "scrapling": fake_scrapling,
+                        "captcha_solver": fake_captcha_solver,
+                    },
+                ),
+                patch("transport_scrapling._probe_existing_cdp_page", return_value=None),
+                patch("transport_scrapling._probe_page_with_playwright", return_value=None),
+                patch(
+                    "transport_scrapling._resolve_scrapling_state_overrides",
+                    return_value={"user_data_dir": "/tmp/shared-profile"},
+                ),
+            ):
+                quotes = await compare_via_scrapling(
+                    args,
+                    regions,
+                    persist_failures=False,
+                    region_concurrency=2,
+                    build_search_url=lambda region, *_args: (
+                        f"{region.domain}/transport/flights/bjsa/ala/260429/"
+                    ),
+                    persist_failure_log=lambda *a, **k: a[0],
+                )
+
+            self.assertEqual(len(quotes), 2)
+            self.assertEqual(max_active_calls, 1)
+            self.assertTrue(all(quote.price is not None for quote in quotes))
+
+        asyncio.run(run_case())
+
     def test_compare_via_scrapling_retries_shell_page_with_dom_loading(self) -> None:
         calls: list[dict[str, object]] = []
 

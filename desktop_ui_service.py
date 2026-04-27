@@ -1887,6 +1887,54 @@ class DesktopUIService:
                                         region_name=f"{region.name} / {_route_label}",
                                     )
 
+                                async def on_pair_progress(progress_payload: dict[str, Any]) -> None:
+                                    if self._cancel_event.is_set():
+                                        raise asyncio.CancelledError
+                                    quote_dicts = [
+                                        quote
+                                        for quote in (progress_payload.get("quotes") or [])
+                                        if isinstance(quote, dict)
+                                    ]
+                                    if not quote_dicts:
+                                        return
+                                    rows = self.cli.simplify_quotes(
+                                        quote_dicts,
+                                        route_label=route_label,
+                                    )
+                                    for row in rows:
+                                        region_name = str(row.get("region_name") or "-")
+                                        best_rows_by_region[region_name] = self.cli._pick_better_row(
+                                            best_rows_by_region.get(region_name),
+                                            row,
+                                        )
+                                    partial_rows, partial_quotes = build_rows_snapshot()
+                                    stage = str(progress_payload.get("stage") or "").strip().lower()
+                                    completed_regions = progress_payload.get("completed_regions") or []
+                                    status_map = {
+                                        "preview_cache": f"{trip_label} / {route_label} 预览缓存已展示。",
+                                        "quick_live": f"{trip_label} / {route_label} 已返回高优先级市场结果，正在补全其余市场...",
+                                        "background_live": f"{trip_label} / {route_label} 正在后台补全其余市场...",
+                                        "region_update": (
+                                            f"{trip_label} / {route_label} 已完成 {len(completed_regions)} "
+                                            "个市场，正在更新当前最优结果..."
+                                        ),
+                                        "final": f"{trip_label} / {route_label} 已完成，正在比较候选航段...",
+                                    }
+                                    log_map = {
+                                        "preview_cache": f"{trip_label} / {route_label} 已展示预览缓存。",
+                                        "quick_live": f"{trip_label} / {route_label} 已先刷新高优先级市场。",
+                                        "background_live": f"{trip_label} / {route_label} 已补充更多市场。",
+                                        "region_update": f"{trip_label} / {route_label} 已刷新一个市场结果。",
+                                        "final": f"{trip_label} / {route_label} 已完成实时刷新。",
+                                    }
+                                    await update_partial_view(
+                                        trip_label,
+                                        partial_rows,
+                                        partial_quotes,
+                                        status=status_map.get(stage, f"{trip_label} / {route_label} 正在刷新结果..."),
+                                        log_message=log_map.get(stage, f"{trip_label} / {route_label} 正在刷新结果。"),
+                                    )
+
                                 quotes = await run_page_scan(
                                     origin=origin_airport.code,
                                     destination=destination_airport.code,
@@ -1902,6 +1950,7 @@ class DesktopUIService:
                                     selected_region_codes=sorted(current_selected_codes),
                                     region_concurrency=_GUI_REGION_CONCURRENCY,
                                     query_payload=query_payload,
+                                    on_progress=on_pair_progress,
                                     allow_browser_fallback=allow_browser_fallback,
                                 )
                                 if not quotes:
