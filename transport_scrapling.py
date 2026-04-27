@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import argparse
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 import http.client
 import json
@@ -29,6 +30,7 @@ BROWSER_BINARY_CANDIDATES = {
     "edge": Path("/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge"),
 }
 CDP_HOST_CANDIDATES = ("localhost", "::1", "127.0.0.1")
+_PROFILE_LOCKS: dict[str, asyncio.Lock] = {}
 
 
 @dataclass(frozen=True)
@@ -309,6 +311,25 @@ async def _resolve_scrapling_state_overrides(
     return {}
 
 
+def _get_profile_lock(profile_dir: str) -> asyncio.Lock:
+    lock = _PROFILE_LOCKS.get(profile_dir)
+    if lock is None:
+        lock = asyncio.Lock()
+        _PROFILE_LOCKS[profile_dir] = lock
+    return lock
+
+
+@asynccontextmanager
+async def _acquire_profile_lock(state_overrides: dict[str, Any] | None):
+    profile_dir = str((state_overrides or {}).get("user_data_dir") or "").strip()
+    if not profile_dir:
+        yield
+        return
+    lock = _get_profile_lock(profile_dir)
+    async with lock:
+        yield
+
+
 def _extract_scrapling_page_text(page: Any) -> str:
     """Extract parser-friendly page text from Scrapling response."""
     html_value = None
@@ -556,17 +577,18 @@ async def _probe_page_with_playwright(
             for _, binary, profile_dir in _get_persistent_probe_candidates():
                 context = None
                 try:
-                    context = await playwright.chromium.launch_persistent_context(
-                        str(profile_dir),
-                        executable_path=str(binary),
-                        headless=True,
-                        locale=region.locale,
-                        extra_http_headers=headers,
-                    )
-                    page = context.pages[0] if context.pages else await context.new_page()
-                    outcome = await probe_page(page)
-                    if outcome is not None:
-                        return outcome
+                    async with _acquire_profile_lock({"user_data_dir": str(profile_dir)}):
+                        context = await playwright.chromium.launch_persistent_context(
+                            str(profile_dir),
+                            executable_path=str(binary),
+                            headless=True,
+                            locale=region.locale,
+                            extra_http_headers=headers,
+                        )
+                        page = context.pages[0] if context.pages else await context.new_page()
+                        outcome = await probe_page(page)
+                        if outcome is not None:
+                            return outcome
                 except Exception:
                     pass
                 finally:
@@ -711,24 +733,25 @@ async def compare_via_scrapling(
                     url,
                     for_stealth=True,
                 )
-            return await asyncio.to_thread(
-                StealthyFetcher.fetch,
-                url,
-                headless=True,
-                network_idle=(
-                    network_idle_override
-                    if network_idle_override is not None
-                    else False
-                ),
-                load_dom=load_dom_override if load_dom_override is not None else False,
-                timeout=timeout_ms,
-                wait=wait_override_ms or wait_ms,
-                solve_cloudflare=solve_cloudflare,
-                google_search=False,
-                locale=region.locale,
-                extra_headers=_build_request_headers(region),
-                **current_state_overrides,
-            )
+            async with _acquire_profile_lock(current_state_overrides):
+                return await asyncio.to_thread(
+                    StealthyFetcher.fetch,
+                    url,
+                    headless=True,
+                    network_idle=(
+                        network_idle_override
+                        if network_idle_override is not None
+                        else False
+                    ),
+                    load_dom=load_dom_override if load_dom_override is not None else False,
+                    timeout=timeout_ms,
+                    wait=wait_override_ms or wait_ms,
+                    solve_cloudflare=solve_cloudflare,
+                    google_search=False,
+                    locale=region.locale,
+                    extra_headers=_build_request_headers(region),
+                    **current_state_overrides,
+                )
 
         stealth_attempts = (
             {"solve_cloudflare": False, "wait_ms": wait_ms},
@@ -892,15 +915,16 @@ async def compare_via_scrapling(
                     url,
                     for_stealth=False,
                 )
-                page = await asyncio.to_thread(
-                    Fetcher.get,
-                    url,
-                    timeout=timeout_seconds,
-                    stealthy_headers=True,
-                    follow_redirects=True,
-                    headers=_build_request_headers(region),
-                    **state_overrides,
-                )
+                async with _acquire_profile_lock(state_overrides):
+                    page = await asyncio.to_thread(
+                        Fetcher.get,
+                        url,
+                        timeout=timeout_seconds,
+                        stealthy_headers=True,
+                        follow_redirects=True,
+                        headers=_build_request_headers(region),
+                        **state_overrides,
+                    )
                 page_text = _extract_scrapling_page_text(page)
                 page_url = _coerce_page_snippet(getattr(page, "url", None)) or url
                 if page_text:

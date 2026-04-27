@@ -190,6 +190,45 @@ async def cdp_open_tab(session: aiohttp.ClientSession, url: str) -> dict[str, An
         return await response.json()
 
 
+async def cdp_navigate_tab(
+    session: aiohttp.ClientSession, tab_id: str, url: str
+) -> str:
+    """Navigate an existing tab to a new URL via CDP, returns new WS URL."""
+    tabs = await cdp_list_tabs(session)
+    seul_tab = None
+    for t in tabs:
+        if t.get("id") == tab_id:
+            selected_tab = t
+            break
+    if not selected_tab:
+        raise RuntimeError(f"Tab {tab_id} not found")
+
+    ws_url = selected_tab.get("webSocketDebuggerUrl", "")
+    if not ws_url:
+        raise RuntimeError(f"No WebSocket URL for tab {tab_id}")
+
+    timeout = aiohttp.ClientTimeout(total=15)
+    async with aiohttp.ClientSession(timeout=timeout) as ws_session:
+        async with ws_session.ws_connect(ws_url) as ws:
+            await ws.send_json({
+                "id": 1,
+                "method": "Page.navigate",
+                "params": {"url": url},
+            })
+            async for message in ws:
+                if message.type != aiohttp.WSMsgType.TEXT:
+                    continue
+                payload = json.loads(message.data)
+                if payload.get("id") != 1:
+                    continue
+                result = payload.get("result", {})
+                if "error" in result:
+                    raise RuntimeError(
+                        f"Navigation failed: {json.dumps(result['error'])}"
+                    )
+                return ws_url
+
+
 async def cdp_list_tabs(session: aiohttp.ClientSession) -> list[dict[str, Any]]:
     async with session.get(f"{CDP_HTTP}/json/list") as response:
         response.raise_for_status()
@@ -295,6 +334,25 @@ def _get_matching_cdp_tabs(
     ]
 
 
+def _get_domain_host(region: RegionConfig) -> str:
+    """Return the host portion of a region's Skyscanner domain."""
+    return urlparse(region.domain).netloc
+
+
+def _any_tab_for_domain(
+    tabs: list[dict[str, Any]], region: RegionConfig
+) -> Optional[dict[str, Any]]:
+    """Return a tab belonging to the given region's domain (non-captcha, type=page)."""
+    allowed_hosts = REGION_HOST_ALIASES.get(region.code, {urlparse(region.domain).netloc})
+    for tab in tabs:
+        if tab.get("type") != "page":
+            continue
+        tab_host = urlparse(str(tab.get("url", ""))).netloc
+        if tab_host in allowed_hosts and "captcha" not in str(tab.get("url", "")).lower():
+            return tab
+    return None
+
+
 # ---------------------------------------------------------------------------
 # compare_via_pages — CDP page transport
 # ---------------------------------------------------------------------------
@@ -327,12 +385,30 @@ async def compare_via_pages(
             )
             for region in selected_regions
         }
+
+        # One tab per domain — navigate existing, only open new if needed
+        domain_tabs: dict[str, str] = {}  # domain_host -> tab_id
         existing_tabs = await cdp_list_tabs(session)
+
         for region in selected_regions:
             url = requested_urls[region.code]
-            if _get_matching_cdp_tabs(existing_tabs, region, url):
+            domain_host = _get_domain_host(region)
+
+            if domain_host in domain_tabs:
+                # Already have a tab for this domain, navigate it
+                await cdp_navigate_tab(session, domain_tabs[domain_host], url)
                 continue
-            await cdp_open_tab(session, url)
+
+            existing = _any_tab_for_domain(existing_tabs, region)
+            if existing:
+                tab_id = existing.get("id", "")
+                if tab_id:
+                    await cdp_navigate_tab(session, tab_id, url)
+                domain_tabs[domain_host] = tab_id
+            else:
+                new_tab = await cdp_open_tab(session, url)
+                tab_id = new_tab.get("id", "")
+                domain_tabs[domain_host] = tab_id
 
         await asyncio.sleep(args.page_wait)
         deadline = time.monotonic() + max(total_wait - args.page_wait, 10)
@@ -347,8 +423,10 @@ async def compare_via_pages(
             for region in pending_regions.values():
                 target_url = requested_urls[region.code]
                 expected_path = urlparse(target_url).path
-                candidates = _get_matching_cdp_tabs(tabs, region, target_url)
-                if not candidates:
+                domain_host = _get_domain_host(region)
+                domain_tab = _any_tab_for_domain(tabs, region)
+
+                if not domain_tab:
                     latest_quotes[region.code] = FlightQuote(
                         region=region.code,
                         domain=region.domain,
@@ -356,77 +434,59 @@ async def compare_via_pages(
                         currency=region.currency,
                         source_url=target_url,
                         status="page_missing",
-                        error="CDP 列表中未找到对应结果页",
+                        error="CDP tabs missing for domain",
                     )
                     if time.monotonic() < deadline:
                         next_pending[region.code] = region
                     continue
 
-                parsed_quote: Optional[FlightQuote] = None
-                last_error: Optional[FlightQuote] = None
-                last_page_text = ""
-                for page in candidates:
-                    ws_url = str(page.get("webSocketDebuggerUrl", ""))
-                    if not ws_url:
-                        last_error = FlightQuote(
-                            region=region.code,
-                            domain=region.domain,
-                            price=None,
-                            currency=region.currency,
-                            source_url=str(page.get("url", "")),
-                            status="page_missing_ws",
-                            error="结果页没有 webSocketDebuggerUrl",
-                        )
-                        continue
-
-                    payload = await cdp_eval(
-                        ws_url,
-                        build_page_text_capture_expression(),
-                    )
-                    quote = _quote_from_cdp_payload(
-                        region,
-                        payload,
-                        str(page.get("url", "")),
-                    )
-                    last_page_text = str(payload.get("text", ""))
-                    if quote.price is not None:
-                        parsed_quote = quote
-                        break
-                    last_error = quote
-
-                final_quote = (
-                    parsed_quote
-                    or last_error
-                    or FlightQuote(
+                ws_url = str(domain_tab.get("webSocketDebuggerUrl", ""))
+                if not ws_url:
+                    latest_quotes[region.code] = FlightQuote(
                         region=region.code,
                         domain=region.domain,
                         price=None,
                         currency=region.currency,
-                        source_url=build_search_url(
-                            region,
-                            args.origin,
-                            args.destination,
-                            args.date,
-                            return_date,
-                        ),
-                        status="page_parse_failed",
-                        error="页面正文未识别到 Best/Cheapest 价格",
+                        source_url=str(domain_tab.get("url", "")),
+                        status="page_missing_ws",
+                        error="No webSocketDebuggerUrl",
                     )
+                    if time.monotonic() < deadline:
+                        next_pending[region.code] = region
+                    continue
+
+                payload = await cdp_eval(
+                    ws_url,
+                    build_page_text_capture_expression(),
                 )
+                quote = _quote_from_cdp_payload(
+                    region,
+                    payload,
+                    str(domain_tab.get("url", "")),
+                )
+                page_text = str(payload.get("text", ""))
+
+                final_quote = quote or FlightQuote(
+                    region=region.code,
+                    domain=region.domain,
+                    price=None,
+                    currency=region.currency,
+                    source_url=target_url,
+                    status="page_parse_failed",
+                    error="No price found",
+                )
+
                 if persist_failures and final_quote.price is None:
                     persist_failure_log(
                         final_quote,
                         transport="page",
                         route_key=route_key,
-                        page_text=last_page_text,
-                        extra={"expected_path": expected_path},
+                        page_text=page_text,
+                        extra={"expected_path": expected_path, "domain_host": domain_host},
                     )
-                latest_quotes[region.code] = final_quote
 
-                if (
-                    latest_quotes[region.code].price is None
-                    and time.monotonic() < deadline
-                ):
+                latest_quotes[region.code] = final_quote
+                if final_quote.price is None and time.monotonic() < deadline:
                     next_pending[region.code] = region
 
             if not next_pending:

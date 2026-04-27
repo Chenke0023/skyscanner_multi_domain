@@ -1686,9 +1686,9 @@ def build_parser() -> argparse.ArgumentParser:
     page.add_argument("--timeout", type=int, default=30, help="HTTP/CDP 超时")
     page.add_argument(
         "--transport",
-        choices=["scrapling", "page"],
+        choices=["scrapling", "page", "opencli"],
         default="scrapling",
-        help="scrapling: 直接抓取页面文本；page: 通过浏览器 CDP 读取结果页（Comet 优先）",
+        help="scrapling: 直接抓取页面文本；page: 通过浏览器 CDP 读取结果页（Comet 优先）；opencli: 使用 opencli 浏览器自动化",
     )
     page.add_argument(
         "--exact-airport",
