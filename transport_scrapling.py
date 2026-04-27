@@ -615,6 +615,7 @@ async def compare_via_scrapling(
     *,
     persist_failures: bool = True,
     on_region_start: Callable[[RegionConfig], None] | None = None,
+    on_region_complete: Callable[[RegionConfig, "FlightQuote"], None] | None = None,
     build_search_url: Callable[..., str] | None = None,
     persist_failure_log: Callable[..., FlightQuote] | None = None,
     region_concurrency: int = 1,
@@ -674,13 +675,15 @@ async def compare_via_scrapling(
                     page_text=probe_page_text,
                     extra={"locale": region.locale, "probe": probe_source},
                 )
+            if on_region_complete is not None:
+                on_region_complete(region, probe_quote)
             return probe_quote
 
         try:
             from scrapling import Fetcher, StealthyFetcher
         except ImportError:
             install_hint = '未安装 Scrapling，请先执行: pip install "scrapling[fetchers]"'
-            return FlightQuote(
+            quote = FlightQuote(
                 region=region.code,
                 domain=region.domain,
                 price=None,
@@ -689,6 +692,9 @@ async def compare_via_scrapling(
                 status="scrapling_unavailable",
                 error=install_hint,
             )
+            if on_region_complete is not None:
+                on_region_complete(region, quote)
+            return quote
 
         async def fetch_with_stealth(
             *,
@@ -952,6 +958,8 @@ async def compare_via_scrapling(
                 extra={"locale": region.locale},
             )
 
+        if on_region_complete is not None:
+            on_region_complete(region, latest_quote)
         return latest_quote
 
     concurrency = max(int(region_concurrency), 1)
