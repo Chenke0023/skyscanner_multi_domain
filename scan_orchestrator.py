@@ -215,6 +215,7 @@ async def run_page_scan(
 ) -> list[FlightQuote]:
     from transport_cdp import compare_via_pages, detect_cdp_version, ensure_cdp_ready
     from transport_scrapling import compare_via_scrapling
+    from transport_opencli import compare_via_opencli
     from date_window import format_trip_date_label
     from scan_history import ScanHistoryStore, get_quotes_for_trip_label, select_preview_region_batches
 
@@ -471,6 +472,22 @@ async def run_page_scan(
             completed_regions=[quote.region for quote in quotes],
             is_final=True,
         )
+    elif normalized_transport == "opencli":
+        quotes = await compare_via_opencli(
+            args,
+            selected_regions,
+            persist_failures=True,
+            build_search_url=build_search_url,
+            on_region_start=on_region_start,
+            on_region_complete=on_region_complete,
+            region_concurrency=max(int(region_concurrency), 1),
+        )
+        await emit_progress(
+            stage="final",
+            quotes=quotes,
+            completed_regions=[quote.region for quote in quotes],
+            is_final=True,
+        )
     else:
         quotes = [
             FlightQuote(
@@ -482,7 +499,7 @@ async def run_page_scan(
                     region, origin, destination, date, return_date
                 ),
                 status="invalid_transport",
-                error=f"未知 transport: {transport}（可选: scrapling, page）",
+                error=f"未知 transport: {transport}（可选: scrapling, page, opencli）",
             )
             for region in selected_regions
         ]

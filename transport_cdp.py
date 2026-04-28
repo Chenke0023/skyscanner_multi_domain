@@ -6,9 +6,16 @@ import argparse
 import asyncio
 import http.client
 import json
+import os
+import secrets
 import shutil
+import signal
+import socket
 import subprocess
+import threading
 import time
+from contextlib import contextmanager
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Optional
@@ -115,42 +122,144 @@ def prune_browser_profile(profile_dir: Path) -> tuple[int, list[str]]:
     return len(removed), removed
 
 
-def launch_browser_with_cdp(
-    port: int = 9222, start_url: str = "https://www.skyscanner.co.uk"
-) -> str:
+def _comet_default_profile() -> Path:
+    """Return the default Comet user-data directory on macOS."""
+    return Path.home() / "Library" / "Application Support" / "Comet"
+
+
+def _comet_is_running() -> bool:
+    """Check if Comet is currently running."""
+    try:
+        result = subprocess.run(
+            ["pgrep", "-f", "/Applications/Comet.app/Contents/MacOS/Comet"],
+            capture_output=True, text=True, timeout=5,
+        )
+        return result.returncode == 0 and bool(result.stdout.strip())
+    except Exception:
+        return False
+
+
+def _kill_comet() -> bool:
+    """Gracefully terminate a running Comet instance via SIGTERM."""
+    try:
+        result = subprocess.run(
+            ["pkill", "-f", "/Applications/Comet.app/Contents/MacOS/Comet"],
+            capture_output=True, text=True, timeout=8,
+        )
+        if result.returncode == 0:
+            time.sleep(1.5)
+            return True
+    except Exception:
+        pass
+    return False
+
+
+def _select_browser_launch_target(
+    preferred_browser: str | None = None,
+) -> tuple[str, Path, Path]:
     browsers = detect_browsers()
-    for browser_name in ("comet", "edge", "chrome"):
+    browser_order = (
+        (preferred_browser.lower(),)
+        if preferred_browser
+        else ("comet", "edge", "chrome")
+    )
+    for browser_name in browser_order:
         binary = browsers.get(browser_name)
         if not binary:
             continue
+        if browser_name == "comet":
+            profile_dir = _comet_default_profile()
+        else:
+            profile_dir = profile_dir_for(browser_name)
+        return browser_name, binary, profile_dir
+    raise RuntimeError("没有找到可自动启动的 Comet、Edge 或 Chrome")
 
-        profile_dir = profile_dir_for(browser_name)
+
+def _launch_browser_process(
+    browser_name: str,
+    binary: Path,
+    profile_dir: Path,
+    *,
+    port: int,
+    start_url: str,
+) -> subprocess.Popen[Any]:
+    if browser_name == "comet":
+        if _comet_is_running():
+            _kill_comet()
+    else:
         profile_dir.mkdir(parents=True, exist_ok=True)
-        removed_count, _ = prune_browser_profile(profile_dir)
-        command = [
-            str(binary),
-            f"--remote-debugging-port={port}",
-            f"--user-data-dir={profile_dir}",
-            "--no-first-run",
-            "--no-default-browser-check",
-            "--new-window",
-            start_url,
-        ]
-        try:
-            subprocess.Popen(
-                command,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                stdin=subprocess.DEVNULL,
-                start_new_session=True,
-            )
-            if removed_count:
-                return f"已清理 {removed_count} 处缓存并自动启动 {browser_name.capitalize()}，调试端口 {port}"
-            return f"已尝试自动启动 {browser_name.capitalize()}，调试端口 {port}"
-        except OSError as exc:
-            return f"找到 {browser_name.capitalize()}，但启动失败: {exc}"
+        prune_browser_profile(profile_dir)
 
-    return "没有找到可自动启动的 Comet、Edge 或 Chrome"
+    command = [
+        str(binary),
+        f"--remote-debugging-port={port}",
+        f"--user-data-dir={profile_dir}",
+        "--no-first-run",
+        "--no-default-browser-check",
+        "--new-window",
+        start_url,
+    ]
+    return subprocess.Popen(
+        command,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        stdin=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+
+
+def _terminate_browser_process(process: subprocess.Popen[Any], timeout: float = 8.0) -> None:
+    if process.poll() is not None:
+        return
+    try:
+        os.killpg(process.pid, signal.SIGTERM)
+    except ProcessLookupError:
+        return
+    except OSError:
+        process.terminate()
+    try:
+        process.wait(timeout=timeout)
+        return
+    except subprocess.TimeoutExpired:
+        pass
+    try:
+        os.killpg(process.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        return
+    except OSError:
+        process.kill()
+    try:
+        process.wait(timeout=2.0)
+    except subprocess.TimeoutExpired:
+        pass
+
+
+def _allocate_tcp_port() -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind(("127.0.0.1", 0))
+        return int(sock.getsockname()[1])
+
+
+def launch_browser_with_cdp(
+    port: int = 9222,
+    start_url: str = "https://www.skyscanner.co.uk",
+    preferred_browser: str | None = None,
+) -> str:
+    try:
+        browser_name, binary, profile_dir = _select_browser_launch_target(preferred_browser)
+    except RuntimeError as exc:
+        return str(exc)
+    try:
+        _launch_browser_process(
+            browser_name,
+            binary,
+            profile_dir,
+            port=port,
+            start_url=start_url,
+        )
+        return f"已自动启动 {browser_name.capitalize()}（使用默认 profile），调试端口 {port}"
+    except OSError as exc:
+        return f"找到 {browser_name.capitalize()}，但启动失败: {exc}"
 
 
 def ensure_cdp_ready(
@@ -177,6 +286,17 @@ def ensure_cdp_ready(
     )
 
 
+def wait_for_cdp_shutdown(
+    port: int = 9222, timeout: float = 12.0, interval: float = 0.5
+) -> bool:
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if not detect_cdp_version(port):
+            return True
+        time.sleep(interval)
+    return False
+
+
 # ---------------------------------------------------------------------------
 # CDP low-level helpers
 # ---------------------------------------------------------------------------
@@ -190,8 +310,47 @@ async def cdp_open_tab(session: aiohttp.ClientSession, url: str) -> dict[str, An
         return await response.json()
 
 
-async def cdp_list_tabs(session: aiohttp.ClientSession) -> list[dict[str, Any]]:
-    async with session.get(f"{CDP_HTTP}/json/list") as response:
+async def cdp_navigate_tab(
+    session: aiohttp.ClientSession, tab_id: str, url: str, *, cdp_host: str = CDP_HTTP
+) -> str:
+    """Navigate an existing tab to a new URL via CDP, returns new WS URL."""
+    tabs = await cdp_list_tabs(session, host=cdp_host)
+    selected_tab = None
+    for t in tabs:
+        if t.get("id") == tab_id:
+            selected_tab = t
+            break
+    if not selected_tab:
+        raise RuntimeError(f"Tab {tab_id} not found")
+
+    ws_url = selected_tab.get("webSocketDebuggerUrl", "")
+    if not ws_url:
+        raise RuntimeError(f"No WebSocket URL for tab {tab_id}")
+
+    timeout = aiohttp.ClientTimeout(total=15)
+    async with aiohttp.ClientSession(timeout=timeout) as ws_session:
+        async with ws_session.ws_connect(ws_url) as ws:
+            await ws.send_json({
+                "id": 1,
+                "method": "Page.navigate",
+                "params": {"url": url},
+            })
+            async for message in ws:
+                if message.type != aiohttp.WSMsgType.TEXT:
+                    continue
+                payload = json.loads(message.data)
+                if payload.get("id") != 1:
+                    continue
+                result = payload.get("result", {})
+                if "error" in result:
+                    raise RuntimeError(
+                        f"Navigation failed: {json.dumps(result['error'])}"
+                    )
+                return ws_url
+
+
+async def cdp_list_tabs(session: aiohttp.ClientSession, host: str = CDP_HTTP) -> list[dict[str, Any]]:
+    async with session.get(f"{host}/json/list") as response:
         response.raise_for_status()
         return await response.json()
 
@@ -222,6 +381,169 @@ async def cdp_eval(ws_url: str, expression: str) -> Any:
                     return result["value"]
                 raise RuntimeError(json.dumps(payload, ensure_ascii=False))
     raise RuntimeError("CDP evaluate failed")
+
+
+async def _wait_for_page_tab(
+    session: aiohttp.ClientSession,
+    host: str | None = None,
+    *,
+    cdp_host: str = CDP_HTTP,
+    timeout: float = 15.0,
+    interval: float = 0.5,
+) -> dict[str, Any]:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        tabs = await cdp_list_tabs(session, host=cdp_host)
+        for tab in tabs:
+            if tab.get("type") != "page":
+                continue
+            if host is None or urlparse(str(tab.get("url", ""))).netloc == host:
+                return tab
+        await asyncio.sleep(interval)
+    if host is None:
+        raise RuntimeError("Timed out waiting for a page tab")
+    raise RuntimeError(f"Timed out waiting for tab on host {host}")
+
+
+@contextmanager
+def _cookie_probe_server() -> Any:
+    token = secrets.token_hex(12)
+    cookie_name = "skyscanner_probe_session"
+
+    class CookieProbeHandler(BaseHTTPRequestHandler):
+        def log_message(self, format: str, *args: Any) -> None:
+            return None
+
+        def do_GET(self) -> None:  # noqa: N802
+            if self.path.startswith("/set"):
+                payload = "cookie-set"
+                self.send_response(200)
+                self.send_header(
+                    "Set-Cookie",
+                    (
+                        f"{cookie_name}={token}; Max-Age=600; Path=/; "
+                        "SameSite=Lax"
+                    ),
+                )
+            elif self.path.startswith("/echo"):
+                payload = self.headers.get("Cookie", "")
+                self.send_response(200)
+            else:
+                payload = "not-found"
+                self.send_response(404)
+            self.send_header("Content-Type", "text/plain; charset=utf-8")
+            self.send_header("Content-Length", str(len(payload.encode("utf-8"))))
+            self.end_headers()
+            self.wfile.write(payload.encode("utf-8"))
+
+    port = _allocate_tcp_port()
+    server = ThreadingHTTPServer(("127.0.0.1", port), CookieProbeHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield {
+            "cookie_name": cookie_name,
+            "cookie_value": token,
+            "set_url": f"http://127.0.0.1:{port}/set",
+            "echo_url": f"http://127.0.0.1:{port}/echo",
+            "host": f"127.0.0.1:{port}",
+        }
+    finally:
+        server.shutdown()
+        thread.join(timeout=2.0)
+        server.server_close()
+
+
+async def _verify_browser_session_persistence_async(
+    browser_name: str,
+    binary: Path,
+    profile_dir: Path,
+    probe: dict[str, str],
+    *,
+    port: int = 9222,
+    settle_time: float = 2.0,
+) -> tuple[bool, str]:
+    process: subprocess.Popen[Any] | None = None
+    try:
+        process = _launch_browser_process(
+            browser_name,
+            binary,
+            profile_dir,
+            port=port,
+            start_url=probe["set_url"],
+        )
+        wait_for_cdp(port=port, timeout=15.0)
+        cdp_host = f"http://localhost:{port}"
+        timeout = aiohttp.ClientTimeout(total=20)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            first_tab = await _wait_for_page_tab(session, timeout=20.0, cdp_host=cdp_host)
+            first_tab_id = str(first_tab.get("id", ""))
+            if first_tab_id:
+                await cdp_navigate_tab(session, first_tab_id, probe["set_url"], cdp_host=cdp_host)
+            first_tab = await _wait_for_page_tab(session, probe["host"], timeout=20.0, cdp_host=cdp_host)
+            await asyncio.sleep(settle_time)
+            first_ws_url = str(first_tab.get("webSocketDebuggerUrl", ""))
+            if not first_ws_url:
+                raise RuntimeError("Initial probe tab missing webSocketDebuggerUrl")
+            first_cookie_text = str(await cdp_eval(first_ws_url, "document.cookie"))
+            expected_cookie = f"{probe['cookie_name']}={probe['cookie_value']}"
+            if expected_cookie not in first_cookie_text:
+                raise RuntimeError("Probe cookie was not set before restart")
+        _terminate_browser_process(process)
+        process = None
+        if not wait_for_cdp_shutdown(port=port, timeout=10.0):
+            raise RuntimeError("CDP port did not close after browser restart step")
+
+        process = _launch_browser_process(
+            browser_name,
+            binary,
+            profile_dir,
+            port=port,
+            start_url=probe["echo_url"],
+        )
+        wait_for_cdp(port=port, timeout=15.0)
+        timeout = aiohttp.ClientTimeout(total=20)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            second_tab = await _wait_for_page_tab(session, timeout=20.0, cdp_host=cdp_host)
+            second_tab_id = str(second_tab.get("id", ""))
+            if second_tab_id:
+                await cdp_navigate_tab(session, second_tab_id, probe["echo_url"], cdp_host=cdp_host)
+            second_tab = await _wait_for_page_tab(session, probe["host"], timeout=20.0, cdp_host=cdp_host)
+            await asyncio.sleep(settle_time)
+            second_ws_url = str(second_tab.get("webSocketDebuggerUrl", ""))
+            if not second_ws_url:
+                raise RuntimeError("Restarted probe tab missing webSocketDebuggerUrl")
+            second_cookie_text = str(await cdp_eval(second_ws_url, "document.cookie"))
+            expected_cookie = f"{probe['cookie_name']}={probe['cookie_value']}"
+            if expected_cookie not in second_cookie_text:
+                return (
+                    False,
+                    f"{browser_name.capitalize()} 重启后未保留 probe cookie",
+                )
+        return True, f"{browser_name.capitalize()} 重启后保留了 probe cookie"
+    finally:
+        if process is not None:
+            _terminate_browser_process(process)
+            wait_for_cdp_shutdown(port=port, timeout=10.0)
+
+
+def verify_browser_session_persistence(
+    preferred_browser: str | None = None,
+    *,
+    port: int | None = None,
+) -> tuple[bool, str]:
+    browser_name, binary, profile_dir = _select_browser_launch_target(preferred_browser)
+    selected_port = port or _allocate_tcp_port()
+    with _cookie_probe_server() as probe:
+        return asyncio.run(
+            _verify_browser_session_persistence_async(
+                browser_name,
+                binary,
+                profile_dir,
+                probe,
+                port=selected_port,
+            )
+        )
 
 
 def build_page_text_capture_expression(
@@ -295,6 +617,25 @@ def _get_matching_cdp_tabs(
     ]
 
 
+def _get_domain_host(region: RegionConfig) -> str:
+    """Return the host portion of a region's Skyscanner domain."""
+    return urlparse(region.domain).netloc
+
+
+def _any_tab_for_domain(
+    tabs: list[dict[str, Any]], region: RegionConfig
+) -> Optional[dict[str, Any]]:
+    """Return a tab belonging to the given region's domain (non-captcha, type=page)."""
+    allowed_hosts = REGION_HOST_ALIASES.get(region.code, {urlparse(region.domain).netloc})
+    for tab in tabs:
+        if tab.get("type") != "page":
+            continue
+        tab_host = urlparse(str(tab.get("url", ""))).netloc
+        if tab_host in allowed_hosts and "captcha" not in str(tab.get("url", "")).lower():
+            return tab
+    return None
+
+
 # ---------------------------------------------------------------------------
 # compare_via_pages — CDP page transport
 # ---------------------------------------------------------------------------
@@ -327,12 +668,30 @@ async def compare_via_pages(
             )
             for region in selected_regions
         }
+
+        # One tab per domain — navigate existing, only open new if needed
+        domain_tabs: dict[str, str] = {}  # domain_host -> tab_id
         existing_tabs = await cdp_list_tabs(session)
+
         for region in selected_regions:
             url = requested_urls[region.code]
-            if _get_matching_cdp_tabs(existing_tabs, region, url):
+            domain_host = _get_domain_host(region)
+
+            if domain_host in domain_tabs:
+                # Already have a tab for this domain, navigate it
+                await cdp_navigate_tab(session, domain_tabs[domain_host], url)
                 continue
-            await cdp_open_tab(session, url)
+
+            existing = _any_tab_for_domain(existing_tabs, region)
+            if existing:
+                tab_id = existing.get("id", "")
+                if tab_id:
+                    await cdp_navigate_tab(session, tab_id, url)
+                domain_tabs[domain_host] = tab_id
+            else:
+                new_tab = await cdp_open_tab(session, url)
+                tab_id = new_tab.get("id", "")
+                domain_tabs[domain_host] = tab_id
 
         await asyncio.sleep(args.page_wait)
         deadline = time.monotonic() + max(total_wait - args.page_wait, 10)
@@ -347,8 +706,10 @@ async def compare_via_pages(
             for region in pending_regions.values():
                 target_url = requested_urls[region.code]
                 expected_path = urlparse(target_url).path
-                candidates = _get_matching_cdp_tabs(tabs, region, target_url)
-                if not candidates:
+                domain_host = _get_domain_host(region)
+                domain_tab = _any_tab_for_domain(tabs, region)
+
+                if not domain_tab:
                     latest_quotes[region.code] = FlightQuote(
                         region=region.code,
                         domain=region.domain,
@@ -356,77 +717,59 @@ async def compare_via_pages(
                         currency=region.currency,
                         source_url=target_url,
                         status="page_missing",
-                        error="CDP 列表中未找到对应结果页",
+                        error="CDP tabs missing for domain",
                     )
                     if time.monotonic() < deadline:
                         next_pending[region.code] = region
                     continue
 
-                parsed_quote: Optional[FlightQuote] = None
-                last_error: Optional[FlightQuote] = None
-                last_page_text = ""
-                for page in candidates:
-                    ws_url = str(page.get("webSocketDebuggerUrl", ""))
-                    if not ws_url:
-                        last_error = FlightQuote(
-                            region=region.code,
-                            domain=region.domain,
-                            price=None,
-                            currency=region.currency,
-                            source_url=str(page.get("url", "")),
-                            status="page_missing_ws",
-                            error="结果页没有 webSocketDebuggerUrl",
-                        )
-                        continue
-
-                    payload = await cdp_eval(
-                        ws_url,
-                        build_page_text_capture_expression(),
-                    )
-                    quote = _quote_from_cdp_payload(
-                        region,
-                        payload,
-                        str(page.get("url", "")),
-                    )
-                    last_page_text = str(payload.get("text", ""))
-                    if quote.price is not None:
-                        parsed_quote = quote
-                        break
-                    last_error = quote
-
-                final_quote = (
-                    parsed_quote
-                    or last_error
-                    or FlightQuote(
+                ws_url = str(domain_tab.get("webSocketDebuggerUrl", ""))
+                if not ws_url:
+                    latest_quotes[region.code] = FlightQuote(
                         region=region.code,
                         domain=region.domain,
                         price=None,
                         currency=region.currency,
-                        source_url=build_search_url(
-                            region,
-                            args.origin,
-                            args.destination,
-                            args.date,
-                            return_date,
-                        ),
-                        status="page_parse_failed",
-                        error="页面正文未识别到 Best/Cheapest 价格",
+                        source_url=str(domain_tab.get("url", "")),
+                        status="page_missing_ws",
+                        error="No webSocketDebuggerUrl",
                     )
+                    if time.monotonic() < deadline:
+                        next_pending[region.code] = region
+                    continue
+
+                payload = await cdp_eval(
+                    ws_url,
+                    build_page_text_capture_expression(),
                 )
+                quote = _quote_from_cdp_payload(
+                    region,
+                    payload,
+                    str(domain_tab.get("url", "")),
+                )
+                page_text = str(payload.get("text", ""))
+
+                final_quote = quote or FlightQuote(
+                    region=region.code,
+                    domain=region.domain,
+                    price=None,
+                    currency=region.currency,
+                    source_url=target_url,
+                    status="page_parse_failed",
+                    error="No price found",
+                )
+
                 if persist_failures and final_quote.price is None:
                     persist_failure_log(
                         final_quote,
                         transport="page",
                         route_key=route_key,
-                        page_text=last_page_text,
-                        extra={"expected_path": expected_path},
+                        page_text=page_text,
+                        extra={"expected_path": expected_path, "domain_host": domain_host},
                     )
-                latest_quotes[region.code] = final_quote
 
-                if (
-                    latest_quotes[region.code].price is None
-                    and time.monotonic() < deadline
-                ):
+                latest_quotes[region.code] = final_quote
+                if final_quote.price is None and time.monotonic() < deadline:
                     next_pending[region.code] = region
 
             if not next_pending:

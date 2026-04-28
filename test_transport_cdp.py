@@ -8,9 +8,11 @@ from unittest.mock import MagicMock, patch
 from skyscanner_models import RegionConfig
 from transport_cdp import (
     _get_matching_cdp_tabs,
+    _verify_browser_session_persistence_async,
     _quote_from_cdp_payload,
     compare_via_pages,
     detect_cdp_version,
+    launch_browser_with_cdp,
 )
 
 
@@ -176,5 +178,91 @@ def test_compare_via_pages_reuses_existing_matching_tabs_without_opening_new_one
         assert len(quotes) == 1
         assert quotes[0].status == "page_text"
         assert quotes[0].cheapest_price == 3072.0
+
+    asyncio.run(run_case())
+
+
+def test_launch_browser_with_cdp_restarts_running_comet() -> None:
+    fake_process = MagicMock()
+    fake_process.poll.return_value = None
+
+    with (
+        patch(
+            "transport_cdp._select_browser_launch_target",
+            return_value=("comet", MagicMock(), MagicMock()),
+        ),
+        patch("transport_cdp._comet_is_running", return_value=True),
+        patch("transport_cdp._kill_comet") as kill_comet,
+        patch("transport_cdp.subprocess.Popen", return_value=fake_process),
+    ):
+        message = launch_browser_with_cdp(preferred_browser="comet")
+
+    kill_comet.assert_called_once()
+    assert "已自动启动 Comet" in message
+
+
+def test_verify_browser_session_persistence_async_restarts_browser_and_confirms_cookie() -> None:
+    probe = {
+        "cookie_name": "skyscanner_probe_session",
+        "cookie_value": "token-123",
+        "set_url": "http://127.0.0.1:43111/set",
+        "echo_url": "http://127.0.0.1:43111/echo",
+        "host": "127.0.0.1:43111",
+    }
+    tab = {
+        "type": "page",
+        "id": "probe-tab",
+        "url": probe["echo_url"],
+        "webSocketDebuggerUrl": "ws://probe",
+    }
+
+    class FakeSession:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return None
+
+    async def run_case() -> None:
+        first_process = MagicMock()
+        first_process.poll.return_value = None
+        second_process = MagicMock()
+        second_process.poll.return_value = None
+
+        with (
+            patch(
+                "transport_cdp._launch_browser_process",
+                side_effect=[first_process, second_process],
+            ),
+            patch(
+                "transport_cdp.wait_for_cdp",
+                return_value={"Browser": "Edg/146.0"},
+            ),
+            patch("transport_cdp.wait_for_cdp_shutdown", return_value=True),
+            patch("transport_cdp._terminate_browser_process") as terminate_process,
+            patch("transport_cdp.aiohttp.ClientSession", return_value=FakeSession()),
+            patch("transport_cdp.cdp_navigate_tab"),
+            patch(
+                "transport_cdp._wait_for_page_tab",
+                side_effect=[tab, tab, tab, tab],
+            ),
+            patch(
+                "transport_cdp.cdp_eval",
+                side_effect=[
+                    "skyscanner_probe_session=token-123",
+                    "skyscanner_probe_session=token-123",
+                ],
+            ),
+        ):
+            ok, message = await _verify_browser_session_persistence_async(
+                "edge",
+                MagicMock(),
+                MagicMock(),
+                probe,
+            )
+
+        assert ok is True
+        assert "保留了 probe cookie" in message
+        assert terminate_process.call_count == 2
 
     asyncio.run(run_case())

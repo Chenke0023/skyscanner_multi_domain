@@ -62,6 +62,7 @@ from transport_cdp import (  # noqa: F401
     ensure_cdp_ready,
     launch_browser_with_cdp,
     prune_browser_profile,
+    verify_browser_session_persistence,
     wait_for_cdp,
 )
 from transport_scrapling import (  # noqa: F401
@@ -663,7 +664,13 @@ def execute_neo_request(
 # --- PLACEHOLDER_DOCTOR ---
 
 
-def print_doctor(neo: NeoCli, capture_file: Optional[Path]) -> None:
+def print_doctor(
+    neo: NeoCli,
+    capture_file: Optional[Path],
+    *,
+    verify_session_persistence: bool = False,
+    persistence_browser: Optional[str] = None,
+) -> None:
     browsers = detect_browsers()
     cdp_info = detect_cdp_version()
     extension_path = neo.project_root / "vendor" / "neo" / "extension-dist"
@@ -686,6 +693,14 @@ def print_doctor(neo: NeoCli, capture_file: Optional[Path]) -> None:
     print(f"Neo 扩展目录: {'存在' if extension_path.exists() else '不存在'}")
     if capture_file:
         print(f"Capture 文件: {'存在' if capture_file.exists() else '不存在'}")
+    if verify_session_persistence:
+        try:
+            ok, message = verify_browser_session_persistence(
+                persistence_browser,
+            )
+            print(f"Session 持久化: {'通过' if ok else '失败'} ({message})")
+        except Exception as exc:
+            print(f"Session 持久化: 失败 ({exc})")
 
     print("\n建议流程:")
     print("1. 在 Edge 打开 edge://extensions 并加载 Neo 扩展目录")
