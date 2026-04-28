@@ -355,32 +355,39 @@ async def cdp_list_tabs(session: aiohttp.ClientSession, host: str = CDP_HTTP) ->
         return await response.json()
 
 
-async def cdp_eval(ws_url: str, expression: str) -> Any:
-    timeout = aiohttp.ClientTimeout(total=20)
-    async with aiohttp.ClientSession(timeout=timeout) as session:
-        async with session.ws_connect(ws_url) as ws:
-            await ws.send_json(
-                {
-                    "id": 1,
-                    "method": "Runtime.evaluate",
-                    "params": {
-                        "expression": expression,
-                        "returnByValue": True,
-                        "awaitPromise": True,
-                    },
-                }
-            )
-            async for message in ws:
-                if message.type != aiohttp.WSMsgType.TEXT:
-                    continue
-                payload = json.loads(message.data)
-                if payload.get("id") != 1:
-                    continue
-                result = payload.get("result", {}).get("result", {})
-                if "value" in result:
-                    return result["value"]
-                raise RuntimeError(json.dumps(payload, ensure_ascii=False))
-    raise RuntimeError("CDP evaluate failed")
+async def cdp_eval(ws_url: str, expression: str, *, max_retries: int = 2) -> Any:
+    last_error: Exception | None = None
+    for attempt in range(max_retries + 1):
+        try:
+            timeout = aiohttp.ClientTimeout(total=20)
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.ws_connect(ws_url) as ws:
+                    await ws.send_json(
+                        {
+                            "id": 1,
+                            "method": "Runtime.evaluate",
+                            "params": {
+                                "expression": expression,
+                                "returnByValue": True,
+                                "awaitPromise": True,
+                            },
+                        }
+                    )
+                    async for message in ws:
+                        if message.type != aiohttp.WSMsgType.TEXT:
+                            continue
+                        payload = json.loads(message.data)
+                        if payload.get("id") != 1:
+                            continue
+                        result = payload.get("result", {}).get("result", {})
+                        if "value" in result:
+                            return result["value"]
+                        raise RuntimeError(json.dumps(payload, ensure_ascii=False))
+        except Exception as exc:  # noqa: BLE001
+            last_error = exc
+            if attempt < max_retries:
+                await asyncio.sleep(1.0 * (attempt + 1))
+    raise RuntimeError(f"CDP evaluate failed after {max_retries + 1} attempts: {last_error}")
 
 
 async def _wait_for_page_tab(
@@ -738,10 +745,24 @@ async def compare_via_pages(
                         next_pending[region.code] = region
                     continue
 
-                payload = await cdp_eval(
-                    ws_url,
-                    build_page_text_capture_expression(),
-                )
+                try:
+                    payload = await cdp_eval(
+                        ws_url,
+                        build_page_text_capture_expression(),
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    latest_quotes[region.code] = FlightQuote(
+                        region=region.code,
+                        domain=region.domain,
+                        price=None,
+                        currency=region.currency,
+                        source_url=str(domain_tab.get("url", "")),
+                        status="page_eval_error",
+                        error=f"CDP eval error: {exc}",
+                    )
+                    if time.monotonic() < deadline:
+                        next_pending[region.code] = region
+                    continue
                 quote = _quote_from_cdp_payload(
                     region,
                     payload,
