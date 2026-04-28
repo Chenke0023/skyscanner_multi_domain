@@ -707,7 +707,7 @@ async def compare_via_scrapling(
                 region=region.code,
                 transport="scrapling",
                 attempt_index=0,
-                source_kind=probe_quote.source_kind or probe_source,
+                source_kind=getattr(probe_quote, "source_kind", None) or probe_source,
                 used_cdp_cookies=probe_source == "cdp_existing_page",
                 used_profile_dir=probe_source == "playwright",
                 wait_ms=timeout_ms,

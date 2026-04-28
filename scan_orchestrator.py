@@ -7,23 +7,97 @@ import inspect
 import json
 import re
 from datetime import datetime
+from enum import Enum
 from pathlib import Path
-from typing import Any, Awaitable, Callable, Optional, Union
+from typing import Any, Awaitable, Callable, Literal, Optional, Union
 
 from app_paths import get_failure_log_file
 from skyscanner_models import FlightQuote, RegionConfig
 from skyscanner_regions import REGIONS, get_selected_regions
 
 FAILURE_LOG_TEXT_LIMIT = 12000
-SCRAPLING_FALLBACK_STATUSES = {
-    "page_challenge",
-    "px_challenge",
-    "page_loading",
-    "page_parse_failed",
-    "scrapling_failed",
-    "scrapling_parse_failed",
-    "captcha_solve_failed",
+
+# ── FailureClass taxonomy ─────────────────────────────────────────────────────
+
+FailureClass = Literal[
+    "network",         # transport-level error (timeout, DNS, connection refused)
+    "loading",         # page still rendering, price not yet visible
+    "challenge_px",   # PerimeterX captcha — stop auto-retry, mark manual
+    "challenge_cf",    # Cloudflare challenge — longer wait / browser session
+    "challenge_other", # reCAPTCHA / hCaptcha / Turnstile — captcha solver
+    "parse",           # page visible but price not found in parser
+    "empty_shell",     # page body nearly empty / near-blank shell
+    "browser_missing", # CDP transport: no browser tab for domain
+    "transport_error", # opencli / page eval internal error
+    "other",           # everything else
+]
+
+
+class FailureAction(Enum):
+    NONE = "none"           # accept failure, stop
+    RETRY_SAME = "retry_same"       # retry with same transport, backoff
+    RETRY_BROWSER = "retry_browser"   # switch to CDP/browser
+    WAIT_RENDER = "wait_render"   # retry same transport with longer wait
+    MANUAL_SESSION = "manual_session"  # mark needs human verification
+    SKIP = "skip"           # skip silently (already handled elsewhere)
+
+
+_STATUS_TO_CLASS: dict[str, FailureClass] = {
+    # network
+    "scrapling_failed":      "network",
+    "opencli_error":         "network",
+    "opencli_failed":        "network",
+    "captcha_solve_failed":  "transport_error",
+    # loading
+    "page_loading":          "loading",
+    "opencli_timeout":       "loading",
+    # challenge
+    "px_challenge":          "challenge_px",
+    "page_challenge":        "challenge_cf",
+    "scrapling_unavailable": "transport_error",
+    # parse
+    "page_parse_failed":     "parse",
+    "scrapling_parse_failed": "parse",
+    # shell
+    "page_missing":          "browser_missing",
+    "page_missing_ws":       "browser_missing",
+    "page_eval_error":       "transport_error",
 }
+
+
+def classify_failure(status: str) -> FailureClass:
+    return _STATUS_TO_CLASS.get(status, "other")
+
+
+def failure_action(failure_class: FailureClass) -> FailureAction:
+    return {
+        "network":         FailureAction.RETRY_BROWSER,
+        "loading":         FailureAction.WAIT_RENDER,
+        "challenge_px":    FailureAction.MANUAL_SESSION,
+        "challenge_cf":    FailureAction.RETRY_BROWSER,
+        "challenge_other": FailureAction.RETRY_SAME,
+        "parse":           FailureAction.RETRY_BROWSER,
+        "empty_shell":     FailureAction.RETRY_BROWSER,
+        "browser_missing": FailureAction.NONE,
+        "transport_error": FailureAction.RETRY_BROWSER,
+        "other":           FailureAction.NONE,
+    }.get(failure_class, FailureAction.NONE)
+
+
+def can_fallback_to_browser(status: str) -> bool:
+    """Return True if this status should trigger browser fallback."""
+    cls = classify_failure(status)
+    action = failure_action(cls)
+    return action in {FailureAction.RETRY_BROWSER, FailureAction.WAIT_RENDER}
+
+
+# Legacy alias — keep for backward compatibility with tests/imports
+SCRAPLING_FALLBACK_STATUSES: set[str] = {
+    status
+    for status, cls in _STATUS_TO_CLASS.items()
+    if failure_action(cls) in {FailureAction.RETRY_BROWSER, FailureAction.WAIT_RENDER}
+}
+
 ScanProgressCallback = Callable[[dict[str, Any]], Union[Awaitable[None], None]]
 
 
@@ -124,6 +198,12 @@ def _persist_failure_log(
         except Exception:
             pass
 
+    # Add failure class to extra for richer failure logs
+    failure_class = classify_failure(quote.status)
+    merged_extra.setdefault("failure_class", failure_class)
+    action = failure_action(failure_class)
+    merged_extra.setdefault("failure_action", action.value)
+
     sections = [
         f"timestamp: {datetime.now().isoformat(timespec='seconds')}",
         f"transport: {transport}",
@@ -131,6 +211,8 @@ def _persist_failure_log(
         f"region: {quote.region}",
         f"domain: {quote.domain}",
         f"status: {quote.status}",
+        f"failure_class: {failure_class}",
+        f"failure_action: {action.value}",
         f"error: {quote.error or '-'}",
         f"source_url: {quote.source_url}",
     ]
@@ -165,7 +247,8 @@ def print_quotes(quotes: list[FlightQuote]) -> None:
     if failures:
         print("\n失败详情:")
         for quote in failures:
-            print(f"[{quote.region}] {quote.error or quote.status}")
+            fc = classify_failure(quote.status)
+            print(f"[{quote.region}] {quote.error or quote.status} (class={fc})")
 
 
 def quotes_to_dicts(quotes: list[FlightQuote]) -> list[dict[str, Any]]:
@@ -181,6 +264,7 @@ def quotes_to_dicts(quotes: list[FlightQuote]) -> list[dict[str, Any]]:
             "currency": quote.currency,
             "source_url": quote.source_url,
             "status": quote.status,
+            "failure_class": classify_failure(quote.status),
             "price_path": quote.price_path,
             "best_price": quote.best_price,
             "best_price_path": quote.best_price_path,
@@ -307,10 +391,11 @@ async def run_page_scan(
             region_concurrency=max(int(region_concurrency), 1),
             run_id=run_id,
         )
+        # Filter by failure_class action — only browser-fallback-worthy
         fallback_regions = [
             region
             for region, quote in zip(batch_regions, quotes)
-            if quote.price is None and quote.status in SCRAPLING_FALLBACK_STATUSES
+            if quote.price is None and can_fallback_to_browser(quote.status)
         ]
         if fallback_regions and enable_browser_fallback:
             has_scrapling_success = any(quote.price is not None for quote in quotes)
@@ -435,14 +520,14 @@ async def run_page_scan(
                     used_cached_preview=preview_record is not None,
                 )
 
-                # Per-batch browser fallback: retry failed regions immediately
+                # Per-batch browser fallback: retry failed regions via FailureClass
                 if allow_browser_fallback:
                     batch_failed = [
                         region for region in batch_regions
                         if any(
                             quote.region == region.code
                             and quote.price is None
-                            and quote.status in SCRAPLING_FALLBACK_STATUSES
+                            and can_fallback_to_browser(quote.status)
                             for quote in batch_quotes
                         )
                     ]
