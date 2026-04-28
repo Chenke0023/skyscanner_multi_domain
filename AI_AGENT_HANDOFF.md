@@ -146,10 +146,9 @@ The `page` transport remains in the codebase as a compatibility fallback and deb
 
 ### Next implementation target (current)
 
-- [ ] Merge `opencli-integration` into `main` (1 commit ahead, clean merge)
-- [ ] Reconcile local `main` with `origin/main` (5 commits ahead)
+- [x] Merge `opencli-integration` into `main` (already merged)
+- [x] Update README.md with session persistence verification commands
 - [ ] Investigate Edge session persistence failure (profile locking? different flags needed?)
-- [ ] Update README.md with session persistence verification commands
 
 ### Previous future items (deferred)
 
