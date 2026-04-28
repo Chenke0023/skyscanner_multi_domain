@@ -9,6 +9,7 @@ import subprocess
 import time
 from typing import Any, Optional
 
+from attempt_trace import emit_trace
 from skyscanner_models import FlightQuote, RegionConfig
 from skyscanner_page_parser import extract_page_quote
 
@@ -122,6 +123,7 @@ async def compare_via_opencli(
     on_region_start: Any = None,
     on_region_complete: Any = None,
     region_concurrency: int = 3,
+    run_id: str = "",
 ) -> list[FlightQuote]:
     """Fetch flight quotes using opencli browser automation."""
     if build_search_url is None:
@@ -221,5 +223,26 @@ async def compare_via_opencli(
         q = latest_quotes.get(region.code)
         if q is not None:
             ordered_quotes.append(q)
+
+    for quote in ordered_quotes:
+        emit_trace(
+            run_id=run_id,
+            route_key=route_key,
+            region=quote.region,
+            transport="opencli",
+            attempt_index=0,
+            source_kind="opencli",
+            used_cdp_cookies=False,
+            used_profile_dir=False,
+            wait_ms=max(args.page_wait, 3) * 1000,
+            load_dom=False,
+            network_idle=False,
+            page_text_len=len(page_text),
+            page_url=quote.source_url,
+            status=quote.status,
+            failure_reason=quote.error,
+            price=quote.price,
+            currency=quote.currency,
+        )
 
     return ordered_quotes

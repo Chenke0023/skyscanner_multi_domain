@@ -17,6 +17,7 @@ import aiohttp
 from bs4 import BeautifulSoup
 
 from app_paths import get_browser_profile_dir
+from attempt_trace import emit_trace
 from skyscanner_models import FlightQuote, RegionConfig
 from skyscanner_page_parser import extract_page_quote
 from skyscanner_regions import REGION_HOST_ALIASES
@@ -641,6 +642,7 @@ async def compare_via_scrapling(
     build_search_url: Callable[..., str] | None = None,
     persist_failure_log: Callable[..., FlightQuote] | None = None,
     region_concurrency: int = 1,
+    run_id: str = "",
 ) -> list[FlightQuote]:
     # Lazy import to avoid hard dependency at module level
     if build_search_url is None:
@@ -699,6 +701,25 @@ async def compare_via_scrapling(
                 )
             if on_region_complete is not None:
                 on_region_complete(region, probe_quote)
+            emit_trace(
+                run_id=run_id,
+                route_key=route_key,
+                region=region.code,
+                transport="scrapling",
+                attempt_index=0,
+                source_kind=probe_quote.source_kind or probe_source,
+                used_cdp_cookies=probe_source == "cdp_existing_page",
+                used_profile_dir=probe_source == "playwright",
+                wait_ms=timeout_ms,
+                load_dom=False,
+                network_idle=False,
+                page_text_len=len(probe_page_text),
+                page_url=url,
+                status=probe_quote.status,
+                failure_reason=probe_quote.error,
+                price=probe_quote.price,
+                currency=probe_quote.currency,
+            )
             return probe_quote
 
         try:
@@ -984,6 +1005,26 @@ async def compare_via_scrapling(
 
         if on_region_complete is not None:
             on_region_complete(region, latest_quote)
+
+        emit_trace(
+            run_id=run_id,
+            route_key=route_key,
+            region=region.code,
+            transport="scrapling",
+            attempt_index=0,
+            source_kind=latest_quote.source_kind or "unknown",
+            used_cdp_cookies=bool(latest_error == ""),
+            used_profile_dir=latest_error != "",
+            wait_ms=wait_ms,
+            load_dom=False,
+            network_idle=False,
+            page_text_len=len(page_text),
+            page_url=url,
+            status=latest_quote.status,
+            failure_reason=latest_quote.error,
+            price=latest_quote.price,
+            currency=latest_quote.currency,
+        )
         return latest_quote
 
     concurrency = max(int(region_concurrency), 1)
