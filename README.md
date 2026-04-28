@@ -211,6 +211,33 @@ python3 -m pytest -q test_skyscanner_neo.py
 python3 -m pytest -q test_date_window.py
 ```
 
+验证浏览器会话持久化：
+
+```bash
+# 验证 Comet 浏览器会话持久化（推荐生产浏览器）
+python3 cli.py doctor --verify-session-persistence --persistence-browser comet
+
+# 验证 Edge 浏览器会话持久化
+python3 cli.py doctor --verify-session-persistence --persistence-browser edge
+
+# 验证 Chrome 浏览器会话持久化
+python3 cli.py doctor --verify-session-persistence --persistence-browser chrome
+```
+
+会话持久化验证流程：
+
+1. 启动本地 HTTP 探测服务器，设置一个唯一 cookie
+2. 启动指定浏览器，访问探测服务器设置 cookie
+3. 通过 CDP 读取并验证 cookie
+4. 关闭浏览器，等待 CDP 端口完全释放
+5. 使用相同 profile 重启浏览器，访问探测服务器
+6. 验证之前的 cookie 是否仍然存在
+
+验证结果（截至 2026-04-28）：
+
+- **Comet**: ✅ 通过 — 会话在重启后保持
+- **Edge**: ❌ 失败 — 会话在重启后丢失（可能需要额外的启动参数或 profile 配置）
+
 重新构建 macOS App：
 
 ```bash
