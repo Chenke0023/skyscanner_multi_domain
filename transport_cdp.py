@@ -24,6 +24,7 @@ from urllib.parse import urlparse
 import aiohttp
 
 from app_paths import get_browser_profile_dir
+from attempt_trace import emit_trace
 from skyscanner_models import FlightQuote, RegionConfig
 from skyscanner_page_parser import (
     PAGE_TEXT_CAPTURE_CONTEXT,
@@ -654,6 +655,7 @@ async def compare_via_pages(
     persist_failures: bool = True,
     build_search_url: Any = None,
     persist_failure_log: Any = None,
+    run_id: str = "",
 ) -> list[FlightQuote]:
     if build_search_url is None:
         from scan_orchestrator import build_search_url as _bsu
@@ -803,4 +805,26 @@ async def compare_via_pages(
         quote = latest_quotes.get(region.code)
         if quote is not None:
             ordered_quotes.append(quote)
+
+    for quote in ordered_quotes:
+        emit_trace(
+            run_id=run_id,
+            route_key=route_key,
+            region=quote.region,
+            transport="page",
+            attempt_index=0,
+            source_kind=quote.source_kind or "browser_fallback",
+            used_cdp_cookies=False,
+            used_profile_dir=False,
+            wait_ms=max(args.timeout, args.page_wait + 60, 45) * 1000,
+            load_dom=False,
+            network_idle=False,
+            page_text_len=len(page_text) if "page_text" in dir() else 0,
+            page_url=quote.source_url,
+            status=quote.status,
+            failure_reason=quote.error,
+            price=quote.price,
+            currency=quote.currency,
+        )
+
     return ordered_quotes

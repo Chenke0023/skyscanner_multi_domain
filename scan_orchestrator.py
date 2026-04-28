@@ -218,6 +218,9 @@ async def run_page_scan(
     from transport_opencli import compare_via_opencli
     from date_window import format_trip_date_label
     from scan_history import ScanHistoryStore, get_quotes_for_trip_label, select_preview_region_batches
+    from skyscanner_models import new_run_id
+
+    run_id = new_run_id()
 
     normalized_rerun_scope = (rerun_scope or "all").lower()
     normalized_scan_mode = (scan_mode or "full_scan").lower()
@@ -302,6 +305,7 @@ async def run_page_scan(
             on_region_start=on_region_start,
             on_region_complete=on_region_complete,
             region_concurrency=max(int(region_concurrency), 1),
+            run_id=run_id,
         )
         fallback_regions = [
             region
@@ -319,7 +323,7 @@ async def run_page_scan(
                         )
                     )
                 fallback_quotes = await compare_via_pages(
-                    args, fallback_regions, persist_failures=False
+                    args, fallback_regions, persist_failures=False, run_id=run_id
                 )
                 fallback_by_region = {
                     quote.region: quote for quote in fallback_quotes if quote is not None
@@ -335,7 +339,7 @@ async def run_page_scan(
         return quotes
 
     if normalized_transport == "page":
-        quotes = await compare_via_pages(args, selected_regions)
+        quotes = await compare_via_pages(args, selected_regions, run_id=run_id)
         await emit_progress(
             stage="final",
             quotes=quotes,
@@ -475,6 +479,7 @@ async def run_page_scan(
             on_region_start=on_region_start,
             on_region_complete=on_region_complete,
             region_concurrency=max(int(region_concurrency), 1),
+            run_id=run_id,
         )
         await emit_progress(
             stage="final",
