@@ -14,8 +14,8 @@
 - 地区配置：`skyscanner_regions.py`
 - 页面解析：`skyscanner_page_parser.py`
 - 数据模型：`skyscanner_models.py`
-- App 构建脚本：`scripts/build_macos_app.sh`
-- 独立桌面版构建脚本：`scripts/build_macos_standalone_app.sh`
+- App 构建脚本：`scripts/build_macos_standalone_app.sh`
+- 图标生成脚本：`scripts/generate_icon.py`
 - Neo 依赖：`vendor/neo`
 - 交接文档：`AI_AGENT_HANDOFF.md`
 
@@ -54,6 +54,21 @@
 
 ## 启动方式
 
+### macOS App（推荐）
+
+构建独立桌面版：
+
+```bash
+pip install pyinstaller
+./scripts/build_macos_standalone_app.sh
+```
+
+产物位于 `dist/Skyscanner 多市场比价.app`，双击即可运行。
+
+App 自包含 Python 运行时与所有依赖，可独立分发，无需安装 Python 或依赖包。
+
+### 源码运行（开发调试）
+
 GUI：
 
 ```bash
@@ -80,23 +95,6 @@ python3 cli.py page -o 北京 -d 香港 -t 2026-05-20 --return-date 2026-05-25
 python3 cli.py page -o 北京 --destination-country 乌兹别克斯坦 -t 2026-05-20
 python3 cli.py page --origin-country 中国 --destination-country 乌兹别克斯坦 -t 2026-05-20 --country-airport-limit 8
 ```
-
-如果已经构建过 macOS App，也可以双击打开 `Skyscanner 多市场比价.app`。
-
-当前有两种 macOS 打包方式：
-
-- 轻量启动器：`./scripts/build_macos_app.sh`
-  - 只生成一个 `.app` 外壳
-  - 仍依赖当前仓库目录和本机 `python3`
-  - 适合开发机本地自用
-- 独立桌面版：`./scripts/build_macos_standalone_app.sh`
-  - 通过 PyInstaller 打出可单独分发的 `.app`
-  - 内含 Python 解释器与项目代码，不再依赖仓库路径
-  - 首次构建前需要：`python3 -m pip install pyinstaller`
-
-独立桌面版产物位于：
-
-- `dist/Skyscanner 多市场比价.app`
 
 ## 当前功能
 
@@ -241,12 +239,10 @@ python3 cli.py doctor --verify-session-persistence --persistence-browser chrome
 重新构建 macOS App：
 
 ```bash
-./scripts/build_macos_app.sh
-```
+# 生成应用图标（首次构建前执行一次）
+python3 scripts/generate_icon.py
 
-构建独立可分发版：
-
-```bash
+# 构建独立桌面版
 python3 -m pip install pyinstaller
 ./scripts/build_macos_standalone_app.sh
 ```

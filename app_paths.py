@@ -38,7 +38,26 @@ BROWSER_PROFILES_DIR = RUNTIME_DIR / "browser-profiles"
 LEGACY_BROWSER_PROFILE_ROOTS = (
     SOURCE_ROOT / "outputs",
     SOURCE_ROOT / "data" / "browser-profiles",
+    SOURCE_ROOT / "runtime" / "browser-profiles",
 )
+
+# ── Look for build-time source root in manifest ──────────────────
+def _load_build_source_root() -> Path | None:
+    manifest_path = SOURCE_ROOT / "data" / "build_manifest.json"
+    if not manifest_path.exists():
+        return None
+    try:
+        import json
+        data = json.loads(manifest_path.read_text(encoding="utf-8"))
+        root = str(data.get("source_root", "")).strip()
+        if root:
+            return Path(root)
+    except Exception:
+        pass
+    return None
+
+
+_BUILD_SOURCE_ROOT = _load_build_source_root()
 
 
 def ensure_runtime_dirs() -> None:
@@ -85,7 +104,11 @@ def get_browser_profile_dir(browser_name: str) -> Path:
     if target.exists():
         return target
 
-    for legacy_root in LEGACY_BROWSER_PROFILE_ROOTS:
+    extra_roots: list[Path] = list(LEGACY_BROWSER_PROFILE_ROOTS)
+    if _BUILD_SOURCE_ROOT is not None and _BUILD_SOURCE_ROOT != SOURCE_ROOT:
+        extra_roots.append(_BUILD_SOURCE_ROOT / "runtime" / "browser-profiles")
+
+    for legacy_root in extra_roots:
         legacy = legacy_root / f"{browser_name}-cdp-profile"
         if not legacy.exists():
             continue

@@ -8,6 +8,7 @@ __pycache__/
 logs/
 data/browser-profiles/
 outputs/reports/
+data/build_manifest.json
 
 # Legacy runtime files
 data/fx_rates_cache.json

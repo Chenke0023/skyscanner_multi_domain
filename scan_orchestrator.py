@@ -402,15 +402,12 @@ async def run_page_scan(
                 )
 
             merged_quotes: list[FlightQuote] = []
-            live_success_count = 0
 
             async def on_region_complete_wrapper(region: RegionConfig, quote: FlightQuote) -> None:
-                nonlocal merged_quotes, live_success_count
+                nonlocal merged_quotes
                 if on_region_complete is not None:
                     on_region_complete(region, quote)
                 merged_quotes = merge_quotes_by_region(merged_quotes, [quote])
-                if quote.price is not None:
-                    live_success_count += 1
                 await emit_progress(
                     stage="region_update",
                     quotes=list(merged_quotes),
@@ -427,9 +424,6 @@ async def run_page_scan(
                     on_region_complete=on_region_complete_wrapper,
                 )
                 merged_quotes = merge_quotes_by_region(merged_quotes, batch_quotes)
-                live_success_count += sum(
-                    1 for quote in batch_quotes if quote.price is not None
-                )
                 await emit_progress(
                     stage="quick_live" if batch_index == 0 else "background_live",
                     quotes=merged_quotes,
@@ -437,29 +431,29 @@ async def run_page_scan(
                     used_cached_preview=preview_record is not None,
                 )
 
-            if allow_browser_fallback and live_success_count == 0:
-                fallback_regions = [
-                    region
-                    for region in selected_regions
-                    if any(
-                        quote.region == region.code
-                        and quote.price is None
-                        and quote.status in SCRAPLING_FALLBACK_STATUSES
-                        for quote in merged_quotes
-                    )
-                ]
-                if fallback_regions:
-                    fallback_quotes = await run_scrapling_pass(
-                        fallback_regions,
-                        enable_browser_fallback=True,
-                    )
-                    merged_quotes = merge_quotes_by_region(merged_quotes, fallback_quotes)
-                    await emit_progress(
-                        stage="background_live",
-                        quotes=merged_quotes,
-                        completed_regions=[quote.region for quote in merged_quotes],
-                        used_cached_preview=preview_record is not None,
-                    )
+                # Per-batch browser fallback: retry failed regions immediately
+                if allow_browser_fallback:
+                    batch_failed = [
+                        region for region in batch_regions
+                        if any(
+                            quote.region == region.code
+                            and quote.price is None
+                            and quote.status in SCRAPLING_FALLBACK_STATUSES
+                            for quote in batch_quotes
+                        )
+                    ]
+                    if batch_failed:
+                        batch_fallback_quotes = await run_scrapling_pass(
+                            batch_failed,
+                            enable_browser_fallback=True,
+                        )
+                        merged_quotes = merge_quotes_by_region(merged_quotes, batch_fallback_quotes)
+                        await emit_progress(
+                            stage="background_live",
+                            quotes=merged_quotes,
+                            completed_regions=[quote.region for quote in merged_quotes],
+                            used_cached_preview=preview_record is not None,
+                        )
             quotes = merged_quotes
         else:
             quotes = await run_scrapling_pass(
@@ -485,7 +479,7 @@ async def run_page_scan(
         await emit_progress(
             stage="final",
             quotes=quotes,
-            completed_regions=[quote.region for quote in quotes],
+            completed_regions=[region.code for region in selected_regions],
             is_final=True,
         )
     else:
