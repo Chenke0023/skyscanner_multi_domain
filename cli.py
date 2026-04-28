@@ -1623,6 +1623,16 @@ def build_parser() -> argparse.ArgumentParser:
 
     doctor = subparsers.add_parser("doctor", help="检查浏览器/CDP/Neo 环境")
     doctor.add_argument("--capture-file", help="可选：检查某个 Neo export 文件是否存在")
+    doctor.add_argument(
+        "--verify-session-persistence",
+        action="store_true",
+        help="实际启动并重启浏览器，验证同一 profile 的 cookie 是否保留",
+    )
+    doctor.add_argument(
+        "--persistence-browser",
+        choices=["comet", "edge", "chrome"],
+        help="指定要验证 session 持久化的浏览器",
+    )
 
     replay = subparsers.add_parser(
         "replay-failures",
@@ -1734,7 +1744,12 @@ def main() -> int:
 
     if args.command == "doctor":
         neo = NeoCli(cli.project_root)
-        print_doctor(neo, Path(args.capture_file) if args.capture_file else None)
+        print_doctor(
+            neo,
+            Path(args.capture_file) if args.capture_file else None,
+            verify_session_persistence=args.verify_session_persistence,
+            persistence_browser=args.persistence_browser,
+        )
         cdp_info = detect_cdp_version()
         if cdp_info:
             print(f"\n当前 CDP 浏览器: {cdp_info.get('Browser', 'unknown')}")
