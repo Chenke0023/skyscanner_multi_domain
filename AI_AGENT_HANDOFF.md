@@ -1,12 +1,24 @@
 # AI Agent Handoff
 
-Last updated: 2026-04-09
+Last updated: 2026-04-28
 Project root: `skyscanner_multi_domain`
 
-## 0. Current Development Status (branch: `main`)
+## 0. Current Development Status (branch: `opencli-integration`)
 
 ### Completed changes (latest)
 
+- CDP transport refactoring and session-persistence verification (`opencli-integration`, commit `15afe58`):
+  - Refactored `launch_browser_with_cdp` into focused helpers: `_select_browser_launch_target`, `_launch_browser_process`, `_terminate_browser_process`, `_allocate_tcp_port`
+  - Added `wait_for_cdp_shutdown` to confirm CDP port is fully released before restarting
+  - Added `_wait_for_page_tab` for CDP tab discovery with timeout
+  - Added `_cookie_probe_server` — a local HTTP server that sets/echoes a probe cookie
+  - Added `verify_browser_session_persistence` — real browser start → set cookie → kill → restart → check cookie
+  - CLI: `doctor --verify-session-persistence --persistence-browser edge|comet|chrome`
+  - Fixed bug: `cdp_list_tabs`, `cdp_navigate_tab`, `_wait_for_page_tab` were hardcoded to port 9222; now accept `cdp_host` parameter
+  - Session persistence results:
+    - **Comet**: ✅ Passed — retains probe cookie across restart
+    - **Edge**: ❌ Failed — probe cookie lost after restart
+  - Tests: 7/7 pass in `test_transport_cdp.py`
 - Added trip-mode support across CLI and GUI:
   - one-way and round-trip flows share the same scan pipeline
   - round-trip date windows preserve stay length
@@ -33,9 +45,11 @@ Project root: `skyscanner_multi_domain`
   - `目的地按国家`
   - mixed location/country combinations without forcing both endpoints into country mode
 - Added regression coverage in `test_location_resolver.py` and new `test_cli.py`
-- Repository housekeeping completed:
-  - current active local branch set is only `main`
-  - current active remote branch set is only `origin/main`
+- Repository housekeeping status:
+  - Active branches: `main`, `opencli-integration`
+  - `opencli-integration` is 1 commit ahead of local `main` (`15afe58`)
+  - Local `main` is 5 commits ahead of `origin/main`
+  - `opencli-integration` has uncommitted working-tree changes (cdp_host fix, session persistence)
 
 - Refactored `skyscanner_neo.py` (1664 lines) into four focused modules:
   - `transport_scrapling.py` (330 lines): Scrapling fetch, captcha detection, `compare_via_scrapling`
@@ -46,7 +60,7 @@ Project root: `skyscanner_multi_domain`
 - Test mock targets updated from `skyscanner_neo.*` to actual source modules (`transport_cdp.*`, `transport_scrapling.*`)
 - All 15 tests pass; `cli.py` and `gui.py` imports verified
 - The refactor branch has already been merged into `main`
-- Historical local/remote feature branches have been cleaned up; `main` is now the only active branch to continue from
+- Next steps: decide whether to merge `opencli-integration` into `main` (only 1 commit ahead), or first reconcile local `main` with `origin/main` (5 commits ahead)
 
 ### Previously completed (in `main`)
 
@@ -95,7 +109,13 @@ Project root: `skyscanner_multi_domain`
 ### Verified results (latest)
 
 - Syntax check: passed
-- Unit tests: passed (`15/15` in `test_skyscanner_neo.py`, plus `test_date_window.py`)
+- Unit tests:
+  - `test_skyscanner_neo.py`: 15/15 passed
+  - `test_date_window.py`: passed
+  - `test_transport_cdp.py`: 7/7 passed
+- Session persistence (real browser):
+  - **Comet**: ✅ Passed — cookie retained across restart
+  - **Edge**: ❌ Failed — cookie lost after restart
 - E2E comparison (same route/date):
   - `--transport page`: returns valid Best/Cheapest prices for tested regions
   - `--transport scrapling`: returns valid Best/Cheapest prices for default regions (`CN, HK, SG, UK, KZ`) on `BJSA -> ALA`, `2026-04-29`
@@ -124,7 +144,14 @@ When a market still ends in a final Scrapling failure state (`page_loading`, `pa
 
 The `page` transport remains in the codebase as a compatibility fallback and debugging path, but it is no longer the recommended default.
 
-### Next implementation target (optional future work)
+### Next implementation target (current)
+
+- [ ] Merge `opencli-integration` into `main` (1 commit ahead, clean merge)
+- [ ] Reconcile local `main` with `origin/main` (5 commits ahead)
+- [ ] Investigate Edge session persistence failure (profile locking? different flags needed?)
+- [ ] Update README.md with session persistence verification commands
+
+### Previous future items (deferred)
 
 - Add richer per-attempt diagnostics into failed Scrapling `error` messages
 - Expand live validation to more routes / markets before considering removal of the `page` path
@@ -157,6 +184,7 @@ Current workflow:
 - `cli.py`
   - CLI wrapper around the same scan flow
   - Handles location/country resolution, smart effective regions, FX conversion, and Markdown output
+  - `doctor` subcommand now supports `--verify-session-persistence --persistence-browser <edge|comet|chrome>`
 - `skyscanner_neo.py`
   - Neo compatibility layer: NeoCli wrapper, capture replay, URL rewriting, payload mutation
   - Re-exports all moved symbols for backward compatibility
@@ -240,6 +268,23 @@ Failure logging behavior:
 - the log includes route, transport, region, status, error, source URL, and a page-text excerpt when available
 
 ## 5. Important Current Behavior
+
+### Session persistence verification
+
+`transport_cdp.py` now includes `verify_browser_session_persistence(preferred_browser)` which:
+
+1. Starts a local HTTP probe server that sets a unique cookie
+2. Launches the browser with `--remote-debugging-port=<dynamic_port>` pointing to the probe `/set` URL
+3. Reads the cookie via CDP `Runtime.evaluate("document.cookie")`
+4. Kills the browser, waits for CDP port shutdown
+5. Restarts the browser with the same profile, pointing to the probe `/echo` URL
+6. Verifies the same cookie is still present
+
+Usage: `python cli.py doctor --verify-session-persistence --persistence-browser comet`
+
+Results:
+- Comet (default production browser): ✅ session persists
+- Edge: ❌ session does NOT persist (profile or launch-flag issue TBD)
 
 ### Smart effective regions
 
