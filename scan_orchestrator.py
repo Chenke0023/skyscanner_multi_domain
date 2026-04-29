@@ -85,17 +85,29 @@ def failure_action(failure_class: FailureClass) -> FailureAction:
 
 
 def can_fallback_to_browser(status: str) -> bool:
-    """Return True if this status should trigger browser fallback."""
+    """Return True if this status should trigger browser (CDP) fallback.
+
+    WAIT_RENDER is deliberately excluded — those failures retry within the
+    same transport with longer wait first.
+    """
     cls = classify_failure(status)
     action = failure_action(cls)
-    return action in {FailureAction.RETRY_BROWSER, FailureAction.WAIT_RENDER}
+    return action == FailureAction.RETRY_BROWSER
+
+
+def should_retry_wait_render(status: str) -> bool:
+    """Return True if this status indicates the page is still loading and
+    should be retried with longer wait in the same transport."""
+    cls = classify_failure(status)
+    action = failure_action(cls)
+    return action == FailureAction.WAIT_RENDER
 
 
 # Legacy alias — keep for backward compatibility with tests/imports
 SCRAPLING_FALLBACK_STATUSES: set[str] = {
     status
     for status, cls in _STATUS_TO_CLASS.items()
-    if failure_action(cls) in {FailureAction.RETRY_BROWSER, FailureAction.WAIT_RENDER}
+    if failure_action(cls) == FailureAction.RETRY_BROWSER
 }
 
 ScanProgressCallback = Callable[[dict[str, Any]], Union[Awaitable[None], None]]
@@ -296,6 +308,7 @@ async def run_page_scan(
     history_store: Any | None = None,
     on_progress: ScanProgressCallback | None = None,
     allow_browser_fallback: bool = True,
+    fetch_pipeline: str = "balanced",
 ) -> list[FlightQuote]:
     from transport_cdp import compare_via_pages, detect_cdp_version, ensure_cdp_ready
     from transport_scrapling import compare_via_scrapling
@@ -390,8 +403,43 @@ async def run_page_scan(
             on_region_complete=on_region_complete,
             region_concurrency=max(int(region_concurrency), 1),
             run_id=run_id,
+            fetch_pipeline=fetch_pipeline,
         )
-        # Filter by failure_class action — only browser-fallback-worthy
+
+        # WAIT_RENDER: retry loading failures with longer wait in same transport.
+        # This runs regardless of enable_browser_fallback — it's a same-transport
+        # retry, not a transport switch.
+        wait_render_regions = [
+            region
+            for region, quote in zip(batch_regions, quotes)
+            if quote.price is None and should_retry_wait_render(quote.status)
+        ]
+        if wait_render_regions:
+            longer_args = argparse.Namespace(**vars(args))
+            longer_args.page_wait = max(args.page_wait * 3, 30)
+            wait_quotes = await compare_via_scrapling(
+                longer_args,
+                wait_render_regions,
+                persist_failures=False,
+                on_region_start=on_region_start,
+                on_region_complete=on_region_complete,
+                region_concurrency=max(int(region_concurrency), 1),
+                run_id=run_id,
+                fetch_pipeline=fetch_pipeline,
+            )
+            wait_by_region = {quote.region: quote for quote in wait_quotes}
+            merged: list[FlightQuote] = []
+            for quote in quotes:
+                replacement = wait_by_region.get(quote.region)
+                if replacement is not None and replacement.price is not None:
+                    merged.append(replacement)
+                elif replacement is not None:
+                    merged.append(replacement)
+                else:
+                    merged.append(quote)
+            quotes = merged
+
+        # Browser fallback: only if enabled and only for RETRY_BROWSER failures
         fallback_regions = [
             region
             for region, quote in zip(batch_regions, quotes)
@@ -520,7 +568,8 @@ async def run_page_scan(
                     used_cached_preview=preview_record is not None,
                 )
 
-                # Per-batch browser fallback: retry failed regions via FailureClass
+                # Per-batch browser fallback: go directly to CDP for failed regions.
+                # No re-run through Scrapling — these markets already failed there.
                 if allow_browser_fallback:
                     batch_failed = [
                         region for region in batch_regions
@@ -532,9 +581,15 @@ async def run_page_scan(
                         )
                     ]
                     if batch_failed:
-                        batch_fallback_quotes = await run_scrapling_pass(
-                            batch_failed,
-                            enable_browser_fallback=True,
+                        cdp_info = detect_cdp_version()
+                        if not cdp_info:
+                            ensure_cdp_ready(
+                                start_url=build_search_url(
+                                    batch_failed[0], origin, destination, date, return_date
+                                )
+                            )
+                        batch_fallback_quotes = await compare_via_pages(
+                            args, batch_failed, persist_failures=False, run_id=run_id
                         )
                         merged_quotes = merge_quotes_by_region(merged_quotes, batch_fallback_quotes)
                         await emit_progress(

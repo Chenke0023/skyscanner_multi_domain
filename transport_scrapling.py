@@ -33,6 +33,38 @@ BROWSER_BINARY_CANDIDATES = {
 CDP_HOST_CANDIDATES = ("localhost", "::1", "127.0.0.1")
 _PROFILE_LOCKS: dict[str, asyncio.Lock] = {}
 
+# ── Fetch pipeline stages ────────────────────────────────────────────────────
+# Each stage is a named step in the Scrapling fetch chain. Pipeline presets
+# control which stages run and in what order.
+
+FETCH_STAGE_CDP_REUSE = "cdp_reuse"
+FETCH_STAGE_PLAYWRIGHT = "playwright_probe"
+FETCH_STAGE_STEALTH = "scrapling_stealth"
+FETCH_STAGE_CAPTCHA = "captcha_solve"
+FETCH_STAGE_HTTP = "scrapling_http"
+
+FETCH_PIPELINES: dict[str, tuple[str, ...]] = {
+    "fast": (
+        FETCH_STAGE_STEALTH,
+        FETCH_STAGE_HTTP,
+    ),
+    "balanced": (
+        FETCH_STAGE_CDP_REUSE,
+        FETCH_STAGE_STEALTH,
+        FETCH_STAGE_CAPTCHA,
+        FETCH_STAGE_HTTP,
+    ),
+    "session_heavy": (
+        FETCH_STAGE_CDP_REUSE,
+        FETCH_STAGE_PLAYWRIGHT,
+        FETCH_STAGE_STEALTH,
+        FETCH_STAGE_CAPTCHA,
+        FETCH_STAGE_HTTP,
+    ),
+}
+
+DEFAULT_FETCH_PIPELINE = "balanced"
+
 
 @dataclass(frozen=True)
 class ProbeOutcome:
@@ -643,6 +675,7 @@ async def compare_via_scrapling(
     persist_failure_log: Callable[..., FlightQuote] | None = None,
     region_concurrency: int = 1,
     run_id: str = "",
+    fetch_pipeline: str = DEFAULT_FETCH_PIPELINE,
 ) -> list[FlightQuote]:
     # Lazy import to avoid hard dependency at module level
     if build_search_url is None:
@@ -677,19 +710,24 @@ async def compare_via_scrapling(
         latest_error: str | None = None
         detected_captcha_type = ""
 
-        probe_source = "cdp_existing_page"
-        probe_outcome = await _probe_existing_cdp_page(url, region)
-        if probe_outcome is None:
-            probe_source = "playwright"
-            probe_outcome = await _probe_page_with_playwright(url, region, timeout_ms)
-        if probe_outcome is not None:
-            if hasattr(probe_outcome, "quote"):
-                probe_quote = probe_outcome.quote
-                probe_page_text = getattr(probe_outcome, "page_text", "")
+        pipeline_stages = FETCH_PIPELINES.get(
+            fetch_pipeline, FETCH_PIPELINES[DEFAULT_FETCH_PIPELINE]
+        )
+
+        def _handle_probe_outcome(
+            outcome: Any, source: str
+        ) -> FlightQuote | None:
+            """Process a probe outcome: emit trace, persist failures, notify
+            callbacks, and return the quote if it's a terminal result."""
+            nonlocal page_text
+            if hasattr(outcome, "quote"):
+                probe_quote = outcome.quote
+                probe_page_text = getattr(outcome, "page_text", "")
             else:
-                probe_quote = probe_outcome
-                probe_page_text = getattr(probe_outcome, "page_text", "")
-            if probe_source == "playwright" and not getattr(probe_quote, "source_kind", None):
+                probe_quote = outcome
+                probe_page_text = getattr(outcome, "page_text", "")
+            page_text = probe_page_text
+            if source == "playwright" and not getattr(probe_quote, "source_kind", None):
                 probe_quote.source_kind = "browser_fallback"
             if persist_failures and probe_quote.price is None:
                 persist_failure_log(
@@ -697,7 +735,7 @@ async def compare_via_scrapling(
                     transport="scrapling",
                     route_key=route_key,
                     page_text=probe_page_text,
-                    extra={"locale": region.locale, "probe": probe_source},
+                    extra={"locale": region.locale, "probe": source},
                 )
             if on_region_complete is not None:
                 on_region_complete(region, probe_quote)
@@ -707,9 +745,9 @@ async def compare_via_scrapling(
                 region=region.code,
                 transport="scrapling",
                 attempt_index=0,
-                source_kind=getattr(probe_quote, "source_kind", None) or probe_source,
-                used_cdp_cookies=probe_source == "cdp_existing_page",
-                used_profile_dir=probe_source == "playwright",
+                source_kind=getattr(probe_quote, "source_kind", None) or source,
+                used_cdp_cookies=source == "cdp_existing_page",
+                used_profile_dir=source == "playwright",
                 wait_ms=timeout_ms,
                 load_dom=False,
                 network_idle=False,
@@ -721,6 +759,18 @@ async def compare_via_scrapling(
                 currency=probe_quote.currency,
             )
             return probe_quote
+
+        # Stage: CDP reuse — try an already-open browser tab
+        if FETCH_STAGE_CDP_REUSE in pipeline_stages:
+            probe_outcome = await _probe_existing_cdp_page(url, region)
+            if probe_outcome is not None:
+                return _handle_probe_outcome(probe_outcome, "cdp_existing_page")
+
+        # Stage: Playwright probe — launch a persistent browser context
+        if FETCH_STAGE_PLAYWRIGHT in pipeline_stages:
+            probe_outcome = await _probe_page_with_playwright(url, region, timeout_ms)
+            if probe_outcome is not None:
+                return _handle_probe_outcome(probe_outcome, "playwright")
 
         try:
             from scrapling import Fetcher, StealthyFetcher
@@ -780,7 +830,7 @@ async def compare_via_scrapling(
             {"solve_cloudflare": True, "wait_ms": max(wait_ms * 2, 15000)},
         )
 
-        for attempt in stealth_attempts:
+        for attempt in stealth_attempts if FETCH_STAGE_STEALTH in pipeline_stages else ():
             state_overrides = await _resolve_scrapling_state_overrides(
                 region,
                 url,
@@ -887,6 +937,7 @@ async def compare_via_scrapling(
             and latest_quote is not None
             and latest_quote.price is None
             and CaptchaSolverClient is not None
+            and FETCH_STAGE_CAPTCHA in pipeline_stages
         ):
             try:
                 captcha_solver = CaptchaSolverClient()
@@ -929,7 +980,7 @@ async def compare_via_scrapling(
             except Exception:
                 pass
 
-        if latest_quote is None or latest_quote.price is None:
+        if (latest_quote is None or latest_quote.price is None) and FETCH_STAGE_HTTP in pipeline_stages:
             try:
                 state_overrides = await _resolve_scrapling_state_overrides(
                     region,
