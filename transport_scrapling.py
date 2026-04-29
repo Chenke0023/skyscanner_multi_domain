@@ -70,6 +70,7 @@ DEFAULT_FETCH_PIPELINE = "balanced"
 class ProbeOutcome:
     quote: FlightQuote
     page_text: str
+    state_overrides: dict[str, Any] | None = None
 
 
 def _detect_local_browsers() -> dict[str, Path]:
@@ -627,7 +628,11 @@ async def _probe_page_with_playwright(
                         page = context.pages[0] if context.pages else await context.new_page()
                         outcome = await probe_page(page)
                         if outcome is not None:
-                            return outcome
+                            return ProbeOutcome(
+                                quote=outcome.quote,
+                                page_text=outcome.page_text,
+                                state_overrides={"user_data_dir": str(profile_dir)},
+                            )
                 except Exception:
                     pass
                 finally:
@@ -742,6 +747,9 @@ async def compare_via_scrapling(
             page_text = probe_page_text
             if source == "playwright" and not getattr(probe_quote, "source_kind", None):
                 probe_quote.source_kind = "browser_fallback"
+            used_cdp, used_profile = _state_usage(
+                getattr(outcome, "state_overrides", None)
+            )
             if persist_failures and probe_quote.price is None:
                 persist_failure_log(
                     probe_quote,
@@ -757,10 +765,10 @@ async def compare_via_scrapling(
                 route_key=route_key,
                 region=region.code,
                 transport="scrapling",
-                attempt_index=0,
+                attempt_index=_next_attempt(),
                 source_kind=getattr(probe_quote, "source_kind", None) or source,
-                used_cdp_cookies=source == "cdp_existing_page",
-                used_profile_dir=source == "playwright",
+                used_cdp_cookies=used_cdp,
+                used_profile_dir=used_profile,
                 wait_ms=timeout_ms,
                 load_dom=False,
                 network_idle=False,
@@ -889,7 +897,6 @@ async def compare_via_scrapling(
             )
             _last_state_overrides = state_overrides
             used_cdp, used_profile = _state_usage(state_overrides)
-            _emit_scrapling_trace(source_kind, attempt_index, used_cdp=used_cdp, used_profile=used_profile)
             try:
                 page = await fetch_with_stealth(
                     solve_cloudflare=attempt["solve_cloudflare"],
@@ -960,7 +967,7 @@ async def compare_via_scrapling(
                         )
                         latest_quote.source_kind = latest_quote.source_kind or "live"
                         _emit_scrapling_trace(
-                            "scrapling_dom_retry", attempt_index,
+                            "scrapling_dom_retry", _next_attempt(),
                             used_cdp=used_cdp, used_profile=used_profile,
                             load_dom=True,
                             network_idle=True,
