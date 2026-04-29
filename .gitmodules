@@ -1,3 +1,6 @@
 [submodule "vendor/ohmycaptcha"]
 	path = vendor/ohmycaptcha
 	url = https://github.com/Chenke0023/ohmycaptcha.git
+[submodule "skyscanner_multi_domain"]
+	path = skyscanner_multi_domain
+	url = https://github.com/Chenke0023/skyscanner_multi_domain.git
