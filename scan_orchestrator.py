@@ -298,7 +298,7 @@ async def run_page_scan(
     return_date: str | None = None,
     page_wait: int = 8,
     timeout: int = 30,
-    transport: str = "scrapling",
+    transport: str = "opencli",
     on_region_start: Callable[[RegionConfig], None] | None = None,
     on_region_complete: Callable[[RegionConfig, FlightQuote], None] | None = None,
     scan_mode: str = "full_scan",
@@ -375,7 +375,7 @@ async def run_page_scan(
                 merged[quote.region] = quote
             return [merged[region_code] for region_code in ordered_regions]
 
-        normalized_transport = (transport or "scrapling").lower()
+        normalized_transport = (transport or "opencli").lower()
         if normalized_transport == "page":
             ensure_cdp_ready(
                 start_url=build_search_url(
@@ -472,6 +472,105 @@ async def run_page_scan(
                         else:
                             merged_quotes.append(quote)
                     quotes = merged_quotes
+            return quotes
+
+        async def run_opencli_pass(
+            batch_regions: list[RegionConfig],
+            *,
+            enable_fallbacks: bool,
+            on_region_complete: Callable[[RegionConfig, FlightQuote], None] | None = None,
+        ) -> list[FlightQuote]:
+            quotes = await compare_via_opencli(
+                args,
+                batch_regions,
+                persist_failures=False,
+                build_search_url=build_search_url,
+                on_region_start=on_region_start,
+                on_region_complete=on_region_complete,
+                region_concurrency=max(int(region_concurrency), 1),
+                run_id=run_id,
+            )
+
+            wait_render_regions = [
+                region
+                for region, quote in zip(batch_regions, quotes)
+                if quote.price is None and should_retry_wait_render(quote.status)
+            ]
+            if wait_render_regions:
+                longer_args = argparse.Namespace(**vars(args))
+                longer_args.page_wait = max(args.page_wait * 3, 30)
+                wait_quotes = await compare_via_opencli(
+                    longer_args,
+                    wait_render_regions,
+                    persist_failures=False,
+                    build_search_url=build_search_url,
+                    on_region_start=on_region_start,
+                    on_region_complete=on_region_complete,
+                    region_concurrency=max(int(region_concurrency), 1),
+                    run_id=run_id,
+                )
+                wait_by_region = {quote.region: quote for quote in wait_quotes}
+                quotes = [
+                    wait_by_region.get(quote.region, quote)
+                    for quote in quotes
+                ]
+
+            if not enable_fallbacks:
+                return quotes
+
+            page_regions = [
+                region
+                for region, quote in zip(batch_regions, quotes)
+                if quote.price is None and can_fallback_to_browser(quote.status)
+            ]
+            if page_regions:
+                cdp_info = detect_cdp_version()
+                if not cdp_info:
+                    ensure_cdp_ready(
+                        start_url=build_search_url(
+                            page_regions[0], origin, destination, date, return_date
+                        )
+                    )
+                page_quotes = await compare_via_pages(
+                    args, page_regions, persist_failures=False, run_id=run_id
+                )
+                page_by_region = {quote.region: quote for quote in page_quotes}
+                quotes = [
+                    (
+                        page_by_region[quote.region]
+                        if quote.region in page_by_region
+                        and page_by_region[quote.region].price is not None
+                        else quote
+                    )
+                    for quote in quotes
+                ]
+
+            legacy_regions = [
+                region
+                for region, quote in zip(batch_regions, quotes)
+                if quote.price is None and quote.status != "px_challenge"
+            ]
+            if legacy_regions:
+                legacy_quotes = await compare_via_scrapling(
+                    args,
+                    legacy_regions,
+                    persist_failures=False,
+                    on_region_start=on_region_start,
+                    on_region_complete=on_region_complete,
+                    region_concurrency=max(int(region_concurrency), 1),
+                    run_id=run_id,
+                    fetch_pipeline=fetch_pipeline,
+                )
+                legacy_by_region = {quote.region: quote for quote in legacy_quotes}
+                quotes = [
+                    (
+                        legacy_by_region[quote.region]
+                        if quote.region in legacy_by_region
+                        and legacy_by_region[quote.region].price is not None
+                        else quote
+                    )
+                    for quote in quotes
+                ]
             return quotes
 
         if normalized_transport == "page":
@@ -614,15 +713,9 @@ async def run_page_scan(
                 is_final=True,
             )
         elif normalized_transport == "opencli":
-            quotes = await compare_via_opencli(
-                args,
+            quotes = await run_opencli_pass(
                 selected_regions,
-                persist_failures=True,
-                build_search_url=build_search_url,
-                on_region_start=on_region_start,
-                on_region_complete=on_region_complete,
-                region_concurrency=max(int(region_concurrency), 1),
-                run_id=run_id,
+                enable_fallbacks=allow_browser_fallback,
             )
             await emit_progress(
                 stage="final",

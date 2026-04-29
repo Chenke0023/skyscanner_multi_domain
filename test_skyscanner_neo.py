@@ -307,6 +307,147 @@ class SearchUrlTests(unittest.TestCase):
 
 
 class RunPageScanFallbackTests(unittest.TestCase):
+    def test_run_page_scan_defaults_to_opencli(self) -> None:
+        opencli_quotes = [
+            FlightQuote(
+                region="CN",
+                domain="https://www.skyscanner.cn",
+                price=2187.0,
+                currency="CNY",
+                source_url="https://www.skyscanner.cn/transport/flights/bjsa/ala/260429/",
+                status="page_text",
+                best_price=3217.0,
+                cheapest_price=2187.0,
+            )
+        ]
+
+        async def run_case() -> None:
+            with (
+                patch(
+                    "transport_opencli.compare_via_opencli",
+                    new=AsyncMock(return_value=opencli_quotes),
+                ) as opencli_mock,
+                patch(
+                    "transport_scrapling.compare_via_scrapling",
+                    new=AsyncMock(return_value=[]),
+                ) as scrapling_mock,
+                patch(
+                    "transport_cdp.compare_via_pages",
+                    new=AsyncMock(return_value=[]),
+                ) as page_mock,
+            ):
+                quotes = await run_page_scan(
+                    origin="BJSA",
+                    destination="ALA",
+                    date="2026-04-29",
+                    region_codes=["CN"],
+                )
+
+                self.assertEqual(len(quotes), 1)
+                self.assertEqual(quotes[0].price, 2187.0)
+                opencli_mock.assert_awaited_once()
+                page_mock.assert_not_awaited()
+                scrapling_mock.assert_not_awaited()
+
+        asyncio.run(run_case())
+
+    def test_run_page_scan_opencli_falls_back_to_page_then_scrapling_legacy(self) -> None:
+        opencli_quotes = [
+            FlightQuote(
+                region="CN",
+                domain="https://www.skyscanner.cn",
+                price=None,
+                currency="CNY",
+                source_url="https://www.skyscanner.cn/transport/flights/bjsa/ala/260429/",
+                status="opencli_error",
+                error="opencli failed",
+            ),
+            FlightQuote(
+                region="HK",
+                domain="https://www.skyscanner.com.hk",
+                price=None,
+                currency="HKD",
+                source_url="https://www.skyscanner.com.hk/transport/flights/bjsa/ala/260429/",
+                status="opencli_error",
+                error="opencli failed",
+            ),
+        ]
+        page_quotes = [
+            FlightQuote(
+                region="CN",
+                domain="https://www.skyscanner.cn",
+                price=2187.0,
+                currency="CNY",
+                source_url="https://www.skyscanner.cn/transport/flights/bjsa/ala/260429/",
+                status="page_text",
+                best_price=3217.0,
+                cheapest_price=2187.0,
+            ),
+            FlightQuote(
+                region="HK",
+                domain="https://www.skyscanner.com.hk",
+                price=None,
+                currency="HKD",
+                source_url="https://www.skyscanner.com.hk/transport/flights/bjsa/ala/260429/",
+                status="page_parse_failed",
+                error="no price",
+            ),
+        ]
+        scrapling_quotes = [
+            FlightQuote(
+                region="HK",
+                domain="https://www.skyscanner.com.hk",
+                price=2465.0,
+                currency="HKD",
+                source_url="https://www.skyscanner.com.hk/transport/flights/bjsa/ala/260429/",
+                status="page_text",
+                best_price=2539.0,
+                cheapest_price=2465.0,
+            )
+        ]
+
+        async def run_case() -> None:
+            with (
+                patch(
+                    "transport_opencli.compare_via_opencli",
+                    new=AsyncMock(return_value=opencli_quotes),
+                ) as opencli_mock,
+                patch(
+                    "transport_cdp.compare_via_pages",
+                    new=AsyncMock(return_value=page_quotes),
+                ) as page_mock,
+                patch(
+                    "transport_scrapling.compare_via_scrapling",
+                    new=AsyncMock(return_value=scrapling_quotes),
+                ) as scrapling_mock,
+                patch(
+                    "transport_cdp.detect_cdp_version",
+                    return_value={"Browser": "Edg/146.0.3856.97"},
+                ),
+                patch("transport_cdp.ensure_cdp_ready") as ensure_cdp_ready_mock,
+            ):
+                quotes = await run_page_scan(
+                    origin="BJSA",
+                    destination="ALA",
+                    date="2026-04-29",
+                    region_codes=["CN", "HK"],
+                    transport="opencli",
+                )
+
+                quotes_by_region = {quote.region: quote for quote in quotes}
+                self.assertEqual(quotes_by_region["CN"].price, 2187.0)
+                self.assertEqual(quotes_by_region["HK"].price, 2465.0)
+                opencli_mock.assert_awaited_once()
+                page_mock.assert_awaited_once()
+                scrapling_mock.assert_awaited_once()
+                page_regions = page_mock.await_args.args[1]
+                legacy_regions = scrapling_mock.await_args.args[1]
+                self.assertEqual([region.code for region in page_regions], ["CN", "HK"])
+                self.assertEqual([region.code for region in legacy_regions], ["HK"])
+                ensure_cdp_ready_mock.assert_not_called()
+
+        asyncio.run(run_case())
+
     def test_run_page_scan_skips_browser_launch_for_partial_scrapling_success(self) -> None:
         call_count = [0]
 

@@ -1599,7 +1599,7 @@ class SimpleCLI:
             date_window=int(date_window_raw) if date_window_raw else 3,
             exact_airport=False,
             country_airport_limit=COUNTRY_ROUTE_DEFAULT_AIRPORT_LIMIT,
-            transport="scrapling",
+            transport="opencli",
             fetch_pipeline="balanced",
             preview_only=False,
             rerun_failed=False,
@@ -1700,8 +1700,8 @@ def build_parser() -> argparse.ArgumentParser:
     page.add_argument(
         "--transport",
         choices=["scrapling", "page", "opencli"],
-        default="scrapling",
-        help="scrapling: 直接抓取页面文本；page: 通过浏览器 CDP 读取结果页（Comet 优先）；opencli: 使用 opencli 浏览器自动化",
+        default="opencli",
+        help="opencli: 使用 opencli 浏览器自动化（默认）；page: 通过浏览器 CDP 读取结果页（Comet 优先）；scrapling: legacy 直接抓取页面文本",
     )
     page.add_argument(
         "--exact-airport",
