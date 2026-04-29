@@ -4093,7 +4093,9 @@ class App:
                             query_payload=query_payload,
                             on_progress=on_progress,
                             allow_browser_fallback=allow_browser_fallback,
+                            fetch_pipeline="balanced",
                         )
+
 
                         rows = get_rows_for_trip_label(merged_rows_by_date, trip_label)
                         quote_snapshots = get_quotes_for_trip_label(merged_quotes_by_date, trip_label)
@@ -4426,6 +4428,7 @@ class App:
                                     region_concurrency=_GUI_REGION_CONCURRENCY,
                                     query_payload=query_payload,
                                     allow_browser_fallback=allow_browser_fallback,
+                                    fetch_pipeline="balanced",
                                 )
                                 if not quotes:
                                     return (route_label, [])
