@@ -706,6 +706,8 @@ async def compare_via_pages(
         deadline = time.monotonic() + max(total_wait - args.page_wait, 10)
         poll_interval = 2.0
         latest_quotes: dict[str, FlightQuote] = {}
+        page_text_len_by_region: dict[str, int] = {}
+        page_url_by_region: dict[str, str] = {}
         pending_regions = {region.code: region for region in selected_regions}
 
         while pending_regions:
@@ -771,6 +773,8 @@ async def compare_via_pages(
                     str(domain_tab.get("url", "")),
                 )
                 page_text = str(payload.get("text", ""))
+                page_text_len_by_region[region.code] = len(page_text)
+                page_url_by_region[region.code] = str(domain_tab.get("url", ""))
 
                 final_quote = quote or FlightQuote(
                     region=region.code,
@@ -819,8 +823,8 @@ async def compare_via_pages(
             wait_ms=max(args.timeout, args.page_wait + 60, 45) * 1000,
             load_dom=False,
             network_idle=False,
-            page_text_len=len(page_text) if "page_text" in dir() else 0,
-            page_url=quote.source_url,
+            page_text_len=page_text_len_by_region.get(quote.region, 0),
+            page_url=page_url_by_region.get(quote.region, quote.source_url),
             status=quote.status,
             failure_reason=quote.error,
             price=quote.price,

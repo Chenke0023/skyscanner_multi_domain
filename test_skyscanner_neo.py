@@ -308,49 +308,65 @@ class SearchUrlTests(unittest.TestCase):
 
 class RunPageScanFallbackTests(unittest.TestCase):
     def test_run_page_scan_skips_browser_launch_for_partial_scrapling_success(self) -> None:
-        scrapling_quotes = [
-            FlightQuote(
-                region="CN",
-                domain="https://www.skyscanner.cn",
-                price=2187.0,
-                currency="CNY",
-                source_url="https://www.skyscanner.cn/transport/flights/bjsa/ala/260429/",
-                status="page_text",
-                best_price=3217.0,
-                cheapest_price=2187.0,
-            ),
-            FlightQuote(
-                region="HK",
-                domain="https://www.skyscanner.com.hk",
-                price=None,
-                currency="HKD",
-                source_url="https://www.skyscanner.com.hk/transport/flights/bjsa/ala/260429/",
-                status="page_loading",
-                error="页面仍在加载结果: loading",
-            ),
-        ]
-        page_fallback_quotes = [
-            FlightQuote(
-                region="HK",
-                domain="https://www.skyscanner.com.hk",
-                price=2465.0,
-                currency="HKD",
-                source_url="https://www.skyscanner.com.hk/transport/flights/bjsa/ala/260429/",
-                status="page_text",
-                best_price=2539.0,
-                cheapest_price=2465.0,
-            )
-        ]
+        call_count = [0]
+
+        async def scrapling_side_effect(_args, _selected_regions, **_kwargs):
+            call_count[0] += 1
+            if call_count[0] == 1:
+                return [
+                    FlightQuote(
+                        region="CN",
+                        domain="https://www.skyscanner.cn",
+                        price=2187.0,
+                        currency="CNY",
+                        source_url="https://www.skyscanner.cn/transport/flights/bjsa/ala/260429/",
+                        status="page_text",
+                        best_price=3217.0,
+                        cheapest_price=2187.0,
+                    ),
+                    FlightQuote(
+                        region="HK",
+                        domain="https://www.skyscanner.com.hk",
+                        price=None,
+                        currency="HKD",
+                        source_url="https://www.skyscanner.com.hk/transport/flights/bjsa/ala/260429/",
+                        status="page_loading",
+                        error="页面仍在加载结果: loading",
+                    ),
+                ]
+            # WAIT_RENDER retry: HK recovers after longer wait
+            return [
+                FlightQuote(
+                    region="CN",
+                    domain="https://www.skyscanner.cn",
+                    price=2187.0,
+                    currency="CNY",
+                    source_url="https://www.skyscanner.cn/transport/flights/bjsa/ala/260429/",
+                    status="page_text",
+                    best_price=3217.0,
+                    cheapest_price=2187.0,
+                ),
+                FlightQuote(
+                    region="HK",
+                    domain="https://www.skyscanner.com.hk",
+                    price=2150.0,
+                    currency="HKD",
+                    source_url="https://www.skyscanner.com.hk/transport/flights/bjsa/ala/260429/",
+                    status="page_text",
+                    best_price=2539.0,
+                    cheapest_price=2150.0,
+                ),
+            ]
 
         async def run_case() -> None:
             with (
                 patch(
                     "transport_scrapling.compare_via_scrapling",
-                    new=AsyncMock(return_value=scrapling_quotes),
+                    new=AsyncMock(side_effect=scrapling_side_effect),
                 ) as scrapling_mock,
                 patch(
                     "transport_cdp.compare_via_pages",
-                    new=AsyncMock(return_value=page_fallback_quotes),
+                    new=AsyncMock(return_value=[]),
                 ) as page_mock,
                 patch("transport_cdp.detect_cdp_version", return_value=None),
                 patch("transport_cdp.ensure_cdp_ready") as ensure_cdp_ready_mock,
@@ -366,15 +382,18 @@ class RunPageScanFallbackTests(unittest.TestCase):
                 self.assertEqual(len(quotes), 2)
                 quotes_by_region = {quote.region: quote for quote in quotes}
                 self.assertEqual(quotes_by_region["CN"].price, 2187.0)
-                self.assertIsNone(quotes_by_region["HK"].price)
-                self.assertEqual(quotes_by_region["HK"].status, "page_loading")
+                self.assertEqual(quotes_by_region["HK"].price, 2150.0)
+                self.assertEqual(quotes_by_region["HK"].status, "page_text")
                 ensure_cdp_ready_mock.assert_not_called()
-                scrapling_mock.assert_awaited_once()
+                self.assertEqual(scrapling_mock.call_count, 2)
                 page_mock.assert_not_awaited()
 
         asyncio.run(run_case())
 
     def test_run_page_scan_reuses_connected_cdp_for_failed_markets(self) -> None:
+        # CN succeeds with page_text. HK fails with scrapling_failed (RETRY_BROWSER),
+        # which goes directly to CDP fallback (no WAIT_RENDER retry for scrapling_failed).
+        # CDP is already connected so ensure_cdp_ready is not called.
         scrapling_quotes = [
             FlightQuote(
                 region="CN",
@@ -392,8 +411,8 @@ class RunPageScanFallbackTests(unittest.TestCase):
                 price=None,
                 currency="HKD",
                 source_url="https://www.skyscanner.com.hk/transport/flights/bjsa/ala/260429/",
-                status="page_loading",
-                error="页面仍在加载结果: loading",
+                status="scrapling_failed",
+                error="connection refused",
             ),
         ]
         page_fallback_quotes = [
@@ -438,6 +457,7 @@ class RunPageScanFallbackTests(unittest.TestCase):
                 self.assertEqual(quotes_by_region["CN"].price, 2187.0)
                 self.assertEqual(quotes_by_region["HK"].price, 2465.0)
                 ensure_cdp_ready_mock.assert_not_called()
+                # scrapling_failed -> RETRY_BROWSER, no WAIT_RENDER retry
                 scrapling_mock.assert_awaited_once()
                 page_mock.assert_awaited_once()
                 fallback_regions = page_mock.await_args.args[1]
@@ -446,6 +466,8 @@ class RunPageScanFallbackTests(unittest.TestCase):
         asyncio.run(run_case())
 
     def test_run_page_scan_launches_browser_when_no_scrapling_market_succeeds(self) -> None:
+        # Use scrapling_failed (not page_loading) to trigger CDP fallback directly.
+        # page_loading now goes through WAIT_RENDER retry which does NOT call CDP.
         scrapling_quotes = [
             FlightQuote(
                 region="CN",
@@ -453,8 +475,8 @@ class RunPageScanFallbackTests(unittest.TestCase):
                 price=None,
                 currency="CNY",
                 source_url="https://www.skyscanner.cn/transport/flights/bjsa/ala/260429/",
-                status="page_loading",
-                error="页面仍在加载结果: loading",
+                status="scrapling_failed",
+                error="connection failed",
             ),
             FlightQuote(
                 region="HK",
@@ -462,8 +484,8 @@ class RunPageScanFallbackTests(unittest.TestCase):
                 price=None,
                 currency="HKD",
                 source_url="https://www.skyscanner.com.hk/transport/flights/bjsa/ala/260429/",
-                status="page_loading",
-                error="页面仍在加载结果: loading",
+                status="scrapling_failed",
+                error="connection failed",
             ),
         ]
         page_fallback_quotes = [
@@ -658,10 +680,13 @@ class RunPageScanFallbackTests(unittest.TestCase):
         asyncio.run(run_case())
 
     def test_run_page_scan_preview_first_skips_browser_fallback_after_live_success(self) -> None:
+        call_count = [0]
+
         async def run_case() -> None:
             progress_events: list[dict[str, object]] = []
 
             async def compare_side_effect(_args, selected_regions, **_kwargs):
+                call_count[0] += 1
                 region_codes = [region.code for region in selected_regions]
                 if region_codes == ["CN"]:
                     return [
@@ -675,6 +700,20 @@ class RunPageScanFallbackTests(unittest.TestCase):
                             cheapest_price=820.0,
                         )
                     ]
+                # page_loading -> WAIT_RENDER (retry in same transport, not browser fallback)
+                if call_count[0] == 1:
+                    return [
+                        FlightQuote(
+                            region="HK",
+                            domain="https://www.skyscanner.com.hk",
+                            price=None,
+                            currency="HKD",
+                            source_url="https://example.com/hk",
+                            status="page_loading",
+                            error="still loading",
+                        )
+                    ]
+                # WAIT_RENDER retry: HK still fails
                 return [
                     FlightQuote(
                         region="HK",
@@ -683,7 +722,7 @@ class RunPageScanFallbackTests(unittest.TestCase):
                         currency="HKD",
                         source_url="https://example.com/hk",
                         status="page_loading",
-                        error="still loading",
+                        error="still loading after retry",
                     )
                 ]
 
@@ -710,7 +749,12 @@ class RunPageScanFallbackTests(unittest.TestCase):
                 )
 
             self.assertEqual(len(quotes), 2)
-            self.assertEqual(scrapling_mock.await_count, 2)
+            # CN and HK are in separate batches (region_concurrency=1).
+            # HK's page_loading triggers WAIT_RENDER retry within its batch.
+            # can_fallback_to_browser(page_loading)=False, so no CDP fallback.
+            # Total: CN call + HK call + HK retry = 3 calls.
+            self.assertEqual(scrapling_mock.call_count, 3)
+            # can_fallback_to_browser(page_loading)=False, so no CDP fallback
             page_mock.assert_not_awaited()
             ensure_cdp_ready_mock.assert_not_called()
             self.assertIn("quick_live", [event["stage"] for event in progress_events])
