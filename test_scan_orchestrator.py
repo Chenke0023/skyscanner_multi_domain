@@ -1,8 +1,13 @@
-"""Tests for scan_orchestrator FailureClass/Action split and WAIT_RENDER."""
+"""Tests for scan_orchestrator FailureClass/Action split, WAIT_RENDER, and trace flush."""
 
 import argparse
 import asyncio
+import json
+import os
+import tempfile
 import unittest
+from pathlib import Path
+from unittest.mock import patch
 
 from scan_orchestrator import (
     FailureAction,
@@ -77,6 +82,40 @@ class LegacySCRAPLING_FALLBACK_STATUSESTests(unittest.TestCase):
 
     def test_includes_parse(self) -> None:
         assert "page_parse_failed" in SCRAPLING_FALLBACK_STATUSES
+
+
+class AttemptTraceFlushTests(unittest.TestCase):
+    def test_flush_emits_record_to_disk(self) -> None:
+        """flush() writes buffered records to disk even when < 50 records."""
+        import attempt_trace
+
+        with tempfile.TemporaryDirectory() as tmp:
+            log_dir = Path(tmp) / "logs" / "attempts"
+            log_dir.mkdir(parents=True, exist_ok=True)
+            test_path = log_dir / "test_flush.jsonl"
+
+            writer = attempt_trace.AttemptTraceWriter.__new__(attempt_trace.AttemptTraceWriter)
+            writer._today = "test_flush"
+            writer._path = test_path
+            writer._buf = []
+            import threading
+            writer._flush_lock = threading.Lock()
+
+            with patch.object(attempt_trace.AttemptTraceWriter, "get", return_value=writer):
+                attempt_trace.emit_trace(run_id="r1", route_key="BJSA_ALA", region="CN")
+                attempt_trace.flush()
+
+            assert test_path.exists(), "flush() did not create file"
+            content = test_path.read_text().strip()
+            assert content, "file is empty"
+            record = json.loads(content.splitlines()[0])
+            assert record["run_id"] == "r1"
+            assert record["region"] == "CN"
+
+    def test_flush_noop_when_empty(self) -> None:
+        """flush() with empty buffer does not raise."""
+        import attempt_trace
+        attempt_trace.flush()  # should not raise
 
 
 if __name__ == "__main__":

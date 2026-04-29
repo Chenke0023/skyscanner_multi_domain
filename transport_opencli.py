@@ -143,6 +143,8 @@ async def compare_via_opencli(
         route_key = f"{route_key}_rt{return_date.replace('-', '')}"
 
     latest_quotes: dict[str, FlightQuote] = {}
+    page_text_len_by_region: dict[str, int] = {}
+    page_url_by_region: dict[str, str] = {}
     start_time = time.time()
 
     for region in selected_regions:
@@ -213,6 +215,8 @@ async def compare_via_opencli(
                 page_text=page_text,
             )
 
+        page_text_len_by_region[region.code] = len(page_text)
+        page_url_by_region[region.code] = quote.source_url
         latest_quotes[region.code] = quote
 
         if on_region_complete:
@@ -237,8 +241,8 @@ async def compare_via_opencli(
             wait_ms=max(args.page_wait, 3) * 1000,
             load_dom=False,
             network_idle=False,
-            page_text_len=len(page_text),
-            page_url=quote.source_url,
+            page_text_len=page_text_len_by_region.get(quote.region, 0),
+            page_url=page_url_by_region.get(quote.region, quote.source_url),
             status=quote.status,
             failure_reason=quote.error,
             price=quote.price,

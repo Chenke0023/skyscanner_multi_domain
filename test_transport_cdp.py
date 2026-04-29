@@ -166,6 +166,7 @@ def test_compare_via_pages_reuses_existing_matching_tabs_without_opening_new_one
                     "text": "最優\nHK$3,305\n最便宜\nHK$3,072",
                 },
             ),
+            patch("transport_cdp.emit_trace", lambda **k: None),
         ):
             quotes = await compare_via_pages(
                 args,

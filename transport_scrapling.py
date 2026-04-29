@@ -824,18 +824,56 @@ async def compare_via_scrapling(
                     **current_state_overrides,
                 )
 
+        def _emit_scrapling_trace(
+            source_kind: str,
+            attempt_idx: int,
+            *,
+            used_cdp: bool = False,
+            used_profile: bool = False,
+            wait_override_ms: int | None = None,
+            load_dom: bool = False,
+            network_idle: bool = False,
+            final_quote: "FlightQuote | None" = None,
+            final_page_text: str = "",
+        ) -> None:
+            quote = final_quote or latest_quote
+            emit_trace(
+                run_id=run_id,
+                route_key=route_key,
+                region=region.code,
+                transport="scrapling",
+                attempt_index=attempt_idx,
+                source_kind=source_kind,
+                used_cdp_cookies=used_cdp,
+                used_profile_dir=used_profile,
+                wait_ms=wait_override_ms or wait_ms,
+                load_dom=load_dom,
+                network_idle=network_idle,
+                page_text_len=len(final_page_text) if final_page_text else len(page_text),
+                page_url=url,
+                status=quote.status if quote else "unknown",
+                failure_reason=quote.error if quote else None,
+                price=quote.price if quote else None,
+                currency=quote.currency if quote else region.currency,
+            )
+
         stealth_attempts = (
             {"solve_cloudflare": False, "wait_ms": wait_ms},
             {"solve_cloudflare": True, "wait_ms": max(wait_ms, 8000)},
             {"solve_cloudflare": True, "wait_ms": max(wait_ms * 2, 15000)},
         )
 
-        for attempt in stealth_attempts if FETCH_STAGE_STEALTH in pipeline_stages else ():
+        attempt_index = 0
+        source_kind = "scrapling_stealth"
+        for attempt_index, attempt in enumerate(stealth_attempts if FETCH_STAGE_STEALTH in pipeline_stages else ()):
+            cf_suffix = "_cf" if attempt["solve_cloudflare"] else ""
+            source_kind = f"scrapling_stealth{cf_suffix}"
             state_overrides = await _resolve_scrapling_state_overrides(
                 region,
                 url,
                 for_stealth=True,
             )
+            _emit_scrapling_trace(source_kind, attempt_index, used_cdp=bool(state_overrides))
             try:
                 page = await fetch_with_stealth(
                     solve_cloudflare=attempt["solve_cloudflare"],
@@ -844,6 +882,7 @@ async def compare_via_scrapling(
                 )
             except Exception as exc:
                 latest_error = f"Scrapling 抓取失败: {exc}"
+                _emit_scrapling_trace(source_kind, attempt_index, used_cdp=bool(state_overrides))
                 continue
 
             page_text = _extract_scrapling_page_text(page)
@@ -857,6 +896,7 @@ async def compare_via_scrapling(
                     source_label="Scrapling",
                 )
                 latest_quote.source_kind = "live"
+                _emit_scrapling_trace(source_kind, attempt_index, used_cdp=bool(state_overrides), final_quote=latest_quote, final_page_text=page_text)
                 break
             if not page_text:
                 latest_quote = FlightQuote(
@@ -869,11 +909,13 @@ async def compare_via_scrapling(
                     error="Scrapling 返回内容为空，未提取到可解析文本",
                     source_kind="live",
                 )
+                _emit_scrapling_trace(source_kind, attempt_index, used_cdp=bool(state_overrides), final_quote=latest_quote, final_page_text=page_text)
                 continue
 
             latest_quote = extract_page_quote(region, page_url, page_text)
             latest_quote.source_kind = latest_quote.source_kind or "live"
             if latest_quote.price is not None:
+                _emit_scrapling_trace(source_kind, attempt_index, used_cdp=bool(state_overrides), final_quote=latest_quote, final_page_text=page_text)
                 break
 
             if (
@@ -901,6 +943,15 @@ async def compare_via_scrapling(
                             dom_page_text,
                         )
                         latest_quote.source_kind = latest_quote.source_kind or "live"
+                        _emit_scrapling_trace(
+                            "scrapling_dom_retry", attempt_index,
+                            used_cdp=bool(state_overrides),
+                            load_dom=True,
+                            network_idle=True,
+                            wait_override_ms=max(attempt["wait_ms"], 12000),
+                            final_quote=latest_quote,
+                            final_page_text=dom_page_text,
+                        )
                         if latest_quote.price is not None:
                             break
                 except Exception:
@@ -914,6 +965,7 @@ async def compare_via_scrapling(
                     source_label="Scrapling",
                 )
                 latest_quote.source_kind = "live"
+                _emit_scrapling_trace(source_kind, attempt_index, used_cdp=bool(state_overrides), final_quote=latest_quote, final_page_text=page_text)
                 break
 
             if latest_quote.status not in {
@@ -921,6 +973,7 @@ async def compare_via_scrapling(
                 "page_loading",
                 "page_parse_failed",
             }:
+                _emit_scrapling_trace(source_kind, attempt_index, used_cdp=bool(state_overrides), final_quote=latest_quote, final_page_text=page_text)
                 break
 
         if latest_quote is not None:
@@ -965,6 +1018,13 @@ async def compare_via_scrapling(
                         if page_text:
                             latest_quote = extract_page_quote(region, url, page_text)
                             latest_quote.source_kind = latest_quote.source_kind or "live"
+                            _emit_scrapling_trace(
+                                "captcha_solve", attempt_index,
+                                used_cdp=bool(state_overrides) if state_overrides else False,
+                                wait_override_ms=max(wait_ms * 2, 15000),
+                                final_quote=latest_quote,
+                                final_page_text=page_text,
+                            )
                 await captcha_solver.close()
             except CaptchaSolverError as exc:
                 latest_quote = FlightQuote(
@@ -1015,6 +1075,13 @@ async def compare_via_scrapling(
                     else:
                         latest_quote = extract_page_quote(region, page_url, page_text)
                         latest_quote.source_kind = latest_quote.source_kind or "live"
+                        _emit_scrapling_trace(
+                            "scrapling_http_fallback", 0,
+                            used_cdp=False,
+                            used_profile=bool(state_overrides),
+                            final_quote=latest_quote,
+                            final_page_text=page_text,
+                        )
                 elif latest_quote is None:
                     latest_quote = FlightQuote(
                         region=region.code,
@@ -1062,7 +1129,7 @@ async def compare_via_scrapling(
             route_key=route_key,
             region=region.code,
             transport="scrapling",
-            attempt_index=0,
+            attempt_index=attempt_index,
             source_kind=latest_quote.source_kind or "unknown",
             used_cdp_cookies=bool(latest_error == ""),
             used_profile_dir=latest_error != "",

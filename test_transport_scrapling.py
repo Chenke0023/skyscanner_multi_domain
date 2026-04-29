@@ -312,6 +312,7 @@ class ScraplingRetryTests(unittest.TestCase):
                     "transport_scrapling._resolve_scrapling_state_overrides",
                     return_value={"user_data_dir": "/tmp/shared-profile"},
                 ),
+                patch("transport_scrapling.emit_trace", lambda **k: None),
             ):
                 quotes = await compare_via_scrapling(
                     args,
@@ -396,6 +397,7 @@ class ScraplingRetryTests(unittest.TestCase):
                     "transport_scrapling._resolve_scrapling_state_overrides",
                     return_value={"cookies": {"_px3": "token"}},
                 ),
+                patch("transport_scrapling.emit_trace", lambda **k: None),
             ):
                 quotes = await compare_via_scrapling(
                     args,
@@ -449,7 +451,7 @@ class ScraplingRetryTests(unittest.TestCase):
                     error="页面正文未识别到 Best/Cheapest 价格",
                     page_text="Show results by\nBest\n£123",
                 ),
-            ):
+            ), patch("transport_scrapling.emit_trace", lambda **k: None):
                 quotes = await compare_via_scrapling(
                     args,
                     [region],
@@ -499,7 +501,7 @@ class ScraplingRetryTests(unittest.TestCase):
                     error="Playwright 预探测命中 PX 验证页",
                     debug_log_path=None,
                 ),
-            ), patch.dict(sys.modules, {"scrapling": None}):
+            ), patch.dict(sys.modules, {"scrapling": None}), patch("transport_scrapling.emit_trace", lambda **k: None):
                 quotes = await compare_via_scrapling(
                     args,
                     [region],
@@ -558,6 +560,7 @@ class ScraplingRetryTests(unittest.TestCase):
                 ),
                 patch("transport_scrapling._probe_page_with_playwright") as playwright_probe,
                 patch.dict(sys.modules, {"scrapling": None}),
+                patch("transport_scrapling.emit_trace", lambda **k: None),
             ):
                 quotes = await compare_via_scrapling(
                     args,
@@ -723,7 +726,7 @@ class ScraplingRetryTests(unittest.TestCase):
             ), patch(
                 "transport_scrapling._resolve_scrapling_state_overrides",
                 return_value={},
-            ):
+            ), patch("transport_scrapling.emit_trace", lambda **k: None):
                 quotes = await compare_via_scrapling(
                     args,
                     [region],
