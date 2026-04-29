@@ -458,6 +458,7 @@ class ScraplingRetryTests(unittest.TestCase):
                         "https://www.skyscanner.sg/transport/flights/bjsa/tbs/260428/"
                     ),
                     persist_failure_log=lambda *a, **k: logged.append((a, k)) or a[0],
+                    fetch_pipeline="session_heavy",
                 )
 
             self.assertEqual(len(quotes), 1)
@@ -507,6 +508,7 @@ class ScraplingRetryTests(unittest.TestCase):
                         "https://www.skyscanner.sg/transport/flights/bjsa/tbs/260428/"
                     ),
                     persist_failure_log=lambda *a, **k: a[0],
+                    fetch_pipeline="session_heavy",
                 )
 
             self.assertEqual(len(quotes), 1)

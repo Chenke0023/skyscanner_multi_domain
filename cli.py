@@ -970,6 +970,7 @@ class SimpleCLI:
                 region_concurrency=CLI_REGION_CONCURRENCY,
                 query_payload=query_payload,
                 on_progress=on_progress,
+                fetch_pipeline=getattr(args, "fetch_pipeline", "balanced"),
             )
             if not quotes:
                 return (
@@ -1598,6 +1599,7 @@ class SimpleCLI:
             exact_airport=False,
             country_airport_limit=COUNTRY_ROUTE_DEFAULT_AIRPORT_LIMIT,
             transport="scrapling",
+            fetch_pipeline="balanced",
             preview_only=False,
             rerun_failed=False,
             show_delta=False,
@@ -1719,6 +1721,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--show-delta",
         action="store_true",
         help="扫描结束后额外打印相对上次的变化摘要",
+    )
+    page.add_argument(
+        "--fetch-pipeline",
+        choices=["fast", "balanced", "session_heavy"],
+        default="balanced",
+        help="Scrapling 抓取策略链: fast=快速直连, balanced=CDP复用+Stealth+验证码 (默认), session_heavy=完整浏览器会话链",
     )
     page.add_argument(
         "--save",
