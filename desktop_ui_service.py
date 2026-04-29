@@ -1611,6 +1611,7 @@ class DesktopUIService:
                             query_payload=query_payload,
                             on_progress=on_progress,
                             allow_browser_fallback=allow_browser_fallback,
+                            fetch_pipeline="balanced",
                         )
                         rows = get_rows_for_trip_label(merged_rows_by_date, trip_label)
                         quote_snapshots = get_quotes_for_trip_label(merged_quotes_by_date, trip_label)
@@ -1952,6 +1953,7 @@ class DesktopUIService:
                                     query_payload=query_payload,
                                     on_progress=on_pair_progress,
                                     allow_browser_fallback=allow_browser_fallback,
+                                    fetch_pipeline="balanced",
                                 )
                                 if not quotes:
                                     return (route_label, [])

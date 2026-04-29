@@ -1370,6 +1370,7 @@ class SimpleCLI:
                         region_concurrency=CLI_REGION_CONCURRENCY,
                         query_payload=query_payload,
                         on_progress=on_progress,
+                        fetch_pipeline=getattr(args, "fetch_pipeline", "balanced"),
                     )
                 if not quotes:
                     return pair_index, []
