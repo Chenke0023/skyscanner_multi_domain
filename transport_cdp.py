@@ -774,7 +774,7 @@ async def compare_via_pages(
                 )
                 page_text = str(payload.get("text", ""))
                 page_text_len_by_region[region.code] = len(page_text)
-                page_url_by_region[region.code] = str(domain_tab.get("url", ""))
+                page_url_by_region[region.code] = str(payload.get("url", domain_tab.get("url", "")))
 
                 final_quote = quote or FlightQuote(
                     region=region.code,

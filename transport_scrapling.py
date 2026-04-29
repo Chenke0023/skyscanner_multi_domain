@@ -456,6 +456,12 @@ def _looks_like_shell_page(page_text: str) -> bool:
     return False
 
 
+def _state_usage(state_overrides: dict[str, Any] | None) -> tuple[bool, bool]:
+    """Return (used_cdp_cookies, used_profile_dir) from state_overrides."""
+    state_overrides = state_overrides or {}
+    return "cookies" in state_overrides, "user_data_dir" in state_overrides
+
+
 def _check_captcha_in_page(page_text: str, page: Any | None = None) -> tuple[bool, str]:
     """Check if page contains captcha indicators.
 
@@ -709,6 +715,13 @@ async def compare_via_scrapling(
         latest_quote: FlightQuote | None = None
         latest_error: str | None = None
         detected_captcha_type = ""
+        _attempt_counter = [0]
+        _last_state_overrides: dict[str, Any] = {}
+
+        def _next_attempt() -> int:
+            val = _attempt_counter[0]
+            _attempt_counter[0] += 1
+            return val
 
         pipeline_stages = FETCH_PIPELINES.get(
             fetch_pipeline, FETCH_PIPELINES[DEFAULT_FETCH_PIPELINE]
@@ -865,7 +878,8 @@ async def compare_via_scrapling(
 
         attempt_index = 0
         source_kind = "scrapling_stealth"
-        for attempt_index, attempt in enumerate(stealth_attempts if FETCH_STAGE_STEALTH in pipeline_stages else ()):
+        for attempt in (stealth_attempts if FETCH_STAGE_STEALTH in pipeline_stages else ()):
+            attempt_index = _next_attempt()
             cf_suffix = "_cf" if attempt["solve_cloudflare"] else ""
             source_kind = f"scrapling_stealth{cf_suffix}"
             state_overrides = await _resolve_scrapling_state_overrides(
@@ -873,7 +887,9 @@ async def compare_via_scrapling(
                 url,
                 for_stealth=True,
             )
-            _emit_scrapling_trace(source_kind, attempt_index, used_cdp=bool(state_overrides))
+            _last_state_overrides = state_overrides
+            used_cdp, used_profile = _state_usage(state_overrides)
+            _emit_scrapling_trace(source_kind, attempt_index, used_cdp=used_cdp, used_profile=used_profile)
             try:
                 page = await fetch_with_stealth(
                     solve_cloudflare=attempt["solve_cloudflare"],
@@ -882,7 +898,7 @@ async def compare_via_scrapling(
                 )
             except Exception as exc:
                 latest_error = f"Scrapling 抓取失败: {exc}"
-                _emit_scrapling_trace(source_kind, attempt_index, used_cdp=bool(state_overrides))
+                _emit_scrapling_trace(source_kind, attempt_index, used_cdp=used_cdp, used_profile=used_profile)
                 continue
 
             page_text = _extract_scrapling_page_text(page)
@@ -896,7 +912,7 @@ async def compare_via_scrapling(
                     source_label="Scrapling",
                 )
                 latest_quote.source_kind = "live"
-                _emit_scrapling_trace(source_kind, attempt_index, used_cdp=bool(state_overrides), final_quote=latest_quote, final_page_text=page_text)
+                _emit_scrapling_trace(source_kind, attempt_index, used_cdp=used_cdp, used_profile=used_profile, final_quote=latest_quote, final_page_text=page_text)
                 break
             if not page_text:
                 latest_quote = FlightQuote(
@@ -909,13 +925,13 @@ async def compare_via_scrapling(
                     error="Scrapling 返回内容为空，未提取到可解析文本",
                     source_kind="live",
                 )
-                _emit_scrapling_trace(source_kind, attempt_index, used_cdp=bool(state_overrides), final_quote=latest_quote, final_page_text=page_text)
+                _emit_scrapling_trace(source_kind, attempt_index, used_cdp=used_cdp, used_profile=used_profile, final_quote=latest_quote, final_page_text=page_text)
                 continue
 
             latest_quote = extract_page_quote(region, page_url, page_text)
             latest_quote.source_kind = latest_quote.source_kind or "live"
             if latest_quote.price is not None:
-                _emit_scrapling_trace(source_kind, attempt_index, used_cdp=bool(state_overrides), final_quote=latest_quote, final_page_text=page_text)
+                _emit_scrapling_trace(source_kind, attempt_index, used_cdp=used_cdp, used_profile=used_profile, final_quote=latest_quote, final_page_text=page_text)
                 break
 
             if (
@@ -945,7 +961,7 @@ async def compare_via_scrapling(
                         latest_quote.source_kind = latest_quote.source_kind or "live"
                         _emit_scrapling_trace(
                             "scrapling_dom_retry", attempt_index,
-                            used_cdp=bool(state_overrides),
+                            used_cdp=used_cdp, used_profile=used_profile,
                             load_dom=True,
                             network_idle=True,
                             wait_override_ms=max(attempt["wait_ms"], 12000),
@@ -965,7 +981,7 @@ async def compare_via_scrapling(
                     source_label="Scrapling",
                 )
                 latest_quote.source_kind = "live"
-                _emit_scrapling_trace(source_kind, attempt_index, used_cdp=bool(state_overrides), final_quote=latest_quote, final_page_text=page_text)
+                _emit_scrapling_trace(source_kind, attempt_index, used_cdp=used_cdp, used_profile=used_profile, final_quote=latest_quote, final_page_text=page_text)
                 break
 
             if latest_quote.status not in {
@@ -973,7 +989,7 @@ async def compare_via_scrapling(
                 "page_loading",
                 "page_parse_failed",
             }:
-                _emit_scrapling_trace(source_kind, attempt_index, used_cdp=bool(state_overrides), final_quote=latest_quote, final_page_text=page_text)
+                _emit_scrapling_trace(source_kind, attempt_index, used_cdp=used_cdp, used_profile=used_profile, final_quote=latest_quote, final_page_text=page_text)
                 break
 
         if latest_quote is not None:
@@ -1010,17 +1026,23 @@ async def compare_via_scrapling(
                             token = await captcha_solver.solve_hcaptcha(url, site_key)
 
                     if token:
+                        captcha_state = await _resolve_scrapling_state_overrides(
+                            region, url, for_stealth=True
+                        )
+                        _last_state_overrides = captcha_state
+                        _captcha_used_cdp, _captcha_used_profile = _state_usage(captcha_state)
                         page = await fetch_with_stealth(
                             solve_cloudflare=True,
                             wait_override_ms=max(wait_ms * 2, 15000),
+                            state_overrides=captcha_state,
                         )
                         page_text = _extract_scrapling_page_text(page)
                         if page_text:
                             latest_quote = extract_page_quote(region, url, page_text)
                             latest_quote.source_kind = latest_quote.source_kind or "live"
                             _emit_scrapling_trace(
-                                "captcha_solve", attempt_index,
-                                used_cdp=bool(state_overrides) if state_overrides else False,
+                                "captcha_solve", _next_attempt(),
+                                used_cdp=_captcha_used_cdp, used_profile=_captcha_used_profile,
                                 wait_override_ms=max(wait_ms * 2, 15000),
                                 final_quote=latest_quote,
                                 final_page_text=page_text,
@@ -1075,10 +1097,12 @@ async def compare_via_scrapling(
                     else:
                         latest_quote = extract_page_quote(region, page_url, page_text)
                         latest_quote.source_kind = latest_quote.source_kind or "live"
+                        _last_state_overrides = state_overrides
+                        _http_used_cdp, _http_used_profile = _state_usage(state_overrides)
                         _emit_scrapling_trace(
-                            "scrapling_http_fallback", 0,
-                            used_cdp=False,
-                            used_profile=bool(state_overrides),
+                            "scrapling_http_fallback", _next_attempt(),
+                            used_cdp=_http_used_cdp,
+                            used_profile=_http_used_profile,
                             final_quote=latest_quote,
                             final_page_text=page_text,
                         )
@@ -1124,15 +1148,16 @@ async def compare_via_scrapling(
         if on_region_complete is not None:
             on_region_complete(region, latest_quote)
 
+        _final_used_cdp, _final_used_profile = _state_usage(_last_state_overrides)
         emit_trace(
             run_id=run_id,
             route_key=route_key,
             region=region.code,
             transport="scrapling",
-            attempt_index=attempt_index,
+            attempt_index=_next_attempt(),
             source_kind=latest_quote.source_kind or "unknown",
-            used_cdp_cookies=bool(latest_error == ""),
-            used_profile_dir=latest_error != "",
+            used_cdp_cookies=_final_used_cdp,
+            used_profile_dir=_final_used_profile,
             wait_ms=wait_ms,
             load_dom=False,
             network_idle=False,
