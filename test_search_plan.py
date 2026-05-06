@@ -7,9 +7,11 @@ from search_plan import (
     build_market_candidates,
     build_ordered_trip_dates,
     build_search_plan,
+    flatten_plan_batches,
     rank_region_codes,
     rank_route_pairs,
     render_search_plan,
+    scan_batch_region_codes,
 )
 from scan_history import build_plan_telemetry
 from scan_orchestrator import quotes_to_dicts
@@ -180,6 +182,100 @@ def test_plan_task_count_unchanged_in_phase_two() -> None:
 
     assert len(plan.tasks) == 2 * 2 * 3 * 5
     assert sum(len(batch.tasks) for batch in plan.batches) == len(plan.tasks)
+
+
+def test_scan_batches_preserve_all_tasks() -> None:
+    origins = [
+        LocationRecord(name="Beijing", code="PEK", kind="airport", airport_type="large_airport"),
+        LocationRecord(name="Shanghai", code="PVG", kind="airport", airport_type="large_airport"),
+    ]
+    destinations = [
+        LocationRecord(name="Almaty", code="ALA", kind="airport", airport_type="large_airport"),
+    ]
+    plan = build_search_plan(
+        TripIntent(
+            origin_input="中国",
+            destination_input="哈萨克斯坦",
+            depart_date="2026-05-20",
+            return_date=None,
+            origin_is_country=True,
+            destination_is_country=False,
+            date_window=1,
+            user_regions=[],
+        ),
+        origins,
+        destinations,
+        ["CN", "HK", "SG", "UK", "KZ"],
+        origin_country="CN",
+        destination_country="KZ",
+    )
+
+    def task_key(task):
+        return (
+            task.route.origin_code,
+            task.route.destination_code,
+            task.date.depart_date,
+            task.date.return_date,
+            task.market.region_code,
+        )
+
+    flattened = flatten_plan_batches(plan.batches)
+    assert len(flattened) == len(plan.tasks)
+    assert {task_key(task) for task in flattened} == {task_key(task) for task in plan.tasks}
+
+
+def test_scan_batches_do_not_drop_markets() -> None:
+    origins = [LocationRecord(name="Beijing", code="PEK", kind="airport")]
+    destinations = [LocationRecord(name="Almaty", code="ALA", kind="airport")]
+    plan = build_search_plan(
+        TripIntent("北京", "阿拉木图", "2026-05-20", None, False, False, 1, []),
+        origins,
+        destinations,
+        ["CN", "HK", "SG", "UK", "KZ"],
+    )
+
+    market_codes_from_tasks = {task.market.region_code for task in plan.tasks}
+    market_codes_from_batches = {
+        task.market.region_code
+        for batch in plan.batches
+        for task in batch.tasks
+    }
+    assert market_codes_from_batches == market_codes_from_tasks
+
+
+def test_batch_order_is_stable() -> None:
+    origins = [LocationRecord(name="Beijing", code="PEK", kind="airport")]
+    destinations = [LocationRecord(name="Almaty", code="ALA", kind="airport")]
+    plan = build_search_plan(
+        TripIntent("北京", "阿拉木图", "2026-05-20", None, False, False, 2, []),
+        origins,
+        destinations,
+        ["CN", "HK", "SG", "UK", "KZ"],
+    )
+
+    expected_order = ["probe", "verify", "expand", "deep"]
+    phases = [batch.phase for batch in plan.batches]
+    assert phases == [phase for phase in expected_order if phase in phases]
+
+
+def test_batch_region_codes_are_unique_and_ordered() -> None:
+    origins = [LocationRecord(name="Beijing", code="PEK", kind="airport")]
+    destinations = [LocationRecord(name="Almaty", code="ALA", kind="airport")]
+    plan = build_search_plan(
+        TripIntent("北京", "阿拉木图", "2026-05-20", None, False, False, 2, []),
+        origins,
+        destinations,
+        ["CN", "HK", "SG", "UK", "KZ"],
+    )
+
+    for batch in plan.batches:
+        codes = scan_batch_region_codes(batch)
+        first_seen = []
+        for task in batch.tasks:
+            if task.market.region_code not in first_seen:
+                first_seen.append(task.market.region_code)
+        assert codes == first_seen
+        assert len(codes) == len(set(codes))
 
 
 def test_render_search_plan_includes_explanations() -> None:

@@ -457,6 +457,26 @@ def build_scan_batches(tasks: Sequence[ScanTask]) -> list[ScanBatch]:
     return batches
 
 
+def scan_batch_region_codes(batch: ScanBatch) -> list[str]:
+    codes: list[str] = []
+    seen: set[str] = set()
+    for task in batch.tasks:
+        code = task.market.region_code
+        if code in seen:
+            continue
+        seen.add(code)
+        codes.append(code)
+    return codes
+
+
+def flatten_plan_batches(batches: Sequence[ScanBatch]) -> list[ScanTask]:
+    return [task for batch in batches for task in batch.tasks]
+
+
+def render_batch_label(batch: ScanBatch) -> str:
+    return f"{batch.batch_id} {batch.phase}: {batch.reason}"
+
+
 def build_search_plan(
     intent: TripIntent,
     origin_points: Sequence[LocationRecord],

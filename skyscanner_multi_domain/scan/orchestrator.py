@@ -17,9 +17,12 @@ from skyscanner_multi_domain.models import FlightQuote, RegionConfig
 from skyscanner_multi_domain.planning.search_plan import (
     DateCandidate,
     RouteCandidate,
+    ScanBatch,
     build_date_candidates,
     build_market_candidates,
+    build_scan_batches,
     build_scan_tasks,
+    scan_batch_region_codes,
     rank_region_codes,
 )
 from skyscanner_multi_domain.geo.regions import REGIONS, get_selected_regions
@@ -120,6 +123,37 @@ SCRAPLING_FALLBACK_STATUSES: set[str] = {
 }
 
 ScanProgressCallback = Callable[[dict[str, Any]], Union[Awaitable[None], None]]
+
+
+def build_plan_progress_payload(
+    *,
+    stage: str,
+    quotes: list[FlightQuote],
+    completed_regions: list[str],
+    batch: ScanBatch | None,
+    batch_index: int | None,
+    batch_count: int | None,
+    total_tasks: int | None,
+    is_final: bool = False,
+    used_cached_preview: bool = False,
+    batch_completed: bool = False,
+) -> dict[str, Any]:
+    return {
+        "stage": stage,
+        "quotes": quotes_to_dicts(quotes),
+        "completed_regions": list(completed_regions),
+        "is_final": bool(is_final),
+        "used_cached_preview": bool(used_cached_preview),
+        "plan_phase": batch.phase if batch is not None else None,
+        "active_plan_phase": batch.phase if batch is not None else None,
+        "plan_phase_label": batch.reason if batch is not None else None,
+        "plan_batch_id": batch_index,
+        "plan_batch_count": batch_count,
+        "plan_batch_reason": batch.reason if batch is not None else None,
+        "plan_batch_completed": bool(batch_completed),
+        "plan_tasks_total": total_tasks,
+        "plan_tasks_in_batch": len(batch.tasks) if batch is not None else None,
+    }
 
 
 def parse_date(date_str: str) -> tuple[datetime, str, str]:
@@ -436,6 +470,8 @@ async def run_page_scan(
             ],
         )
         plan_tasks = build_scan_tasks([plan_route], plan_dates, plan_markets)
+        execution_plan_tasks = build_scan_tasks([plan_route], [plan_date], plan_markets)
+        plan_batches = build_scan_batches(execution_plan_tasks)
         plan_task_by_key = {
             (task.date.depart_date, task.date.return_date, task.market.region_code): (index + 1, task)
             for index, task in enumerate(plan_tasks)
@@ -461,19 +497,28 @@ async def run_page_scan(
             stage: str,
             quotes: list[FlightQuote],
             completed_regions: list[str],
+            batch: ScanBatch | None = None,
+            batch_index: int | None = None,
+            batch_count: int | None = None,
+            batch_completed: bool = False,
             is_final: bool = False,
             used_cached_preview: bool = False,
         ) -> None:
             if on_progress is None:
                 return
             result = on_progress(
-                {
-                    "stage": stage,
-                    "quotes": quotes_to_dicts(quotes),
-                    "completed_regions": list(completed_regions),
-                    "is_final": bool(is_final),
-                    "used_cached_preview": bool(used_cached_preview),
-                }
+                build_plan_progress_payload(
+                    stage=stage,
+                    quotes=quotes,
+                    completed_regions=completed_regions,
+                    batch=batch,
+                    batch_index=batch_index,
+                    batch_count=batch_count,
+                    total_tasks=len(execution_plan_tasks),
+                    is_final=is_final,
+                    used_cached_preview=used_cached_preview,
+                    batch_completed=batch_completed,
+                )
             )
             if inspect.isawaitable(result):
                 await result
@@ -836,15 +881,99 @@ async def run_page_scan(
                 is_final=True,
             )
         elif normalized_transport == "opencli":
-            quotes = await run_opencli_pass(
-                selected_regions,
-                enable_fallbacks=allow_browser_fallback,
-            )
-            quotes = apply_plan_metadata(quotes)
+            merged_quotes: list[FlightQuote] = []
+            completed_regions: list[str] = []
+            scanned_region_codes: set[str] = set()
+            region_by_code = {region.code: region for region in selected_regions}
+            selected_region_codes_set = set(region_by_code)
+
+            for batch_index, batch in enumerate(plan_batches, start=1):
+                batch_region_codes = scan_batch_region_codes(batch)
+                batch_regions = [
+                    region_by_code[code]
+                    for code in batch_region_codes
+                    if code in region_by_code and code not in scanned_region_codes
+                ]
+                if not batch_regions:
+                    continue
+                await emit_progress(
+                    stage="plan_batch_start",
+                    quotes=apply_plan_metadata(list(merged_quotes)),
+                    completed_regions=completed_regions,
+                    batch=batch,
+                    batch_index=batch_index,
+                    batch_count=len(plan_batches),
+                    batch_completed=False,
+                )
+                batch_quotes = await run_opencli_pass(
+                    batch_regions,
+                    enable_fallbacks=allow_browser_fallback,
+                )
+                batch_quotes = apply_plan_metadata(batch_quotes)
+                merged_quotes = merge_quotes_by_region(merged_quotes, batch_quotes)
+                for region in batch_regions:
+                    scanned_region_codes.add(region.code)
+                    if region.code not in completed_regions:
+                        completed_regions.append(region.code)
+                await emit_progress(
+                    stage="plan_batch_complete",
+                    quotes=apply_plan_metadata(list(merged_quotes)),
+                    completed_regions=completed_regions,
+                    batch=batch,
+                    batch_index=batch_index,
+                    batch_count=len(plan_batches),
+                    batch_completed=True,
+                )
+
+            remaining_regions = [
+                region
+                for region in selected_regions
+                if region.code not in scanned_region_codes
+            ]
+            if remaining_regions:
+                fallback_batch = ScanBatch(
+                    batch_id=len(plan_batches) + 1,
+                    phase="deep",
+                    tasks=[],
+                    reason="补扫未覆盖市场，保持完整扫描集合",
+                )
+                await emit_progress(
+                    stage="plan_batch_start",
+                    quotes=apply_plan_metadata(list(merged_quotes)),
+                    completed_regions=completed_regions,
+                    batch=fallback_batch,
+                    batch_index=fallback_batch.batch_id,
+                    batch_count=len(plan_batches) + 1,
+                    batch_completed=False,
+                )
+                remaining_quotes = await run_opencli_pass(
+                    remaining_regions,
+                    enable_fallbacks=allow_browser_fallback,
+                )
+                remaining_quotes = apply_plan_metadata(remaining_quotes)
+                merged_quotes = merge_quotes_by_region(merged_quotes, remaining_quotes)
+                for region in remaining_regions:
+                    scanned_region_codes.add(region.code)
+                    if region.code not in completed_regions:
+                        completed_regions.append(region.code)
+                await emit_progress(
+                    stage="plan_batch_complete",
+                    quotes=apply_plan_metadata(list(merged_quotes)),
+                    completed_regions=completed_regions,
+                    batch=fallback_batch,
+                    batch_index=fallback_batch.batch_id,
+                    batch_count=len(plan_batches) + 1,
+                    batch_completed=True,
+                )
+
+            missing_regions = selected_region_codes_set - scanned_region_codes
+            if missing_regions:
+                raise RuntimeError(f"SearchPlan batch scan missed regions: {sorted(missing_regions)}")
+            quotes = apply_plan_metadata(merged_quotes)
             await emit_progress(
                 stage="final",
                 quotes=quotes,
-                completed_regions=[region.code for region in selected_regions],
+                completed_regions=completed_regions,
                 is_final=True,
             )
         else:

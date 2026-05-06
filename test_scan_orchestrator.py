@@ -17,7 +17,9 @@ from scan_orchestrator import (
     failure_action,
     should_retry_wait_render,
     SCRAPLING_FALLBACK_STATUSES,
+    run_page_scan,
 )
+from skyscanner_models import FlightQuote
 
 
 class FailureClassTests(unittest.TestCase):
@@ -116,6 +118,71 @@ class AttemptTraceFlushTests(unittest.TestCase):
         """flush() with empty buffer does not raise."""
         import attempt_trace
         attempt_trace.flush()  # should not raise
+
+
+class OpenCliBatchProgressTests(unittest.IsolatedAsyncioTestCase):
+    async def test_opencli_emits_search_plan_batch_progress_without_dropping_regions(self) -> None:
+        calls: list[list[str]] = []
+        progress_events: list[dict] = []
+
+        async def fake_compare_via_opencli(args, regions, **kwargs):
+            region_codes = [region.code for region in regions]
+            calls.append(region_codes)
+            return [
+                FlightQuote(
+                    region=region.code,
+                    domain=region.domain,
+                    price=1000.0 + index,
+                    currency=region.currency,
+                    source_url=f"https://example.test/{region.code}",
+                    status="ok",
+                )
+                for index, region in enumerate(regions)
+            ]
+
+        async def on_progress(payload: dict) -> None:
+            progress_events.append(payload)
+
+        with patch(
+            "skyscanner_multi_domain.transports.opencli.compare_via_opencli",
+            side_effect=fake_compare_via_opencli,
+        ):
+            quotes = await run_page_scan(
+                origin="BJSA",
+                destination="ALA",
+                date="2026-05-20",
+                region_codes=["CN", "HK", "SG", "UK", "KZ"],
+                transport="opencli",
+                allow_browser_fallback=False,
+                on_progress=on_progress,
+                query_payload={
+                    "identity": {
+                        "date": "2026-05-20",
+                        "date_window_days": 0,
+                        "origin_country": "CN",
+                        "destination_country": "KZ",
+                    }
+                },
+            )
+
+        scanned_regions = [code for call in calls for code in call]
+        assert set(scanned_regions) == {"CN", "HK", "SG", "UK", "KZ"}
+        assert len(scanned_regions) == len(set(scanned_regions))
+        assert {quote.region for quote in quotes} == {"CN", "HK", "SG", "UK", "KZ"}
+
+        starts = [event for event in progress_events if event["stage"] == "plan_batch_start"]
+        completes = [event for event in progress_events if event["stage"] == "plan_batch_complete"]
+        assert starts
+        assert completes
+        assert len(starts) == len(completes) == len(calls)
+        assert progress_events[-1]["stage"] == "final"
+        for event in [*starts, *completes]:
+            assert event["active_plan_phase"]
+            assert event["plan_batch_id"] is not None
+            assert event["plan_batch_count"] is not None
+            assert event["plan_batch_reason"]
+            assert event["plan_tasks_total"] is not None
+            assert event["plan_tasks_in_batch"] is not None
 
 
 if __name__ == "__main__":

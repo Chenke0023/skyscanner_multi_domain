@@ -97,7 +97,7 @@ Acceptance:
 
 ### 5. Batch execution progress for opencli path
 
-Status: next implementation target.
+Status: implemented baseline.
 
 Todo:
 
@@ -116,6 +116,12 @@ Acceptance:
 - Result set is unchanged.
 - Higher-priority results can be displayed earlier.
 - Progress payload includes the active batch phase and reason.
+
+Notes:
+
+- SearchPlan batches now emit `plan_batch_start` and `plan_batch_complete`.
+- Progress payload includes `active_plan_phase` and `plan_batch_*` fields.
+- No pruning, early stopping, or task skipping is enabled.
 
 ## P1: Result Trust And Evidence
 
@@ -294,10 +300,10 @@ npm --prefix webui run build
 ## Suggested Next Five Tasks
 
 1. Keep the explicit `desktop_ui_service -> cli.SimpleCLI` debt visible.
-2. Emit SearchPlan batch progress from scan orchestration.
-3. Display SearchPlan phase/status in desktop WebView.
-4. Expand plan telemetry in history/details views.
-5. Add parser diagnostics to result objects.
+2. Display SearchPlan phase/status in desktop WebView.
+3. Expand plan telemetry in history/details views.
+4. Add parser diagnostics to result objects.
+5. Build a decision-oriented report summary.
 
 ## Do Not Do Yet
 
