@@ -65,6 +65,8 @@
 
 历史 refactor、旧分支状态和迁移细节记录在 `docs/history/2026-04-refactor-notes.md`。当前开发以本文件的 active / legacy 边界为准。
 
+当前任务优先级和验收标准记录在 `docs/todo.md`。下一阶段重点是 SearchPlan batch progress、桌面 WebView 阶段展示和结果可信度，不做动态剪枝。
+
 ## 启动方式
 
 ### macOS App（推荐）

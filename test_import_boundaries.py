@@ -83,6 +83,15 @@ def test_desktop_logic_does_not_import_cli() -> None:
     assert "cli" not in imports
 
 
+def test_desktop_ui_service_cli_dependency_is_explicit_debt_only() -> None:
+    imports = _imports_for(ROOT / "desktop_ui_service.py")
+    assert "cli" in imports
+    handoff = (ROOT / "AI_AGENT_HANDOFF.md").read_text(encoding="utf-8")
+    todo = (ROOT / "docs" / "todo.md").read_text(encoding="utf-8")
+    assert "desktop_ui_service -> cli.SimpleCLI" in handoff
+    assert "desktop_ui_service -> cli.SimpleCLI" in todo
+
+
 def test_root_shims_import_same_module_object_and_keep_public_all() -> None:
     for shim_name, target_name in SHIM_TARGETS.items():
         shim = importlib.import_module(shim_name)
