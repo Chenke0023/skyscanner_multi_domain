@@ -14,6 +14,7 @@ from typing import Any, Awaitable, Callable, Literal, Optional, Union
 from app_paths import get_failure_log_file
 from attempt_trace import flush as flush_attempt_trace
 from skyscanner_models import FlightQuote, RegionConfig
+from search_plan import rank_region_codes
 from skyscanner_regions import REGIONS, get_selected_regions
 
 FAILURE_LOG_TEXT_LIMIT = 12000
@@ -337,6 +338,44 @@ async def run_page_scan(
             flush_attempt_trace()
             return []
 
+        resolved_history_store = None
+        latest_record_for_plan = None
+        if query_payload is not None:
+            try:
+                from scan_history import ScanHistoryStore
+
+                resolved_history_store = history_store or ScanHistoryStore()
+                latest_record_for_plan = resolved_history_store.get_latest_scan(query_payload)
+            except Exception:
+                latest_record_for_plan = None
+        identity = query_payload.get("identity") if isinstance(query_payload, dict) else {}
+        identity = identity if isinstance(identity, dict) else {}
+        origin_country_hint = str(identity.get("origin_country") or "")
+        destination_country_hint = str(identity.get("destination_country") or "")
+        origin_code_hint = str(identity.get("origin_code") or "")
+        destination_code_hint = str(identity.get("destination_code") or "")
+        if not origin_country_hint and origin_code_hint.endswith("_ANY"):
+            origin_country_hint = origin_code_hint.removesuffix("_ANY")
+        if not destination_country_hint and destination_code_hint.endswith("_ANY"):
+            destination_country_hint = destination_code_hint.removesuffix("_ANY")
+        ranked_region_codes = rank_region_codes(
+            [region.code for region in selected_regions],
+            latest_record_for_plan.rows_by_date if latest_record_for_plan is not None else None,
+            origin_country=origin_country_hint,
+            destination_country=destination_country_hint,
+            manual_region_codes=[
+                str(code)
+                for code in identity.get("manual_regions", [])
+                if isinstance(code, str)
+            ],
+        )
+        selected_region_by_code = {region.code: region for region in selected_regions}
+        selected_regions = [
+            selected_region_by_code[code]
+            for code in ranked_region_codes
+            if code in selected_region_by_code
+        ]
+
         async def emit_progress(
             *,
             stage: str,
@@ -583,9 +622,8 @@ async def run_page_scan(
             )
         elif normalized_transport == "scrapling":
             if normalized_scan_mode == "preview_first":
-                resolved_history_store = history_store or (ScanHistoryStore() if query_payload else None)
                 latest_record = (
-                    resolved_history_store.get_latest_scan(query_payload)
+                    latest_record_for_plan
                     if resolved_history_store is not None and query_payload is not None
                     else None
                 )

@@ -15,11 +15,7 @@ from typing import Any
 
 from app_paths import get_gui_state_file, get_reports_dir
 from cli import CombinedQuoteRow, SimpleCLI
-from date_window import (
-    build_date_window,
-    build_round_trip_date_window,
-    format_trip_date_label,
-)
+from date_window import format_trip_date_label
 from desktop_logic import (
     _AUTO_REFRESH_DISABLED,
     _GUI_AIRPORT_PAIR_CONCURRENCY,
@@ -74,6 +70,7 @@ from scan_history import (
     summarize_query_history,
     ScanHistoryStore,
 )
+from search_plan import build_ordered_trip_dates, rank_route_pairs
 from skyscanner_neo import (
     DEFAULT_REGIONS,
     NeoCli,
@@ -1410,10 +1407,7 @@ class DesktopUIService:
         allow_browser_fallback: bool,
     ) -> None:
         try:
-            if return_date:
-                trip_dates = build_round_trip_date_window(date, return_date, date_window_days)
-            else:
-                trip_dates = [(current_date, None) for current_date in build_date_window(date, date_window_days)]
+            trip_dates = build_ordered_trip_dates(date, return_date, date_window_days)
             latest_record = self.history_store.get_latest_scan(query_payload)
             normalized_selected_codes = {code.strip().upper() for code in selected_region_codes if code.strip()}
             trip_labels = [
@@ -1728,17 +1722,18 @@ class DesktopUIService:
         allow_browser_fallback: bool,
     ) -> None:
         try:
-            if return_date:
-                trip_dates = build_round_trip_date_window(date, return_date, date_window_days)
-            else:
-                trip_dates = [(current_date, None) for current_date in build_date_window(date, date_window_days)]
+            trip_dates = build_ordered_trip_dates(date, return_date, date_window_days)
             latest_record = self.history_store.get_latest_scan(query_payload)
             normalized_selected_codes = {code.strip().upper() for code in selected_region_codes if code.strip()}
             trip_labels = [
                 format_trip_date_label(current_date, current_return_date)
                 for current_date, current_return_date in trip_dates
             ]
-            pair_specs = [(origin_airport, destination_airport) for origin_airport in origin_points for destination_airport in destination_points]
+            pair_specs = rank_route_pairs(
+                origin_points,
+                destination_points,
+                latest_record.rows_by_date if latest_record is not None else None,
+            )
             pair_count = len(pair_specs)
 
             def _region_count_for_trip(trip_label: str) -> int:
