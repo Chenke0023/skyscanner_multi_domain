@@ -90,3 +90,25 @@ def test_queue_failure_region_updates_retry_queue(tmp_path: Path) -> None:
     assert payload["queuedRegions"] == ["HK"]
     state = service.get_ui_state()
     assert state["alerts"]["pendingRetryRegions"] == ["HK"]
+
+
+def test_desktop_progress_includes_active_plan_phase(tmp_path: Path) -> None:
+    service = build_service(tmp_path)
+
+    service._update_partial_scan(
+        rows_by_date=[],
+        status="正在扫描阶段 probe",
+        log_message="",
+        plan_progress={
+            "active_plan_phase": "probe",
+            "plan_batch_id": 1,
+            "plan_batch_count": 3,
+            "plan_batch_reason": "核心路线、核心日期和高优先级市场",
+            "plan_batch_completed": False,
+        },
+    )
+
+    assert service._progress["active_plan_phase"] == "probe"
+    assert service._progress["plan_batch_id"] == 1
+    assert service._progress["plan_batch_count"] == 3
+    assert service._progress["plan_batch_reason"] == "核心路线、核心日期和高优先级市场"

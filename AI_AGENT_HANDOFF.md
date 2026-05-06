@@ -75,6 +75,7 @@ Current SearchPlan behavior is intentionally conservative:
 
 - It ranks and explains candidates.
 - It attaches `plan_rank`, `plan_reason`, route/date/market ranks, and telemetry.
+- It emits opencli batch progress with `active_plan_phase` and `plan_batch_*` fields.
 - It does not prune or reduce the final scan set.
 
 ## 4. Do Not Modify By Default
@@ -98,7 +99,6 @@ python cli.py page -o 北京 -d 阿拉木图 -t 2026-05-20 --date-window 1 --sho
 ## 6. Current Next Tasks
 
 - Keep `desktop_ui_service -> cli.SimpleCLI` as explicit P1 debt; do not expand desktop reuse of `SimpleCLI`.
-- Emit SearchPlan batch progress from scan orchestration without pruning or skipping tasks.
 - Add visible plan phase/status to the desktop WebView UI.
 - Add plan telemetry display in history/details views.
 - Add parser diagnostics/confidence to result objects and reports.

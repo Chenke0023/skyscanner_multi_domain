@@ -1031,7 +1031,26 @@ class SimpleCLI:
 
             async def on_progress(progress_payload: dict[str, object]) -> None:
                 stage = str(progress_payload.get("stage") or "").strip().lower()
-                if not stage or stage in printed_stages:
+                if not stage:
+                    return
+                if stage in {"plan_batch_start", "plan_batch_complete"}:
+                    batch_id = progress_payload.get("plan_batch_id")
+                    batch_count = progress_payload.get("plan_batch_count")
+                    phase = str(progress_payload.get("active_plan_phase") or "-")
+                    reason = str(progress_payload.get("plan_batch_reason") or "").strip()
+                    key = f"{stage}:{batch_id}:{phase}"
+                    if key in printed_stages:
+                        return
+                    printed_stages.add(key)
+                    prefix = "[plan] batch" if stage == "plan_batch_start" else "[plan] completed batch"
+                    suffix = f": {reason}" if reason else ""
+                    completed = progress_payload.get("completed_regions") or []
+                    completed_text = ""
+                    if stage == "plan_batch_complete" and isinstance(completed, list):
+                        completed_text = f", completed regions: {', '.join(str(code) for code in completed)}"
+                    print(f"{prefix} {batch_id}/{batch_count} {phase}{suffix}{completed_text}")
+                    return
+                if stage in printed_stages:
                     return
                 printed_stages.add(stage)
                 stage_text = {
@@ -1457,7 +1476,26 @@ class SimpleCLI:
 
                 async def on_progress(progress_payload: dict[str, object]) -> None:
                     stage = str(progress_payload.get("stage") or "").strip().lower()
-                    if not stage or stage in printed_stages:
+                    if not stage:
+                        return
+                    if stage in {"plan_batch_start", "plan_batch_complete"}:
+                        batch_id = progress_payload.get("plan_batch_id")
+                        batch_count = progress_payload.get("plan_batch_count")
+                        phase = str(progress_payload.get("active_plan_phase") or "-")
+                        reason = str(progress_payload.get("plan_batch_reason") or "").strip()
+                        key = f"{stage}:{batch_id}:{phase}"
+                        if key in printed_stages:
+                            return
+                        printed_stages.add(key)
+                        prefix = "[plan] batch" if stage == "plan_batch_start" else "[plan] completed batch"
+                        suffix = f": {reason}" if reason else ""
+                        completed = progress_payload.get("completed_regions") or []
+                        completed_text = ""
+                        if stage == "plan_batch_complete" and isinstance(completed, list):
+                            completed_text = f", completed regions: {', '.join(str(code) for code in completed)}"
+                        print(f"{prefix} {batch_id}/{batch_count} {phase}{suffix}{completed_text}")
+                        return
+                    if stage in printed_stages:
                         return
                     printed_stages.add(stage)
                     stage_text = {

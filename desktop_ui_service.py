@@ -1120,10 +1120,13 @@ class DesktopUIService:
         rows_by_date: list[tuple[str, list[dict[str, Any]]]],
         status: str,
         log_message: str,
+        plan_progress: dict[str, Any] | None = None,
     ) -> None:
         with self._lock:
             self._set_display_rows_from_grouped_locked(rows_by_date)
             self._status_message = status
+            if plan_progress:
+                self._progress.update(plan_progress)
             if log_message:
                 self._log_locked(log_message)
 
@@ -1544,31 +1547,56 @@ class DesktopUIService:
                             quote_dicts = [
                                 quote for quote in (progress_payload.get("quotes") or []) if isinstance(quote, dict)
                             ]
-                            if not quote_dicts:
-                                return
-                            live_rows_by_date = annotate_rows_with_history(
-                                [
-                                    (
-                                        trip_label,
-                                        self.cli.simplify_quotes(
-                                            quote_dicts,
-                                            route_label=f"{origin_code} -> {destination_code}",
-                                        ),
-                                    )
-                                ],
-                                latest_record.rows_by_date if latest_record else None,
-                            )
-                            merged_rows_by_date = merge_rows_by_date(cached_rows_by_date, live_rows_by_date)
-                            merged_quotes_by_date = merge_quotes_by_date(
-                                cached_quotes_by_date,
-                                [(trip_label, quote_dicts)],
-                            )
+                            if quote_dicts:
+                                live_rows_by_date = annotate_rows_with_history(
+                                    [
+                                        (
+                                            trip_label,
+                                            self.cli.simplify_quotes(
+                                                quote_dicts,
+                                                route_label=f"{origin_code} -> {destination_code}",
+                                            ),
+                                        )
+                                    ],
+                                    latest_record.rows_by_date if latest_record else None,
+                                )
+                                merged_rows_by_date = merge_rows_by_date(cached_rows_by_date, live_rows_by_date)
+                                merged_quotes_by_date = merge_quotes_by_date(
+                                    cached_quotes_by_date,
+                                    [(trip_label, quote_dicts)],
+                                )
                             partial_rows = get_rows_for_trip_label(merged_rows_by_date, trip_label)
                             partial_quotes = get_quotes_for_trip_label(merged_quotes_by_date, trip_label)
                             stage = str(progress_payload.get("stage") or "").strip().lower()
                             completed_regions = progress_payload.get("completed_regions") or []
+                            plan_phase = str(progress_payload.get("active_plan_phase") or "").strip()
+                            plan_reason = str(progress_payload.get("plan_batch_reason") or "").strip()
+                            plan_batch_id = progress_payload.get("plan_batch_id")
+                            plan_batch_count = progress_payload.get("plan_batch_count")
+                            plan_progress = {
+                                key: progress_payload.get(key)
+                                for key in (
+                                    "active_plan_phase",
+                                    "plan_phase",
+                                    "plan_batch_id",
+                                    "plan_batch_count",
+                                    "plan_batch_reason",
+                                    "plan_batch_completed",
+                                    "plan_tasks_total",
+                                    "plan_tasks_in_batch",
+                                )
+                                if key in progress_payload
+                            }
                             status_map = {
                                 "preview_cache": f"{trip_label} 预览缓存已展示。",
+                                "plan_batch_start": (
+                                    f"{trip_label} 正在扫描阶段 {plan_phase} "
+                                    f"({plan_batch_id}/{plan_batch_count})：{plan_reason}"
+                                ),
+                                "plan_batch_complete": (
+                                    f"{trip_label} 已完成阶段 {plan_phase} "
+                                    f"({plan_batch_id}/{plan_batch_count})。"
+                                ),
                                 "quick_live": f"{trip_label} 已返回高优先级市场结果，正在补全其余市场...",
                                 "background_live": f"{trip_label} 正在后台补全其余市场...",
                                 "region_update": f"{trip_label} 正在扫描 ({len(completed_regions)}/{total_steps})...",
@@ -1576,6 +1604,8 @@ class DesktopUIService:
                             }
                             log_map = {
                                 "preview_cache": f"{trip_label} 已展示预览缓存。",
+                                "plan_batch_start": f"{trip_label} 开始 SearchPlan 阶段 {plan_phase}。",
+                                "plan_batch_complete": f"{trip_label} 完成 SearchPlan 阶段 {plan_phase}。",
                                 "quick_live": f"{trip_label} 已先刷新高优先级市场的实时结果。",
                                 "background_live": f"{trip_label} 已补充更多市场的实时结果。",
                                 "region_update": f"{trip_label} 正在扫描...",
@@ -1587,6 +1617,7 @@ class DesktopUIService:
                                 partial_quotes,
                                 status=status_map.get(stage, f"{trip_label} 正在刷新结果..."),
                                 log_message=log_map.get(stage, f"{trip_label} 正在刷新结果。"),
+                                plan_progress=plan_progress,
                             )
 
                         await run_page_scan(
@@ -1893,27 +1924,52 @@ class DesktopUIService:
                                         for quote in (progress_payload.get("quotes") or [])
                                         if isinstance(quote, dict)
                                     ]
-                                    if not quote_dicts:
-                                        return
-                                    rows = self.cli._with_route_plan_metadata(
-                                        self.cli.simplify_quotes(
-                                            quote_dicts,
-                                            route_label=route_label,
-                                        ),
-                                        route_rank=pair_index + 1,
-                                        route_reason=f"路线候选排序 {pair_index + 1}",
-                                    )
-                                    for row in rows:
-                                        region_name = str(row.get("region_name") or "-")
-                                        best_rows_by_region[region_name] = self.cli._pick_better_row(
-                                            best_rows_by_region.get(region_name),
-                                            row,
+                                    if quote_dicts:
+                                        rows = self.cli._with_route_plan_metadata(
+                                            self.cli.simplify_quotes(
+                                                quote_dicts,
+                                                route_label=route_label,
+                                            ),
+                                            route_rank=pair_index + 1,
+                                            route_reason=f"路线候选排序 {pair_index + 1}",
                                         )
+                                        for row in rows:
+                                            region_name = str(row.get("region_name") or "-")
+                                            best_rows_by_region[region_name] = self.cli._pick_better_row(
+                                                best_rows_by_region.get(region_name),
+                                                row,
+                                            )
                                     partial_rows, partial_quotes = build_rows_snapshot()
                                     stage = str(progress_payload.get("stage") or "").strip().lower()
                                     completed_regions = progress_payload.get("completed_regions") or []
+                                    plan_phase = str(progress_payload.get("active_plan_phase") or "").strip()
+                                    plan_reason = str(progress_payload.get("plan_batch_reason") or "").strip()
+                                    plan_batch_id = progress_payload.get("plan_batch_id")
+                                    plan_batch_count = progress_payload.get("plan_batch_count")
+                                    plan_progress = {
+                                        key: progress_payload.get(key)
+                                        for key in (
+                                            "active_plan_phase",
+                                            "plan_phase",
+                                            "plan_batch_id",
+                                            "plan_batch_count",
+                                            "plan_batch_reason",
+                                            "plan_batch_completed",
+                                            "plan_tasks_total",
+                                            "plan_tasks_in_batch",
+                                        )
+                                        if key in progress_payload
+                                    }
                                     status_map = {
                                         "preview_cache": f"{trip_label} / {route_label} 预览缓存已展示。",
+                                        "plan_batch_start": (
+                                            f"{trip_label} / {route_label} 正在扫描阶段 {plan_phase} "
+                                            f"({plan_batch_id}/{plan_batch_count})：{plan_reason}"
+                                        ),
+                                        "plan_batch_complete": (
+                                            f"{trip_label} / {route_label} 已完成阶段 {plan_phase} "
+                                            f"({plan_batch_id}/{plan_batch_count})。"
+                                        ),
                                         "quick_live": f"{trip_label} / {route_label} 已返回高优先级市场结果，正在补全其余市场...",
                                         "background_live": f"{trip_label} / {route_label} 正在后台补全其余市场...",
                                         "region_update": (
@@ -1924,6 +1980,8 @@ class DesktopUIService:
                                     }
                                     log_map = {
                                         "preview_cache": f"{trip_label} / {route_label} 已展示预览缓存。",
+                                        "plan_batch_start": f"{trip_label} / {route_label} 开始 SearchPlan 阶段 {plan_phase}。",
+                                        "plan_batch_complete": f"{trip_label} / {route_label} 完成 SearchPlan 阶段 {plan_phase}。",
                                         "quick_live": f"{trip_label} / {route_label} 已先刷新高优先级市场。",
                                         "background_live": f"{trip_label} / {route_label} 已补充更多市场。",
                                         "region_update": f"{trip_label} / {route_label} 已刷新一个市场结果。",
@@ -1935,6 +1993,7 @@ class DesktopUIService:
                                         partial_quotes,
                                         status=status_map.get(stage, f"{trip_label} / {route_label} 正在刷新结果..."),
                                         log_message=log_map.get(stage, f"{trip_label} / {route_label} 正在刷新结果。"),
+                                        plan_progress=plan_progress,
                                     )
 
                                 quotes = await run_page_scan(
