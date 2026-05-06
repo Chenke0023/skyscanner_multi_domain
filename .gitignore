@@ -21,7 +21,7 @@ Skyscanner 多市场比价.spec
 Skyscanner 多市场比价-Standalone.spec
 build/
 dist/
-runtime/
+/runtime/
 webui/node_modules/
 webui/dist/
 webui/*.tsbuildinfo

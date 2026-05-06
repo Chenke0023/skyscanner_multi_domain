@@ -38,6 +38,23 @@ SHIM_TARGETS = {
     "transport_opencli": "skyscanner_multi_domain.transports.opencli",
     "transport_scrapling": "skyscanner_multi_domain.transports.scrapling",
 }
+DOCUMENTED_PACKAGE_MODULES = {
+    "skyscanner_multi_domain.diagnostics.attempt_trace",
+    "skyscanner_multi_domain.geo.location_resolver",
+    "skyscanner_multi_domain.geo.regions",
+    "skyscanner_multi_domain.models",
+    "skyscanner_multi_domain.parsing.page_parser",
+    "skyscanner_multi_domain.planning.date_window",
+    "skyscanner_multi_domain.planning.search_plan",
+    "skyscanner_multi_domain.pricing.fx_rates",
+    "skyscanner_multi_domain.runtime.paths",
+    "skyscanner_multi_domain.scan.history",
+    "skyscanner_multi_domain.scan.orchestrator",
+    "skyscanner_multi_domain.scan.output_rows",
+    "skyscanner_multi_domain.transports.cdp",
+    "skyscanner_multi_domain.transports.opencli",
+    "skyscanner_multi_domain.transports.scrapling",
+}
 
 
 def _imports_for(path: Path) -> set[str]:
@@ -72,3 +89,18 @@ def test_root_shims_import_same_module_object_and_keep_public_all() -> None:
         target = importlib.import_module(target_name)
         assert shim is target
         assert all(not name.startswith("_") for name in getattr(shim, "__all__", ()))
+
+
+def test_runtime_paths_importable() -> None:
+    paths = importlib.import_module("skyscanner_multi_domain.runtime.paths")
+    assert paths.PROJECT_ROOT is not None
+
+
+def test_primary_entries_importable() -> None:
+    for module_name in ("cli", "desktop_logic", "desktop_ui_service", "desktop_webview"):
+        importlib.import_module(module_name)
+
+
+def test_documented_package_modules_exist() -> None:
+    for module_name in sorted(DOCUMENTED_PACKAGE_MODULES):
+        importlib.import_module(module_name)
