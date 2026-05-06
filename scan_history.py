@@ -392,6 +392,68 @@ def build_delta_summary_lines(rows_by_date: RowsByDate) -> list[str]:
     return lines
 
 
+def build_plan_telemetry(quotes_by_date: QuotesByDate) -> dict[str, Any]:
+    flattened: list[dict[str, Any]] = []
+    for trip_label, quotes in quotes_by_date:
+        for quote in quotes:
+            item = deepcopy(quote)
+            item["date"] = trip_label
+            flattened.append(item)
+
+    valid_quotes = [
+        quote for quote in flattened if _quote_has_numeric_price(quote)
+    ]
+    best_quote = min(valid_quotes, key=_quote_price_key) if valid_quotes else None
+    first_valid = min(
+        valid_quotes,
+        key=lambda quote: _optional_int(quote.get("plan_rank")),
+    ) if valid_quotes else None
+
+    return {
+        "total_tasks": len(flattened),
+        "priced_tasks": len(valid_quotes),
+        "first_valid_task_index": _optional_int(first_valid.get("plan_rank")) if first_valid else None,
+        "best_result_found_at_task_index": _optional_int(best_quote.get("plan_rank")) if best_quote else None,
+        "best_result_market_rank": _optional_int(best_quote.get("market_rank")) if best_quote else None,
+        "best_result_date_rank": _optional_int(best_quote.get("date_rank")) if best_quote else None,
+        "best_result_route_rank": _optional_int(best_quote.get("route_rank")) if best_quote else None,
+        "best_result_region": (
+            str(best_quote.get("region") or "") or None if best_quote else None
+        ),
+        "best_result_date": (
+            str(best_quote.get("date") or "") or None if best_quote else None
+        ),
+    }
+
+
+def _quote_has_numeric_price(quote: dict[str, Any]) -> bool:
+    return any(
+        isinstance(quote.get(key), (int, float))
+        for key in ("price", "best_price", "cheapest_price")
+    )
+
+
+def _quote_price_key(quote: dict[str, Any]) -> tuple[float, float, float]:
+    cheapest = quote.get("cheapest_price")
+    price = quote.get("price")
+    best = quote.get("best_price")
+    return (
+        float(cheapest) if isinstance(cheapest, (int, float)) else float("inf"),
+        float(price) if isinstance(price, (int, float)) else float("inf"),
+        float(best) if isinstance(best, (int, float)) else float("inf"),
+    )
+
+
+def _optional_int(value: Any) -> int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float) and value.is_integer():
+        return int(value)
+    return None
+
+
 def build_history_series(
     records: list["ScanRecord"],
     *,
@@ -654,6 +716,8 @@ class ScanHistoryStore:
         *,
         scan_mode: str,
     ) -> int:
+        query_payload = deepcopy(query_payload)
+        query_payload["plan_telemetry"] = build_plan_telemetry(quotes_by_date)
         query_key = build_query_key(query_payload)
         title = build_query_title(query_payload)
         created_at = datetime.now().isoformat(timespec="seconds")

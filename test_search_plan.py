@@ -2,12 +2,18 @@ from __future__ import annotations
 
 from location_resolver import LocationRecord
 from search_plan import (
+    TripIntent,
     build_date_candidates,
     build_market_candidates,
     build_ordered_trip_dates,
+    build_search_plan,
     rank_region_codes,
     rank_route_pairs,
+    render_search_plan,
 )
+from scan_history import build_plan_telemetry
+from scan_orchestrator import quotes_to_dicts
+from skyscanner_models import FlightQuote
 
 
 def test_build_date_candidates_orders_anchor_edges_nearby_remaining() -> None:
@@ -81,3 +87,197 @@ def test_rank_route_pairs_prefers_earlier_airport_candidates() -> None:
         ("PVG", "ALA"),
         ("PVG", "NQZ"),
     ]
+
+
+def test_all_candidates_have_reason_and_score_breakdown() -> None:
+    origins = [
+        LocationRecord(name="Beijing", code="PEK", kind="airport", airport_type="large_airport"),
+    ]
+    destinations = [
+        LocationRecord(name="Almaty", code="ALA", kind="airport", airport_type="large_airport"),
+    ]
+    plan = build_search_plan(
+        TripIntent(
+            origin_input="北京",
+            destination_input="阿拉木图",
+            depart_date="2026-05-20",
+            return_date=None,
+            origin_is_country=False,
+            destination_is_country=False,
+            date_window=1,
+            user_regions=["HK"],
+        ),
+        origins,
+        destinations,
+        ["CN", "HK", "SG"],
+        origin_country="CN",
+    )
+
+    candidates = [
+        *plan.route_candidates,
+        *plan.date_candidates,
+        *plan.market_candidates,
+    ]
+    assert candidates
+    assert all(candidate.reason for candidate in candidates)
+    assert all(candidate.score_breakdown for candidate in candidates)
+
+
+def test_score_breakdown_sums_to_score_for_route_and_market() -> None:
+    origins = [
+        LocationRecord(name="Beijing", code="PEK", kind="airport", airport_type="large_airport"),
+    ]
+    destinations = [
+        LocationRecord(name="Almaty", code="ALA", kind="airport", airport_type="large_airport"),
+    ]
+    plan = build_search_plan(
+        TripIntent(
+            origin_input="北京",
+            destination_input="阿拉木图",
+            depart_date="2026-05-20",
+            return_date=None,
+            origin_is_country=False,
+            destination_is_country=False,
+            date_window=0,
+            user_regions=[],
+        ),
+        origins,
+        destinations,
+        ["CN", "HK"],
+        origin_country="CN",
+    )
+
+    for candidate in [*plan.route_candidates, *plan.market_candidates]:
+        assert abs(sum(candidate.score_breakdown.values()) - candidate.score) < 0.001
+
+
+def test_plan_task_count_unchanged_in_phase_two() -> None:
+    origins = [
+        LocationRecord(name="Beijing", code="PEK", kind="airport", airport_type="large_airport"),
+        LocationRecord(name="Shanghai", code="PVG", kind="airport", airport_type="large_airport"),
+    ]
+    destinations = [
+        LocationRecord(name="Almaty", code="ALA", kind="airport", airport_type="large_airport"),
+        LocationRecord(name="Astana", code="NQZ", kind="airport", airport_type="large_airport"),
+    ]
+    plan = build_search_plan(
+        TripIntent(
+            origin_input="中国",
+            destination_input="哈萨克斯坦",
+            depart_date="2026-05-20",
+            return_date=None,
+            origin_is_country=True,
+            destination_is_country=True,
+            date_window=1,
+            user_regions=[],
+        ),
+        origins,
+        destinations,
+        ["CN", "HK", "SG", "UK", "KZ"],
+        origin_country="CN",
+        destination_country="KZ",
+    )
+
+    assert len(plan.tasks) == 2 * 2 * 3 * 5
+    assert sum(len(batch.tasks) for batch in plan.batches) == len(plan.tasks)
+
+
+def test_render_search_plan_includes_explanations() -> None:
+    origins = [
+        LocationRecord(name="Beijing", code="PEK", kind="airport", airport_type="large_airport"),
+    ]
+    destinations = [
+        LocationRecord(name="Almaty", code="ALA", kind="airport", airport_type="large_airport"),
+    ]
+    plan = build_search_plan(
+        TripIntent(
+            origin_input="北京",
+            destination_input="阿拉木图",
+            depart_date="2026-05-20",
+            return_date=None,
+            origin_is_country=False,
+            destination_is_country=False,
+            date_window=0,
+            user_regions=[],
+        ),
+        origins,
+        destinations,
+        ["CN"],
+        origin_country="CN",
+    )
+
+    rendered = render_search_plan(plan)
+
+    assert "扫描计划" in rendered
+    assert "市场顺序" in rendered
+    assert "日期顺序" in rendered
+    assert "路线顺序" in rendered
+    assert "批次" in rendered
+    assert "reason=" in rendered
+
+
+def test_quotes_to_dicts_preserves_plan_metadata() -> None:
+    quote = FlightQuote(
+        region="HK",
+        domain="https://www.skyscanner.com.hk",
+        price=1200.0,
+        currency="HKD",
+        source_url="https://example.test",
+        status="ok",
+        plan_rank=3,
+        plan_score=0.72,
+        plan_phase="probe",
+        plan_reason="baseline 市场",
+        route_rank=1,
+        date_rank=2,
+        market_rank=3,
+    )
+
+    payload = quotes_to_dicts([quote])[0]
+
+    assert payload["plan_rank"] == 3
+    assert payload["plan_score"] == 0.72
+    assert payload["plan_phase"] == "probe"
+    assert payload["plan_reason"] == "baseline 市场"
+    assert payload["route_rank"] == 1
+    assert payload["date_rank"] == 2
+    assert payload["market_rank"] == 3
+
+
+def test_build_plan_telemetry_tracks_first_valid_and_best_result() -> None:
+    telemetry = build_plan_telemetry(
+        [
+            (
+                "2026-05-20",
+                [
+                    {"region": "CN", "price": None, "plan_rank": 1, "market_rank": 1},
+                    {
+                        "region": "HK",
+                        "price": 1800.0,
+                        "cheapest_price": 1800.0,
+                        "plan_rank": 2,
+                        "market_rank": 2,
+                        "date_rank": 1,
+                        "route_rank": 1,
+                    },
+                    {
+                        "region": "KZ",
+                        "price": 1200.0,
+                        "cheapest_price": 1200.0,
+                        "plan_rank": 5,
+                        "market_rank": 3,
+                        "date_rank": 2,
+                        "route_rank": 1,
+                    },
+                ],
+            )
+        ]
+    )
+
+    assert telemetry["total_tasks"] == 3
+    assert telemetry["priced_tasks"] == 2
+    assert telemetry["first_valid_task_index"] == 2
+    assert telemetry["best_result_found_at_task_index"] == 5
+    assert telemetry["best_result_market_rank"] == 3
+    assert telemetry["best_result_date_rank"] == 2
+    assert telemetry["best_result_route_rank"] == 1

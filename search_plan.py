@@ -18,6 +18,7 @@ SearchMode = Literal["fast", "balanced", "deep"]
 DatePhase = Literal["anchor", "edge", "nearby", "full"]
 TaskPhase = Literal["probe", "expand", "verify", "deep"]
 RowsByDate = list[tuple[str, list[dict[str, object]]]]
+ScoreBreakdown = dict[str, float]
 
 
 @dataclass(frozen=True)
@@ -43,6 +44,7 @@ class RouteCandidate:
     reason: str
     confidence: float
     score: float
+    score_breakdown: ScoreBreakdown
 
 
 @dataclass(frozen=True)
@@ -53,6 +55,7 @@ class DateCandidate:
     phase: DatePhase
     reason: str
     score: float
+    score_breakdown: ScoreBreakdown
 
 
 @dataclass(frozen=True)
@@ -63,6 +66,7 @@ class MarketCandidate:
     reliability: float
     historical_win_rate: float
     score: float
+    score_breakdown: ScoreBreakdown
 
 
 @dataclass(frozen=True)
@@ -73,6 +77,25 @@ class ScanTask:
     priority: float
     phase: TaskPhase
     reason: str
+
+
+@dataclass(frozen=True)
+class ScanBatch:
+    batch_id: int
+    phase: TaskPhase
+    tasks: list[ScanTask]
+    reason: str
+
+
+@dataclass(frozen=True)
+class SearchPlan:
+    intent: TripIntent
+    route_candidates: list[RouteCandidate]
+    date_candidates: list[DateCandidate]
+    market_candidates: list[MarketCandidate]
+    tasks: list[ScanTask]
+    batches: list[ScanBatch]
+    warnings: list[str]
 
 
 @dataclass(frozen=True)
@@ -189,6 +212,7 @@ def build_date_candidates(
                 phase=phase,
                 reason=reason,
                 score=max(score, 0.1),
+                score_breakdown={phase: max(score, 0.1)},
             )
         )
     return candidates
@@ -239,6 +263,15 @@ def build_market_candidates(
             + 0.05 * manual_score
             + 0.03 * position_score
         )
+        score_breakdown = {
+            "baseline_region": 0.24 * baseline_score,
+            "origin_destination_region": 0.32 * route_score,
+            "history_win_rate": 0.18 * win_rate,
+            "recent_success_rate": 0.14 * success_rate,
+            "currency_usability": 0.08 * usability_score,
+            "user_selected_region": 0.05 * manual_score,
+            "input_order": 0.03 * position_score,
+        }
         candidates.append(
             MarketCandidate(
                 region_code=code,
@@ -247,6 +280,7 @@ def build_market_candidates(
                 reliability=success_rate,
                 historical_win_rate=win_rate,
                 score=score,
+                score_breakdown=score_breakdown,
             )
         )
 
@@ -259,6 +293,7 @@ def build_market_candidates(
             reliability=candidate.reliability,
             historical_win_rate=candidate.historical_win_rate,
             score=candidate.score,
+            score_breakdown=candidate.score_breakdown,
         )
         for index, candidate in enumerate(ranked)
     ]
@@ -309,6 +344,12 @@ def build_route_candidates(
                 + 0.20 * success_score
                 + 0.16 * win_score
             )
+            score_breakdown = {
+                "airport_priority": 0.42 * priority_score,
+                "airport_type": 0.22 * airport_type_score,
+                "historical_success": 0.20 * success_score,
+                "historical_price_win": 0.16 * win_score,
+            }
             raw_candidates.append(
                 RouteCandidate(
                     origin_code=origin.code,
@@ -321,6 +362,7 @@ def build_route_candidates(
                     reason=_route_reason(origin_index, destination_index, success_score, win_score),
                     confidence=min(0.95, 0.45 + 0.35 * success_score + 0.20 * priority_score),
                     score=score,
+                    score_breakdown=score_breakdown,
                 )
             )
     ranked = sorted(
@@ -337,6 +379,7 @@ def build_route_candidates(
             reason=candidate.reason,
             confidence=candidate.confidence,
             score=candidate.score,
+            score_breakdown=candidate.score_breakdown,
         )
         for index, candidate in enumerate(ranked)
     ]
@@ -388,6 +431,125 @@ def build_scan_tasks(
                     )
                 )
     return sorted(tasks, key=lambda item: -item.priority)
+
+
+def build_scan_batches(tasks: Sequence[ScanTask]) -> list[ScanBatch]:
+    phase_order: list[TaskPhase] = ["probe", "verify", "expand", "deep"]
+    phase_reasons = {
+        "probe": "核心路线、核心日期和高优先级市场，用于最快拿到可行动信号",
+        "verify": "围绕高价值日期和市场补充对照验证",
+        "expand": "补全更多市场和候选组合，保持完整覆盖范围",
+        "deep": "补扫剩余低优先级日期或航段，不改变最终扫描全集",
+    }
+    batches: list[ScanBatch] = []
+    for phase in phase_order:
+        batch_tasks = [task for task in tasks if task.phase == phase]
+        if not batch_tasks:
+            continue
+        batches.append(
+            ScanBatch(
+                batch_id=len(batches) + 1,
+                phase=phase,
+                tasks=batch_tasks,
+                reason=phase_reasons[phase],
+            )
+        )
+    return batches
+
+
+def build_search_plan(
+    intent: TripIntent,
+    origin_points: Sequence[LocationRecord],
+    destination_points: Sequence[LocationRecord],
+    region_codes: Iterable[str],
+    previous_rows_by_date: RowsByDate | None = None,
+    *,
+    origin_country: str = "",
+    destination_country: str = "",
+) -> SearchPlan:
+    routes = build_route_candidates(origin_points, destination_points, previous_rows_by_date)
+    dates = build_date_candidates(intent.depart_date, intent.return_date, intent.date_window)
+    markets = build_market_candidates(
+        region_codes,
+        previous_rows_by_date,
+        origin_country=origin_country,
+        destination_country=destination_country,
+        manual_region_codes=intent.user_regions,
+    )
+    tasks = build_scan_tasks(routes, dates, markets)
+    warnings: list[str] = []
+    expected_task_count = len(origin_points) * len(destination_points) * len(dates) * len(markets)
+    if len(tasks) != expected_task_count:
+        warnings.append(
+            f"计划任务数 {len(tasks)} 与候选笛卡尔积 {expected_task_count} 不一致。"
+        )
+    if intent.mode != "balanced":
+        warnings.append(f"{intent.mode} 模式当前只影响计划说明，暂不减少扫描全集。")
+    return SearchPlan(
+        intent=intent,
+        route_candidates=routes,
+        date_candidates=dates,
+        market_candidates=markets,
+        tasks=tasks,
+        batches=build_scan_batches(tasks),
+        warnings=warnings,
+    )
+
+
+def render_search_plan(plan: SearchPlan, *, max_tasks: int = 12) -> str:
+    lines = [
+        "扫描计划",
+        "",
+        f"模式: {plan.intent.mode}",
+        f"任务总数: {len(plan.tasks)}",
+        f"批次数: {len(plan.batches)}",
+    ]
+    if plan.warnings:
+        lines.append("")
+        lines.append("警告:")
+        lines.extend(f"- {warning}" for warning in plan.warnings)
+
+    lines.extend(["", "市场顺序:"])
+    for market in plan.market_candidates:
+        lines.append(
+            f"{market.rank}. {market.region_code}  score={market.score:.2f}  "
+            f"reason={market.reason}  breakdown={_format_breakdown(market.score_breakdown)}"
+        )
+
+    lines.extend(["", "日期顺序:"])
+    for index, date in enumerate(plan.date_candidates, start=1):
+        label = date.depart_date if not date.return_date else f"{date.depart_date} -> {date.return_date}"
+        lines.append(
+            f"{index}. {label}  phase={date.phase}  score={date.score:.2f}  reason={date.reason}"
+        )
+
+    lines.extend(["", "路线顺序:"])
+    for route in plan.route_candidates:
+        lines.append(
+            f"{route.rank}. {route.origin_code} -> {route.destination_code}  "
+            f"score={route.score:.2f}  confidence={route.confidence:.2f}  "
+            f"reason={route.reason}  breakdown={_format_breakdown(route.score_breakdown)}"
+        )
+
+    lines.extend(["", "批次:"])
+    for batch in plan.batches:
+        lines.append(
+            f"{batch.batch_id}. {batch.phase}  tasks={len(batch.tasks)}  reason={batch.reason}"
+        )
+
+    lines.extend(["", f"前 {min(max_tasks, len(plan.tasks))} 个任务:"])
+    for index, task in enumerate(plan.tasks[:max_tasks], start=1):
+        date_label = (
+            task.date.depart_date
+            if not task.date.return_date
+            else f"{task.date.depart_date}->{task.date.return_date}"
+        )
+        lines.append(
+            f"{index}. {task.route.origin_code}->{task.route.destination_code}  "
+            f"{date_label}  {task.market.region_code}  phase={task.phase}  "
+            f"priority={task.priority:.2f}"
+        )
+    return "\n".join(lines) + "\n"
 
 
 def _has_price(row: dict[str, object]) -> bool:
@@ -491,3 +653,12 @@ def _task_phase(
     if market.rank <= 4:
         return "verify"
     return "expand"
+
+
+def _format_breakdown(breakdown: ScoreBreakdown) -> str:
+    parts = [
+        f"{key}={value:.2f}"
+        for key, value in breakdown.items()
+        if abs(value) >= 0.005
+    ]
+    return ", ".join(parts) if parts else "-"
