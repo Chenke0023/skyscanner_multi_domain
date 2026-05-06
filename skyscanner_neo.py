@@ -32,13 +32,13 @@ import aiohttp
 
 from app_paths import PROJECT_ROOT
 from skyscanner_models import FlightQuote, RegionConfig
-from skyscanner_page_parser import (
+from skyscanner_multi_domain.parsing.page_parser import (
     PAGE_TEXT_CAPTURE_LIMIT,
     extract_page_quote,
     first_currency,
     parse_float,
 )
-from skyscanner_regions import (
+from skyscanner_multi_domain.geo.regions import (
     DEFAULT_REGIONS,
     REGIONS,
     build_effective_region_codes,
@@ -48,15 +48,15 @@ from skyscanner_regions import (
 # ---------------------------------------------------------------------------
 # Re-exports for backward compatibility
 # ---------------------------------------------------------------------------
-from scan_orchestrator import (  # noqa: F401
+from skyscanner_multi_domain.scan.orchestrator import (  # noqa: F401
     build_search_url,
     print_quotes,
     quotes_to_dicts,
     run_page_scan,
 )
 # PLACEHOLDER_REEXPORT_TAIL
-from scan_orchestrator import _persist_failure_log  # noqa: F401
-from transport_cdp import (  # noqa: F401
+from skyscanner_multi_domain.scan.orchestrator import _persist_failure_log  # noqa: F401
+from skyscanner_multi_domain.transports.cdp import (  # noqa: F401
     detect_browsers,
     detect_cdp_version,
     ensure_cdp_ready,
@@ -65,7 +65,7 @@ from transport_cdp import (  # noqa: F401
     verify_browser_session_persistence,
     wait_for_cdp,
 )
-from transport_scrapling import (  # noqa: F401
+from skyscanner_multi_domain.transports.scrapling import (  # noqa: F401
     _check_captcha_in_page,
     _extract_scrapling_page_text,
     compare_via_scrapling,
@@ -716,7 +716,7 @@ def print_doctor(
 
 
 async def compare_prices(args: argparse.Namespace) -> int:
-    from transport_cdp import compare_via_pages
+    from skyscanner_multi_domain.transports.cdp import compare_via_pages
 
     project_root = PROJECT_ROOT
     neo = NeoCli(project_root)

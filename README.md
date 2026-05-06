@@ -2,42 +2,44 @@
 
 这是一个以 `opencli` 浏览器自动化为主方案、以 Edge + CDP `page` 和 Scrapling legacy 方案为备用兜底的 Skyscanner 多市场比价工具。
 
-当前维护的是一条明确的产品路径：桌面 WebView 是唯一面向终端用户的产品体验，CLI 保留为开发、调试、自动化和导出入口，旧 Tk GUI 进入 legacy freeze。
+当前只维护一条面向终端用户的产品路径：桌面 WebView。CLI 保留为开发、调试、自动化和导出入口；旧 Tk GUI 与根目录兼容 shim 只做 legacy 兼容。
 
-## Supported Entry Points
+## Active / Legacy Map
 
 ### Primary product
 
-- `desktop_webview.py` — 桌面 app 壳
-- `webui/` — 打包进桌面 app 的 React UI 资源
+- `desktop_webview.py` — 桌面 WebView app 壳
 - `desktop_ui_service.py` — UI 与扫描引擎之间的 bridge
+- `webui/` — 打包进桌面 app 的 React UI
 
-### Developer / automation
+### Developer entry
 
 - `cli.py` — headless runner，用于 smoke test、bug 复现、脚本化扫描、SearchPlan 验证和 Markdown/CSV/JSON 导出
+
+### Core modules
+
+- `skyscanner_multi_domain/planning/search_plan.py` — 候选排序、扫描计划解释和批次计划
+- `skyscanner_multi_domain/scan/orchestrator.py` — 扫描编排
+- `skyscanner_multi_domain/scan/history.py` — 历史记录、预览缓存、plan telemetry
+- `skyscanner_multi_domain/transports/opencli.py` — opencli 传输
+- `skyscanner_multi_domain/transports/cdp.py` — CDP 传输
+- `skyscanner_multi_domain/transports/scrapling.py` — Scrapling legacy 传输
+- `skyscanner_multi_domain/parsing/page_parser.py` — 页面解析
+- `skyscanner_multi_domain/geo/location_resolver.py` — 地点/国家/机场解析
+- `skyscanner_multi_domain/geo/regions.py` — 地区配置
+- `skyscanner_neo.py` — Neo 兼容层
+- `skyscanner_models.py` — 数据模型
 
 ### Legacy
 
 - `legacy/gui.py` / `gui.py` — deprecated Tk interface。只修启动级别问题，不再增加 SearchPlan UI、历史抽屉、失败修复 UI 或视觉优化。
-
-### Core modules
-
-- `search_plan.py` — 候选排序、扫描计划解释和批次计划
-- `scan_orchestrator.py` — 扫描编排
-- `transport_opencli.py` — opencli 传输
-- `transport_cdp.py` — CDP 传输
-- `transport_scrapling.py` — Scrapling legacy 传输
-- `skyscanner_neo.py` — Neo 兼容层
-- `skyscanner_regions.py` — 地区配置
-- `skyscanner_page_parser.py` — 页面解析
-- `skyscanner_models.py` — 数据模型
-- `AI_AGENT_HANDOFF.md` — 交接文档
+- 根目录 `scan_orchestrator.py`、`scan_history.py`、`search_plan.py`、`transport_*.py`、`skyscanner_page_parser.py`、`location_resolver.py`、`skyscanner_regions.py` — compatibility shims。旧测试和 mock target 仍会访问这些路径，新逻辑不得写入这里。
 
 ## Engineering Rules
 
 新增功能先按边界归类：
 
-1. 扫描核心能力：放在 `scan_orchestrator.py`、`search_plan.py`、parser、history 或 transport 模块。
+1. 扫描核心能力：放在 `skyscanner_multi_domain/scan/`、`skyscanner_multi_domain/planning/`、`skyscanner_multi_domain/parsing/`、`skyscanner_multi_domain/geo/` 或 `skyscanner_multi_domain/transports/`。
 2. 终端用户体验：只做 `webui/` + `desktop_webview.py` + `desktop_ui_service.py`。
 3. 调试、自动化、导出：CLI 可以暴露。
 4. 旧 GUI 兼容：默认不做新功能，只修启动级别问题。
@@ -50,32 +52,7 @@
 
 当前推荐优先使用 opencli 驱动浏览器打开结果页、抽取正文并解析 Best / Cheapest 价格；opencli 未取到价格时会先 fallback 到 `page`，仍失败时再尝试 Scrapling legacy。
 
-当前项目进展：
-
-- opencli 主方案已合入 `main`
-- `skyscanner_neo.py` 拆分成果已合入 `main`，当前保留四模块结构：
-  - `scan_orchestrator.py`
-  - `transport_opencli.py`
-  - `transport_scrapling.py`
-  - `transport_cdp.py`
-  - `skyscanner_neo.py`（兼容层 + re-export）
-- CLI 默认路径已完成真实取价验证
-- GUI/CLI 当前默认走 opencli
-- opencli 失败市场会自动 fallback 到 `page`，再 fallback 到 Scrapling legacy
-
-## 仓库整理状态（2026-04-09）
-
-当前仓库以 `main` 为唯一活跃主线：
-
-- 历史功能分支已合并并清理
-- 本地分支当前只保留 `main`
-- 远端分支当前只保留 `origin/main`
-
-当前建议工作方式：
-
-- 新功能使用短生命周期分支开发
-- 合并进 `main` 后立即删除本地 / 远端功能分支
-- 不再长期保留已合并的历史分支
+历史 refactor、旧分支状态和迁移细节记录在 `docs/history/2026-04-refactor-notes.md`。当前开发以本文件的 active / legacy 边界为准。
 
 ## 启动方式
 
