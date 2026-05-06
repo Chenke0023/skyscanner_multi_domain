@@ -97,10 +97,14 @@ python cli.py page -o 北京 -d 阿拉木图 -t 2026-05-20 --date-window 1 --sho
 
 ## 6. Current Next Tasks
 
-- Finish package import migration in non-legacy files and keep shim tests passing.
+- Keep `desktop_ui_service -> cli.SimpleCLI` as explicit P1 debt; do not expand desktop reuse of `SimpleCLI`.
+- Emit SearchPlan batch progress from scan orchestration without pruning or skipping tasks.
 - Add visible plan phase/status to the desktop WebView UI.
 - Add plan telemetry display in history/details views.
-- Only after that, introduce conservative user-confirmed early stop in fast mode.
+- Add parser diagnostics/confidence to result objects and reports.
+- Only after explainability, batch progress, and telemetry are stable, consider conservative user-confirmed early stop in fast mode.
+
+The fuller execution backlog is in `docs/todo.md`.
 
 ## 7. Known Pitfalls
 
