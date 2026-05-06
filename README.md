@@ -27,13 +27,24 @@
 - `skyscanner_multi_domain/parsing/page_parser.py` — 页面解析
 - `skyscanner_multi_domain/geo/location_resolver.py` — 地点/国家/机场解析
 - `skyscanner_multi_domain/geo/regions.py` — 地区配置
-- `skyscanner_neo.py` — Neo 兼容层
-- `skyscanner_models.py` — 数据模型
+- `skyscanner_multi_domain/models.py` — 数据模型
+- `skyscanner_multi_domain/planning/date_window.py` — 日期窗口与往返日期标签
+- `skyscanner_multi_domain/runtime/paths.py` — 运行时路径
+- `skyscanner_multi_domain/diagnostics/attempt_trace.py` — attempt trace 日志
+- `skyscanner_multi_domain/pricing/fx_rates.py` — 汇率换算
 
 ### Legacy
 
+- `skyscanner_neo.py` — compatibility / legacy Neo entry。保留现有 Neo CLI、replay、URL mutation 兼容能力；新逻辑不要继续写入这里，中期再拆到 package。
 - `legacy/gui.py` / `gui.py` — deprecated Tk interface。只修启动级别问题，不再增加 SearchPlan UI、历史抽屉、失败修复 UI 或视觉优化。
-- 根目录 `scan_orchestrator.py`、`scan_history.py`、`search_plan.py`、`transport_*.py`、`skyscanner_page_parser.py`、`location_resolver.py`、`skyscanner_regions.py` — compatibility shims。旧测试和 mock target 仍会访问这些路径，新逻辑不得写入这里。
+- 根目录 `app_paths.py`、`attempt_trace.py`、`date_window.py`、`fx_rates.py`、`skyscanner_models.py`、`scan_orchestrator.py`、`scan_history.py`、`search_plan.py`、`transport_*.py`、`skyscanner_page_parser.py`、`location_resolver.py`、`skyscanner_regions.py` — compatibility shims。旧测试和 mock target 仍会访问这些路径，新逻辑不得写入这里。
+
+### Compatibility shim policy
+
+- 保留 root-level shim 至少 2 个小版本，或直到所有 tests / mock targets 迁移完成。
+- 新代码不得 import root-level shim；新测试应优先 import package path。
+- 旧测试可以继续覆盖 root-level shim，以验证兼容路径。
+- 删除 shim 前必须跑 full pytest、CLI smoke 和 desktop import smoke。
 
 ## Engineering Rules
 

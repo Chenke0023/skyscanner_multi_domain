@@ -37,15 +37,23 @@ Core engine:
 - `skyscanner_multi_domain/parsing/page_parser.py` — Best/Cheapest page parser
 - `skyscanner_multi_domain/geo/location_resolver.py` — location/country/airport resolution
 - `skyscanner_multi_domain/geo/regions.py` — market/region configuration
+- `skyscanner_multi_domain/models.py` — shared data models
+- `skyscanner_multi_domain/planning/date_window.py` — date windows and trip labels
+- `skyscanner_multi_domain/runtime/paths.py` — project/runtime paths
+- `skyscanner_multi_domain/diagnostics/attempt_trace.py` — attempt trace logging
+- `skyscanner_multi_domain/pricing/fx_rates.py` — FX conversion
 
 Compatibility shims:
 
-- Root-level `scan_orchestrator.py`, `scan_history.py`, `search_plan.py`, `transport_*.py`, `skyscanner_page_parser.py`, `location_resolver.py`, and `skyscanner_regions.py` re-export from the package modules.
+- Root-level `app_paths.py`, `attempt_trace.py`, `date_window.py`, `fx_rates.py`, `skyscanner_models.py`, `scan_orchestrator.py`, `scan_history.py`, `search_plan.py`, `transport_*.py`, `skyscanner_page_parser.py`, `location_resolver.py`, and `skyscanner_regions.py` re-export from the package modules.
 - Keep these shims for compatibility with old imports, tests, and mock targets; do not add new logic there.
+- New code must import package paths, not root-level shims. New tests should prefer package paths unless they explicitly verify compatibility.
+- Keep shims for at least two small versions or until all tests/mock targets are migrated. Before removing them, run full pytest, CLI smoke, and desktop import smoke.
 
 Legacy:
 
 - `legacy/gui.py` and `gui.py` are deprecated Tk entry points. Only fix startup-level breakage.
+- `skyscanner_neo.py` is a compatibility / legacy Neo entry. It still owns existing Neo CLI, replay, and URL mutation behavior, but it is not a new feature entry point.
 
 Historical notes:
 
@@ -73,6 +81,7 @@ Current SearchPlan behavior is intentionally conservative:
 
 - Do not add new user-facing features to `legacy/gui.py` or `gui.py`.
 - Do not put new core logic into root-level compatibility shims.
+- Do not add new product logic to `skyscanner_neo.py`; move new Neo-related code into package modules first.
 - Do not turn `webui/` into a standalone cloud/web product.
 - Do not introduce SearchPlan pruning until explainability, plan metadata, and telemetry are stable.
 

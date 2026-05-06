@@ -16,9 +16,9 @@ from urllib.parse import urlparse, urlunparse
 import aiohttp
 from bs4 import BeautifulSoup
 
-from app_paths import get_browser_profile_dir
-from attempt_trace import emit_trace
-from skyscanner_models import FlightQuote, RegionConfig
+from skyscanner_multi_domain.runtime.paths import get_browser_profile_dir
+from skyscanner_multi_domain.diagnostics.attempt_trace import emit_trace
+from skyscanner_multi_domain.models import FlightQuote, RegionConfig
 from skyscanner_multi_domain.parsing.page_parser import extract_page_quote
 from skyscanner_multi_domain.geo.regions import REGION_HOST_ALIASES
 

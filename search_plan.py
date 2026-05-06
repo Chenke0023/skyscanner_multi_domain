@@ -2,13 +2,6 @@ import sys
 from importlib import import_module
 
 _module = import_module("skyscanner_multi_domain.planning.search_plan")
-globals().update(
-    {
-        name: value
-        for name, value in vars(_module).items()
-        if not (name.startswith("__") and name.endswith("__"))
-    }
-)
-__all__ = [name for name in vars(_module) if not (name.startswith("__") and name.endswith("__"))]
-_module.__all__ = __all__
+__all__ = list(getattr(_module, "__all__", [name for name in vars(_module) if not name.startswith("_")]))
+globals().update({name: getattr(_module, name) for name in __all__})
 sys.modules[__name__] = _module

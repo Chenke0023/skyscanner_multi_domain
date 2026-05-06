@@ -6,8 +6,8 @@ import json
 from pathlib import Path
 from typing import Any, Optional
 
-from app_paths import LOGS_DIR
-from skyscanner_models import FlightQuote, RegionConfig
+from skyscanner_multi_domain.runtime.paths import LOGS_DIR
+from skyscanner_multi_domain.models import FlightQuote, RegionConfig
 from skyscanner_multi_domain.parsing.page_parser import (
     PARSER_REPLAYABLE_FAILURE_STATUSES,
     extract_page_quote_with_diagnostics,

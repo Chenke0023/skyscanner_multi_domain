@@ -5,7 +5,7 @@ import json
 from dataclasses import dataclass
 from functools import lru_cache
 
-from app_paths import DATA_DIR
+from skyscanner_multi_domain.runtime.paths import DATA_DIR
 
 AIRPORT_DATASET_PATH = DATA_DIR / "airport-codes.csv"
 LOCATION_MAPPINGS_PATH = DATA_DIR / "location_mappings.json"

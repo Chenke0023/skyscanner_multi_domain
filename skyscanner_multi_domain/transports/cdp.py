@@ -23,9 +23,9 @@ from urllib.parse import urlparse
 
 import aiohttp
 
-from app_paths import get_browser_profile_dir
-from attempt_trace import emit_trace
-from skyscanner_models import FlightQuote, RegionConfig
+from skyscanner_multi_domain.runtime.paths import get_browser_profile_dir
+from skyscanner_multi_domain.diagnostics.attempt_trace import emit_trace
+from skyscanner_multi_domain.models import FlightQuote, RegionConfig
 from skyscanner_multi_domain.parsing.page_parser import (
     PAGE_TEXT_CAPTURE_CONTEXT,
     PAGE_TEXT_CAPTURE_LIMIT,

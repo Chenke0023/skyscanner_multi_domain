@@ -4,7 +4,7 @@ from dataclasses import dataclass
 import re
 from typing import Any, Optional
 
-from skyscanner_models import FlightQuote, RegionConfig
+from skyscanner_multi_domain.models import FlightQuote, RegionConfig
 
 
 PAGE_TEXT_CAPTURE_LIMIT = 80000

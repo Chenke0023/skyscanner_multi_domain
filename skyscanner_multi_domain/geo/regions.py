@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Iterable
 
-from skyscanner_models import RegionConfig
+from skyscanner_multi_domain.models import RegionConfig
 
 
 REGIONS: dict[str, RegionConfig] = {
