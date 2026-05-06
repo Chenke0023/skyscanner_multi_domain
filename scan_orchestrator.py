@@ -14,7 +14,14 @@ from typing import Any, Awaitable, Callable, Literal, Optional, Union
 from app_paths import get_failure_log_file
 from attempt_trace import flush as flush_attempt_trace
 from skyscanner_models import FlightQuote, RegionConfig
-from search_plan import rank_region_codes
+from search_plan import (
+    DateCandidate,
+    RouteCandidate,
+    build_date_candidates,
+    build_market_candidates,
+    build_scan_tasks,
+    rank_region_codes,
+)
 from skyscanner_regions import REGIONS, get_selected_regions
 
 FAILURE_LOG_TEXT_LIMIT = 12000
@@ -286,6 +293,13 @@ def quotes_to_dicts(quotes: list[FlightQuote]) -> list[dict[str, Any]]:
             "cheapest_price_path": quote.cheapest_price_path,
             "error": quote.error,
             "source_kind": quote.source_kind,
+            "plan_rank": quote.plan_rank,
+            "plan_score": quote.plan_score,
+            "plan_phase": quote.plan_phase,
+            "plan_reason": quote.plan_reason,
+            "route_rank": quote.route_rank,
+            "date_rank": quote.date_rank,
+            "market_rank": quote.market_rank,
         }
         for quote in quotes
     ]
@@ -375,6 +389,72 @@ async def run_page_scan(
             for code in ranked_region_codes
             if code in selected_region_by_code
         ]
+        plan_route = RouteCandidate(
+            origin_code=origin,
+            destination_code=destination,
+            origin_label=origin,
+            destination_label=destination,
+            rank=1,
+            reason="当前扫描航段",
+            confidence=1.0,
+            score=1.0,
+            score_breakdown={"current_route": 1.0},
+        )
+        plan_dates = build_date_candidates(
+            str(identity.get("date") or date),
+            str(identity.get("return_date") or return_date or "") or None,
+            int(identity.get("date_window_days") or 0),
+        )
+        plan_date_by_label = {
+            (candidate.depart_date, candidate.return_date): (index + 1, candidate)
+            for index, candidate in enumerate(plan_dates)
+        }
+        plan_date_rank, plan_date = plan_date_by_label.get(
+            (date, return_date),
+            (
+                1,
+                DateCandidate(
+                    depart_date=date,
+                    return_date=return_date,
+                    offset=0,
+                    phase="anchor",
+                    reason="当前扫描日期",
+                    score=1.0,
+                    score_breakdown={"current_date": 1.0},
+                ),
+            ),
+        )
+        plan_markets = build_market_candidates(
+            [region.code for region in selected_regions],
+            latest_record_for_plan.rows_by_date if latest_record_for_plan is not None else None,
+            origin_country=origin_country_hint,
+            destination_country=destination_country_hint,
+            manual_region_codes=[
+                str(code)
+                for code in identity.get("manual_regions", [])
+                if isinstance(code, str)
+            ],
+        )
+        plan_tasks = build_scan_tasks([plan_route], plan_dates, plan_markets)
+        plan_task_by_key = {
+            (task.date.depart_date, task.date.return_date, task.market.region_code): (index + 1, task)
+            for index, task in enumerate(plan_tasks)
+        }
+
+        def apply_plan_metadata(quotes: list[FlightQuote]) -> list[FlightQuote]:
+            for quote in quotes:
+                ranked_task = plan_task_by_key.get((date, return_date, quote.region))
+                if ranked_task is None:
+                    continue
+                plan_rank, task = ranked_task
+                quote.plan_rank = plan_rank
+                quote.plan_score = task.priority
+                quote.plan_phase = task.phase
+                quote.plan_reason = task.reason
+                quote.route_rank = task.route.rank
+                quote.date_rank = plan_date_rank
+                quote.market_rank = task.market.rank
+            return quotes
 
         async def emit_progress(
             *,
@@ -614,6 +694,7 @@ async def run_page_scan(
 
         if normalized_transport == "page":
             quotes = await compare_via_pages(args, selected_regions, run_id=run_id)
+            quotes = apply_plan_metadata(quotes)
             await emit_progress(
                 stage="final",
                 quotes=quotes,
@@ -682,6 +763,7 @@ async def run_page_scan(
 
                 async def on_region_complete_wrapper(region: RegionConfig, quote: FlightQuote) -> None:
                     nonlocal merged_quotes
+                    apply_plan_metadata([quote])
                     if on_region_complete is not None:
                         on_region_complete(region, quote)
                     merged_quotes = merge_quotes_by_region(merged_quotes, [quote])
@@ -700,6 +782,7 @@ async def run_page_scan(
                         enable_browser_fallback=False,
                         on_region_complete=on_region_complete_wrapper,
                     )
+                    batch_quotes = apply_plan_metadata(batch_quotes)
                     merged_quotes = merge_quotes_by_region(merged_quotes, batch_quotes)
                     await emit_progress(
                         stage="quick_live" if batch_index == 0 else "background_live",
@@ -731,6 +814,7 @@ async def run_page_scan(
                             batch_fallback_quotes = await compare_via_pages(
                                 args, batch_failed, persist_failures=False, run_id=run_id
                             )
+                            batch_fallback_quotes = apply_plan_metadata(batch_fallback_quotes)
                             merged_quotes = merge_quotes_by_region(merged_quotes, batch_fallback_quotes)
                             await emit_progress(
                                 stage="background_live",
@@ -744,6 +828,7 @@ async def run_page_scan(
                     selected_regions,
                     enable_browser_fallback=allow_browser_fallback,
                 )
+                quotes = apply_plan_metadata(quotes)
             await emit_progress(
                 stage="final",
                 quotes=quotes,
@@ -755,6 +840,7 @@ async def run_page_scan(
                 selected_regions,
                 enable_fallbacks=allow_browser_fallback,
             )
+            quotes = apply_plan_metadata(quotes)
             await emit_progress(
                 stage="final",
                 quotes=quotes,
@@ -776,6 +862,7 @@ async def run_page_scan(
                 )
                 for region in selected_regions
             ]
+            quotes = apply_plan_metadata(quotes)
             await emit_progress(
                 stage="final",
                 quotes=quotes,

@@ -1861,6 +1861,7 @@ class DesktopUIService:
                         pair_semaphore = asyncio.Semaphore(_GUI_AIRPORT_PAIR_CONCURRENCY)
 
                         async def scan_pair(
+                            pair_index: int,
                             origin_airport: LocationRecord,
                             destination_airport: LocationRecord,
                         ) -> tuple[str, list[dict[str, Any]]]:
@@ -1893,9 +1894,13 @@ class DesktopUIService:
                                     ]
                                     if not quote_dicts:
                                         return
-                                    rows = self.cli.simplify_quotes(
-                                        quote_dicts,
-                                        route_label=route_label,
+                                    rows = self.cli._with_route_plan_metadata(
+                                        self.cli.simplify_quotes(
+                                            quote_dicts,
+                                            route_label=route_label,
+                                        ),
+                                        route_rank=pair_index + 1,
+                                        route_reason=f"路线候选排序 {pair_index + 1}",
                                     )
                                     for row in rows:
                                         region_name = str(row.get("region_name") or "-")
@@ -1952,17 +1957,22 @@ class DesktopUIService:
                                 )
                                 if not quotes:
                                     return (route_label, [])
+                                route_reason = f"路线候选排序 {pair_index + 1}"
                                 return (
                                     route_label,
-                                    self.cli.simplify_quotes(
-                                        quotes_to_dicts(quotes),
-                                        route_label=route_label,
+                                    self.cli._with_route_plan_metadata(
+                                        self.cli.simplify_quotes(
+                                            quotes_to_dicts(quotes),
+                                            route_label=route_label,
+                                        ),
+                                        route_rank=pair_index + 1,
+                                        route_reason=route_reason,
                                     ),
                                 )
 
                         pair_tasks = [
-                            asyncio.create_task(scan_pair(origin_airport, destination_airport))
-                            for origin_airport, destination_airport in pair_specs
+                            asyncio.create_task(scan_pair(pair_index, origin_airport, destination_airport))
+                            for pair_index, (origin_airport, destination_airport) in enumerate(pair_specs)
                         ]
                         completed_pairs = 0
                         try:

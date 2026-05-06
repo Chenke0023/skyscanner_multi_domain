@@ -31,6 +31,13 @@ class FlightQuote:
     error: Optional[str] = None
     debug_log_path: Optional[str] = None
     source_kind: Optional[str] = None
+    plan_rank: Optional[int] = None
+    plan_score: Optional[float] = None
+    plan_phase: Optional[str] = None
+    plan_reason: Optional[str] = None
+    route_rank: Optional[int] = None
+    date_rank: Optional[int] = None
+    market_rank: Optional[int] = None
 
 
 # ── AttemptTrace ──────────────────────────────────────────────────────────────

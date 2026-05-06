@@ -50,7 +50,13 @@ from scan_history import (
     override_rows_source_kind,
     source_kind_label,
 )
-from search_plan import build_ordered_trip_dates, rank_route_pairs
+from search_plan import (
+    TripIntent,
+    build_ordered_trip_dates,
+    build_search_plan,
+    rank_route_pairs,
+    render_search_plan,
+)
 from skyscanner_neo import (
     DEFAULT_REGIONS,
     NeoCli,
@@ -368,6 +374,13 @@ class SimpleCLI:
                     "error": row.get("error"),
                     "source_kind": row.get("source_kind"),
                     "route": row.get("route"),
+                    "plan_rank": row.get("plan_rank"),
+                    "plan_score": row.get("plan_score"),
+                    "plan_phase": row.get("plan_phase"),
+                    "plan_reason": row.get("plan_reason"),
+                    "route_rank": row.get("route_rank"),
+                    "date_rank": row.get("date_rank"),
+                    "market_rank": row.get("market_rank"),
                 }
             )
         return snapshots
@@ -475,9 +488,48 @@ class SimpleCLI:
                     "can_reuse_page": can_reuse_page_for_row(
                         {"source_kind": source_kind}
                     ),
+                    "plan_rank": quote.get("plan_rank"),
+                    "plan_score": quote.get("plan_score"),
+                    "plan_phase": quote.get("plan_phase"),
+                    "plan_reason": quote.get("plan_reason"),
+                    "route_rank": quote.get("route_rank"),
+                    "date_rank": quote.get("date_rank"),
+                    "market_rank": quote.get("market_rank"),
                 }
             )
         return self._sort_simplified_rows(simplified)
+
+    @staticmethod
+    def _format_plan_cell(row: dict[str, object]) -> str:
+        plan_rank = row.get("plan_rank")
+        plan_phase = row.get("plan_phase")
+        plan_reason = str(row.get("plan_reason") or "").strip()
+        parts: list[str] = []
+        if isinstance(plan_rank, int):
+            parts.append(f"#{plan_rank}")
+        if plan_phase:
+            parts.append(str(plan_phase))
+        if plan_reason:
+            parts.append(plan_reason)
+        return " / ".join(parts) if parts else "-"
+
+    @staticmethod
+    def _with_route_plan_metadata(
+        rows: list[SimplifiedQuoteRow],
+        *,
+        route_rank: int,
+        route_reason: str,
+    ) -> list[SimplifiedQuoteRow]:
+        annotated: list[SimplifiedQuoteRow] = []
+        for row in rows:
+            next_row = dict(row)
+            next_row["route_rank"] = route_rank
+            existing_reason = str(next_row.get("plan_reason") or "").strip()
+            next_row["plan_reason"] = (
+                f"{route_reason}；{existing_reason}" if existing_reason else route_reason
+            )
+            annotated.append(next_row)
+        return annotated
 
     def build_markdown_table(
         self,
@@ -503,8 +555,8 @@ class SimpleCLI:
 
         lines.extend(
             [
-                "| 航段 | 地区 | 来源 | 最佳（原币） | 最佳（人民币） | 最低价（原币） | 最低价（人民币） | 较上次变化 | 状态 | 错误 | 链接 |",
-                "| --- | --- | --- | ---: | ---: | ---: | ---: | --- | --- | --- | --- |",
+                "| 航段 | 地区 | 来源 | 计划 | 最佳（原币） | 最佳（人民币） | 最低价（原币） | 最低价（人民币） | 较上次变化 | 状态 | 错误 | 链接 |",
+                "| --- | --- | --- | --- | ---: | ---: | ---: | ---: | --- | --- | --- | --- |",
             ]
         )
         for row in rows:
@@ -519,7 +571,7 @@ class SimpleCLI:
                 else "-"
             )
             lines.append(
-                f"| {row.get('route') or '-'} | {row['region_name']} | {row.get('source_label') or '-'} | {row.get('best_display_price') or '-'} | {best_cny_text} | {row.get('cheapest_display_price') or '-'} | {cheapest_cny_text} | {row.get('delta_label') or '-'} | {row.get('status') or '-'} | {row.get('error') or '-'} | [打开结果页]({row['link']}) |"
+                f"| {row.get('route') or '-'} | {row['region_name']} | {row.get('source_label') or '-'} | {self._format_plan_cell(row)} | {row.get('best_display_price') or '-'} | {best_cny_text} | {row.get('cheapest_display_price') or '-'} | {cheapest_cny_text} | {row.get('delta_label') or '-'} | {row.get('status') or '-'} | {row.get('error') or '-'} | [打开结果页]({row['link']}) |"
             )
         return "\n".join(lines) + "\n"
 
@@ -547,8 +599,8 @@ class SimpleCLI:
 
         lines.extend(
             [
-                "| 日期 | 航段 | 地区 | 来源 | 最佳（原币） | 最佳（人民币） | 最低价（原币） | 最低价（人民币） | 较上次变化 | 状态 | 错误 | 链接 |",
-                "| --- | --- | --- | --- | ---: | ---: | ---: | ---: | --- | --- | --- | --- |",
+                "| 日期 | 航段 | 地区 | 来源 | 计划 | 最佳（原币） | 最佳（人民币） | 最低价（原币） | 最低价（人民币） | 较上次变化 | 状态 | 错误 | 链接 |",
+                "| --- | --- | --- | --- | --- | ---: | ---: | ---: | ---: | --- | --- | --- | --- |",
             ]
         )
         for row in rows:
@@ -572,6 +624,7 @@ class SimpleCLI:
                         str(row.get("route") or "-"),
                         str(row.get("region_name") or "-"),
                         str(row.get("source_label") or "-"),
+                        self._format_plan_cell(row),
                         str(row.get("best_display_price") or "-"),
                         best_cny_text,
                         str(row.get("cheapest_display_price") or "-"),
@@ -846,10 +899,50 @@ class SimpleCLI:
         rerun_failed = bool(getattr(args, "rerun_failed", False))
         preview_only = bool(getattr(args, "preview_only", False))
         show_delta = bool(getattr(args, "show_delta", False))
+        show_plan = bool(getattr(args, "show_plan", False))
         if rerun_failed and latest_record is None:
             print("未找到历史记录，`--rerun-failed` 本次退化为全量扫描。")
 
         print(f"本次实际地区: {', '.join(regions)}")
+
+        if show_plan:
+            plan = build_search_plan(
+                TripIntent(
+                    origin_input=args.origin,
+                    destination_input=args.destination,
+                    depart_date=args.date,
+                    return_date=args.return_date,
+                    origin_is_country=False,
+                    destination_is_country=False,
+                    date_window=date_window_days,
+                    user_regions=manual_regions,
+                ),
+                [
+                    LocationRecord(
+                        name=origin.name,
+                        code=origin.code,
+                        kind=origin.kind,
+                        municipality=origin.municipality,
+                        country=origin.country,
+                    )
+                ],
+                [
+                    LocationRecord(
+                        name=destination.name,
+                        code=destination.code,
+                        kind=destination.kind,
+                        municipality=destination.municipality,
+                        country=destination.country,
+                    )
+                ],
+                regions,
+                latest_record.rows_by_date if latest_record is not None else None,
+                origin_country=origin.country,
+                destination_country=destination.country,
+            )
+            print()
+            print(render_search_plan(plan), end="")
+            return 0
 
         if preview_only:
             preview_record = self.history_store.get_cached_preview(query_payload)
@@ -1227,8 +1320,40 @@ class SimpleCLI:
         rerun_failed = bool(getattr(args, "rerun_failed", False))
         preview_only = bool(getattr(args, "preview_only", False))
         show_delta = bool(getattr(args, "show_delta", False))
+        show_plan = bool(getattr(args, "show_plan", False))
         if rerun_failed and latest_record is None:
             print("未找到历史记录，`--rerun-failed` 本次退化为全量扫描。")
+
+        if show_plan:
+            plan = build_search_plan(
+                TripIntent(
+                    origin_input=getattr(args, "origin_country", None)
+                    or getattr(args, "origin", None)
+                    or "",
+                    destination_input=getattr(args, "destination_country", None)
+                    or getattr(args, "destination", None)
+                    or "",
+                    depart_date=args.date,
+                    return_date=args.return_date,
+                    origin_is_country=bool(getattr(args, "origin_country", None)),
+                    destination_is_country=bool(getattr(args, "destination_country", None)),
+                    date_window=date_window_days,
+                    user_regions=manual_regions,
+                ),
+                origin_points,
+                destination_points,
+                regions,
+                latest_record.rows_by_date if latest_record is not None else None,
+                origin_country=origin_file_token.removesuffix("_ANY")
+                if origin_file_token.endswith("_ANY")
+                else "",
+                destination_country=destination_file_token.removesuffix("_ANY")
+                if destination_file_token.endswith("_ANY")
+                else "",
+            )
+            print()
+            print(render_search_plan(plan), end="")
+            return 0
 
         if preview_only:
             preview_record = self.history_store.get_cached_preview(query_payload)
@@ -1363,11 +1488,16 @@ class SimpleCLI:
                     )
                 if not quotes:
                     return pair_index, []
+                route_reason = f"路线候选排序 {pair_index + 1}"
                 return (
                     pair_index,
-                    self.simplify_quotes(
-                        quotes_to_dicts(quotes),
-                        route_label=route_label,
+                    self._with_route_plan_metadata(
+                        self.simplify_quotes(
+                            quotes_to_dicts(quotes),
+                            route_label=route_label,
+                        ),
+                        route_rank=pair_index + 1,
+                        route_reason=route_reason,
                     ),
                 )
 
@@ -1711,6 +1841,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--show-delta",
         action="store_true",
         help="扫描结束后额外打印相对上次的变化摘要",
+    )
+    page.add_argument(
+        "--show-plan",
+        action="store_true",
+        help="打印 SearchPlan 扫描计划并退出，不发起实时扫描",
     )
     page.add_argument(
         "--fetch-pipeline",
