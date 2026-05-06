@@ -13,9 +13,10 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-from app_paths import get_gui_state_file, get_reports_dir
-from cli import CombinedQuoteRow, SimpleCLI
-from date_window import format_trip_date_label
+from skyscanner_multi_domain.runtime.paths import get_gui_state_file, get_reports_dir
+from cli import SimpleCLI
+from skyscanner_multi_domain.scan.output_rows import CombinedQuoteRow
+from skyscanner_multi_domain.planning.date_window import format_trip_date_label
 from desktop_logic import (
     _AUTO_REFRESH_DISABLED,
     _GUI_AIRPORT_PAIR_CONCURRENCY,

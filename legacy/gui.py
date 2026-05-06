@@ -27,7 +27,8 @@ from tkinter import messagebox, ttk
 from typing import Any
 
 from app_paths import get_gui_state_file, get_reports_dir
-from cli import CombinedQuoteRow, SimpleCLI
+from cli import SimpleCLI
+from skyscanner_multi_domain.scan.output_rows import CombinedQuoteRow
 from date_window import (
     build_date_window,
     build_round_trip_date_window,

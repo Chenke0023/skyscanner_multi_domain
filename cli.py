@@ -18,8 +18,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
-from app_paths import PROJECT_ROOT, get_reports_dir
-from date_window import (
+from skyscanner_multi_domain.runtime.paths import PROJECT_ROOT, get_reports_dir
+from skyscanner_multi_domain.planning.date_window import (
     format_trip_date_label,
 )
 from failure_replay import (
@@ -27,7 +27,7 @@ from failure_replay import (
     build_failure_replay_report,
     render_failure_replay_report,
 )
-from fx_rates import FxRateService
+from skyscanner_multi_domain.pricing.fx_rates import FxRateService
 from skyscanner_multi_domain.geo.location_resolver import (
     COUNTRY_ROUTE_DEFAULT_AIRPORT_LIMIT,
     CountryRecord,
@@ -57,6 +57,11 @@ from skyscanner_multi_domain.planning.search_plan import (
     rank_route_pairs,
     render_search_plan,
 )
+from skyscanner_multi_domain.scan.output_rows import (
+    CombinedQuoteRow,
+    QuoteRow,
+    SimplifiedQuoteRow,
+)
 from skyscanner_neo import (
     DEFAULT_REGIONS,
     NeoCli,
@@ -67,11 +72,6 @@ from skyscanner_neo import (
     quotes_to_dicts,
     run_page_scan,
 )
-
-
-QuoteRow = dict[str, object]
-SimplifiedQuoteRow = dict[str, str | float | None]
-CombinedQuoteRow = dict[str, str | float | None]
 
 
 BEST_LABEL = "最佳"

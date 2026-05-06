@@ -30,8 +30,8 @@ from urllib.parse import parse_qsl, quote, urlencode, urlparse, urlunparse
 
 import aiohttp
 
-from app_paths import PROJECT_ROOT
-from skyscanner_models import FlightQuote, RegionConfig
+from skyscanner_multi_domain.runtime.paths import PROJECT_ROOT
+from skyscanner_multi_domain.models import FlightQuote, RegionConfig
 from skyscanner_multi_domain.parsing.page_parser import (
     PAGE_TEXT_CAPTURE_LIMIT,
     extract_page_quote,

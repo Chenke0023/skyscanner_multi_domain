@@ -9,8 +9,8 @@ import subprocess
 import time
 from typing import Any, Optional
 
-from attempt_trace import emit_trace
-from skyscanner_models import FlightQuote, RegionConfig
+from skyscanner_multi_domain.diagnostics.attempt_trace import emit_trace
+from skyscanner_multi_domain.models import FlightQuote, RegionConfig
 from skyscanner_multi_domain.parsing.page_parser import extract_page_quote
 
 TAB_WAIT_TIMEOUT = 20

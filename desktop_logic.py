@@ -9,7 +9,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from cli import CombinedQuoteRow
+from skyscanner_multi_domain.scan.output_rows import CombinedQuoteRow
 from skyscanner_multi_domain.geo.location_resolver import (
     AIRPORT_DATASET_PATH,
     LOCATION_MAPPINGS_PATH,

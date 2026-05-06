@@ -8,7 +8,7 @@ from http.server import ThreadingHTTPServer, SimpleHTTPRequestHandler
 from typing import Any
 from urllib.parse import quote
 
-from app_paths import PROJECT_ROOT
+from skyscanner_multi_domain.runtime.paths import PROJECT_ROOT
 from desktop_ui_service import DesktopUIService
 
 

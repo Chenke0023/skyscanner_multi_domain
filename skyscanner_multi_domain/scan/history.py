@@ -9,7 +9,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Iterable
 
-from app_paths import get_scan_history_file
+from skyscanner_multi_domain.runtime.paths import get_scan_history_file
 
 
 PREVIEW_MAX_AGE_HOURS = 6
