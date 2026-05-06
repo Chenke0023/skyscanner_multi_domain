@@ -8,11 +8,11 @@ from typing import Any, Optional
 
 from app_paths import LOGS_DIR
 from skyscanner_models import FlightQuote, RegionConfig
-from skyscanner_page_parser import (
+from skyscanner_multi_domain.parsing.page_parser import (
     PARSER_REPLAYABLE_FAILURE_STATUSES,
     extract_page_quote_with_diagnostics,
 )
-from skyscanner_regions import REGIONS
+from skyscanner_multi_domain.geo.regions import REGIONS
 
 
 DEFAULT_FAILURE_DIR = LOGS_DIR / "failures"

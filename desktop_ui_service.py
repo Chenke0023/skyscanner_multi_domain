@@ -52,8 +52,8 @@ from desktop_logic import (
     _upsert_rows_by_date,
     _write_query_state,
 )
-from location_resolver import COUNTRY_ROUTE_DEFAULT_AIRPORT_LIMIT, LocationRecord
-from scan_history import (
+from skyscanner_multi_domain.geo.location_resolver import COUNTRY_ROUTE_DEFAULT_AIRPORT_LIMIT, LocationRecord
+from skyscanner_multi_domain.scan.history import (
     AlertConfig,
     annotate_rows_with_history,
     build_query_key,
@@ -70,7 +70,7 @@ from scan_history import (
     summarize_query_history,
     ScanHistoryStore,
 )
-from search_plan import build_ordered_trip_dates, rank_route_pairs
+from skyscanner_multi_domain.planning.search_plan import build_ordered_trip_dates, rank_route_pairs
 from skyscanner_neo import (
     DEFAULT_REGIONS,
     NeoCli,

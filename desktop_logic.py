@@ -10,11 +10,11 @@ from pathlib import Path
 from typing import Any
 
 from cli import CombinedQuoteRow
-from location_resolver import (
+from skyscanner_multi_domain.geo.location_resolver import (
     AIRPORT_DATASET_PATH,
     LOCATION_MAPPINGS_PATH,
 )
-from scan_history import source_kind_label, summarize_query_history
+from skyscanner_multi_domain.scan.history import source_kind_label, summarize_query_history
 
 
 MAX_LOCATION_SUGGESTIONS = 8

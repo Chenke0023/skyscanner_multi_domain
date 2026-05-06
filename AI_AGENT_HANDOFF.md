@@ -1,446 +1,101 @@
 # AI Agent Handoff
 
-Last updated: 2026-04-28
+Last updated: 2026-05-06
 Project root: `skyscanner_multi_domain`
 
-## 0. Current Development Status (branch: `opencli-integration`)
-
-### Completed changes (latest)
-
-- CDP transport refactoring and session-persistence verification (`opencli-integration`, commit `15afe58`):
-  - Refactored `launch_browser_with_cdp` into focused helpers: `_select_browser_launch_target`, `_launch_browser_process`, `_terminate_browser_process`, `_allocate_tcp_port`
-  - Added `wait_for_cdp_shutdown` to confirm CDP port is fully released before restarting
-  - Added `_wait_for_page_tab` for CDP tab discovery with timeout
-  - Added `_cookie_probe_server` — a local HTTP server that sets/echoes a probe cookie
-  - Added `verify_browser_session_persistence` — real browser start → set cookie → kill → restart → check cookie
-  - CLI: `doctor --verify-session-persistence --persistence-browser edge|comet|chrome`
-  - Fixed bug: `cdp_list_tabs`, `cdp_navigate_tab`, `_wait_for_page_tab` were hardcoded to port 9222; now accept `cdp_host` parameter
-  - Session persistence results:
-    - **Comet**: ✅ Passed — retains probe cookie across restart
-    - **Edge**: ❌ Failed — probe cookie lost after restart
-  - Tests: 7/7 pass in `test_transport_cdp.py`
-- Added trip-mode support across CLI and GUI:
-  - one-way and round-trip flows share the same scan pipeline
-  - round-trip date windows preserve stay length
-  - GUI includes departure / return date picker controls
-- Added expanded endpoint support in CLI and GUI:
-  - location -> location
-  - location -> country
-  - country -> location
-  - country -> country
-- Added country expansion logic in `location_resolver.py`:
-  - country alias / ISO resolution
-  - curated candidate-airport selection per country
-  - mixed endpoint expansion into concrete airport pairs
-- Added mixed-route aggregation behavior:
-  - when one or both endpoints are countries, the app scans candidate airport pairs
-  - per-market results are aggregated back to the best available route per market
-  - output now preserves the winning `航段` for each market row
-- Added CLI support for:
-  - `--origin-country`
-  - `--destination-country`
-  - `--country-airport-limit`
-- Updated GUI support for:
-  - `出发地按国家`
-  - `目的地按国家`
-  - mixed location/country combinations without forcing both endpoints into country mode
-- Added regression coverage in `test_location_resolver.py` and new `test_cli.py`
-- Repository housekeeping status:
-  - Active branches: `main`, `opencli-integration`
-  - `opencli-integration` is 1 commit ahead of local `main` (`15afe58`)
-  - Local `main` is 5 commits ahead of `origin/main`
-  - `opencli-integration` has uncommitted working-tree changes (cdp_host fix, session persistence)
-
-- Refactored `skyscanner_neo.py` (1664 lines) into four focused modules:
-  - `transport_scrapling.py` (330 lines): Scrapling fetch, captcha detection, `compare_via_scrapling`
-  - `transport_cdp.py` (376 lines): CDP browser management, page transport, `compare_via_pages`
-  - `scan_orchestrator.py` (226 lines): `run_page_scan`, fallback routing, failure logging, output formatting
-  - `skyscanner_neo.py` (890 lines): Neo CLI, capture replay, URL rewriting, backward-compat re-exports
-- All existing imports from `skyscanner_neo` continue to work via re-exports
-- Test mock targets updated from `skyscanner_neo.*` to actual source modules (`transport_cdp.*`, `transport_scrapling.*`)
-- All 15 tests pass; `cli.py` and `gui.py` imports verified
-- The refactor branch has already been merged into `main`
-- Next steps: decide whether to merge `opencli-integration` into `main` (only 1 commit ahead), or first reconcile local `main` with `origin/main` (5 commits ahead)
-
-### Previously completed (in `main`)
-
-- Added a new transport path: `--transport scrapling` in CLI `page` command.
-- `run_page_scan(...)` now supports transport routing:
-  - `scrapling` (primary + default)
-  - `page` (Edge CDP fallback)
-- Implemented `compare_via_scrapling(...)` in `skyscanner_neo.py` with:
-  - lazy import and graceful `scrapling_unavailable` handling
-  - staged `StealthyFetcher.fetch(...)` retries
-  - HTTP fallback via `Fetcher.get(...)`
-- Added Scrapling text extraction cleanup:
-  - prefer visible HTML text extracted from parsed DOM
-  - strip `script/style/noscript/template` payloads before parsing
-  - fallback to CSS text extraction and raw body/text/html/content accessors
-- GUI call path updated to pass `transport="scrapling"` explicitly.
-- Dependencies updated:
-  - `requirements.txt` includes `scrapling[fetchers]>=0.3.0`.
-- Parser updated so loading/challenge hints no longer mask valid Best / Cheapest prices when real price text is already present.
-- Added failure artifact persistence:
-  - final market-level failures are written to `logs/failures/`
-  - logs include route, transport, region, status, error, URL, and page-text excerpt
-- Added per-market automatic fallback:
-  - when Scrapling ends in retryable failure states, only the failed market is retried via `page`
-- Added regression tests for:
-  - script payload pollution in Scrapling text extraction
-  - loading text coexisting with valid price blocks
-  - Scrapling -> page per-market fallback routing
-- Added GUI table column-header sorting:
-  - click any column header to sort all rows across all dates
-  - price columns sort numerically; text columns sort lexicographically
-  - repeated click toggles ascending ↑ / descending ↓
-  - sort state resets on new scan
-- Added GUI per-region progress bar and status:
-  - `ttk.Progressbar` shows overall scan progress
-  - status text updates per-region: `正在扫描 2026-04-29 [中国] (attempts/expected: 3/49)`
-  - `run_page_scan` and `compare_via_scrapling` accept `on_region_start` callback
-- Added GUI cancel button:
-  - "取消" button appears in status bar during scanning
-  - uses `threading.Event` to signal worker thread to exit between dates/regions
-  - GUI resets to ready state on cancel
-- Added clickable links in GUI result table:
-  - double-click the "链接" column to open the Skyscanner result page in default browser
-  - uses `webbrowser.open()`
-
-### Verified results (latest)
-
-- Syntax check: passed
-- Unit tests:
-  - `test_skyscanner_neo.py`: 15/15 passed
-  - `test_date_window.py`: passed
-  - `test_transport_cdp.py`: 7/7 passed
-- Session persistence (real browser):
-  - **Comet**: ✅ Passed — cookie retained across restart
-  - **Edge**: ❌ Failed — cookie lost after restart
-- E2E comparison (same route/date):
-  - `--transport page`: returns valid Best/Cheapest prices for tested regions
-  - `--transport scrapling`: returns valid Best/Cheapest prices for default regions (`CN, HK, SG, UK, KZ`) on `BJSA -> ALA`, `2026-04-29`
-- Main branch status:
-  - Refactor + transport split work merged into `main`
-  - `scrapling` is now the default production path in both CLI and GUI
-  - failed markets under Scrapling now auto-fallback to `page` on a per-market basis
-  - latest GUI live run can be treated as successful under the current assumption
-
-### Repository housekeeping completed on 2026-03-13
-
-- Merged `refactor/split-skyscanner-neo` into `main`
-- Commit `876ac14` ("docs: update README and AI_AGENT_HANDOFF for module split") is already included in `main`
-- Recorded historical merges for:
-  - `codex/restore-date-window-and-split-parser`
-  - `worktree/skyscanner-multi-domain`
-- Removed merged local branches
-- Removed no-longer-needed remote branches
-- The four-module NEO split remains intact in `main`; it was not reverted or deleted
-
-### Current status
-
-`scrapling` is now the primary transport and has been verified as the default CLI path for the tested route/date/regions above. The same transport is also the default GUI path.
-
-When a market still ends in a final Scrapling failure state (`page_loading`, `page_parse_failed`, challenge-like states, etc.), runtime now automatically retries just that market through the `page` transport instead of failing the whole scan path immediately.
-
-The `page` transport remains in the codebase as a compatibility fallback and debugging path, but it is no longer the recommended default.
-
-### Next implementation target (current)
-
-- [x] Merge `opencli-integration` into `main` (already merged)
-- [x] Update README.md with session persistence verification commands
-- [ ] Investigate Edge session persistence failure (profile locking? different flags needed?)
-
-### Previous future items (deferred)
-
-- Add richer per-attempt diagnostics into failed Scrapling `error` messages
-- Expand live validation to more routes / markets before considering removal of the `page` path
-
-## 1. Project Purpose
-
-This project compares Skyscanner prices across multiple markets by fetching and parsing real Skyscanner result pages.
-
-Current workflow:
-
-1. Expand the requested date into a date window when enabled
-2. Resolve each endpoint as either a single location or a country-expanded airport set
-3. Open the same route/date on multiple Skyscanner market domains
-4. Use Scrapling to fetch page content and extract visible text
-5. Parse both Best and Cheapest prices from the sort/results section
-6. Convert prices to CNY when FX is available
-7. Save per-day Markdown reports plus an optional window summary
-8. Automatically retry only failed markets via local Edge CDP when Scrapling hits retryable final states
-
-## 2. Active Entry Points
+## 1. Current Product Path
 
-- `gui.py`
-  - Main UI for non-technical users
-  - Tkinter app
-  - Supports one-way / round-trip
-  - Supports mixed location/country endpoint expansion
-  - Supports column-header click-to-sort across all dates
-  - Per-region progress bar with cancel support
-  - Double-click link column to open in browser
-- `cli.py`
-  - CLI wrapper around the same scan flow
-  - Handles location/country resolution, smart effective regions, FX conversion, and Markdown output
-  - `doctor` subcommand now supports `--verify-session-persistence --persistence-browser <edge|comet|chrome>`
-- `skyscanner_neo.py`
-  - Neo compatibility layer: NeoCli wrapper, capture replay, URL rewriting, payload mutation
-  - Re-exports all moved symbols for backward compatibility
-  - Legacy `doctor` / `compare` CLI subcommands
-- `scan_orchestrator.py`
-  - Scan routing and fallback logic (`run_page_scan`)
-  - Failure logging, output formatting (`print_quotes`, `quotes_to_dicts`)
-- `transport_scrapling.py`
-  - Scrapling fetch with staged retries, captcha detection
-  - `compare_via_scrapling`
-- `transport_cdp.py`
-  - Browser detection, CDP management, page text capture
-  - `compare_via_pages`
-- `skyscanner_regions.py`
-  - Region config and smart region selection
-- `skyscanner_page_parser.py`
-  - Best/Cheapest extraction logic
-  - Long-page text slicing helpers used to avoid the old 12,000-char truncation issue
-- `skyscanner_models.py`
-  - Shared dataclasses (`RegionConfig`, `FlightQuote`)
+The desktop WebView app is the only active end-user product path:
 
-## 3. Current Output Contract
+1. `desktop_webview.py` starts the desktop shell.
+2. `webui/` provides the bundled React UI.
+3. `desktop_ui_service.py` bridges UI actions to the scan engine.
+4. Core scan modules live under `skyscanner_multi_domain/`.
 
-Saved report path:
+The CLI remains supported as a developer entry for automation, smoke tests, debugging, SearchPlan inspection, and report export. The Tk GUI and root-level shims are legacy-only.
 
-- `outputs/reports/edge_page_<origin>_<destination>_<yyyymmdd>.md`
-- `outputs/reports/edge_page_<origin>_<destination>_<start>_<end>_summary.md` (when date window summary is enabled)
+## 2. Directory Map
 
-Current Markdown columns:
+Primary product:
 
-- 航段
-- 地区
-- 最佳（原币）
-- 最佳（人民币）
-- 最低价（原币）
-- 最低价（人民币）
-- 状态
-- 错误
-- 链接
+- `desktop_webview.py` — desktop app shell
+- `desktop_ui_service.py` — UI bridge and scan worker coordination
+- `webui/` — bundled React UI assets
 
-GUI table is aligned with the same fields.
-CLI also prints Best and Cheapest winners when available.
+Developer entry:
 
-Mixed endpoint behavior:
+- `cli.py` — headless runner and diagnostic/export interface
 
-- when one side is a country, file tokens use `<ISO>_ANY`
-- example: `edge_page_BJSA_UZ_ANY_20260520.md`
-- result rows preserve the concrete winning route, such as `BJSA -> TAS`
+Core engine:
 
-Date-window behavior:
+- `skyscanner_multi_domain/planning/search_plan.py` — candidate scoring, explain plan, batches, plan metadata
+- `skyscanner_multi_domain/scan/orchestrator.py` — scan orchestration, fallback routing, quote formatting
+- `skyscanner_multi_domain/scan/history.py` — scan history, preview cache, plan telemetry
+- `skyscanner_multi_domain/transports/opencli.py` — default browser automation transport
+- `skyscanner_multi_domain/transports/cdp.py` — CDP/browser fallback transport
+- `skyscanner_multi_domain/transports/scrapling.py` — Scrapling legacy fallback transport
+- `skyscanner_multi_domain/parsing/page_parser.py` — Best/Cheapest page parser
+- `skyscanner_multi_domain/geo/location_resolver.py` — location/country/airport resolution
+- `skyscanner_multi_domain/geo/regions.py` — market/region configuration
 
-- CLI default: `--date-window 3`
-- GUI default: `±3` days
-- setting `0` means single-day scan only
-- GUI can optionally save a combined window summary
+Compatibility shims:
 
-## 4. Runtime Paths
+- Root-level `scan_orchestrator.py`, `scan_history.py`, `search_plan.py`, `transport_*.py`, `skyscanner_page_parser.py`, `location_resolver.py`, and `skyscanner_regions.py` re-export from the package modules.
+- Keep these shims for compatibility with old imports, tests, and mock targets; do not add new logic there.
 
-Project-local outputs:
+Legacy:
 
-- reports: `outputs/reports/`
-- logs: `logs/`
-- failure samples: `logs/failures/`
+- `legacy/gui.py` and `gui.py` are deprecated Tk entry points. Only fix startup-level breakage.
 
-State directory:
+Historical notes:
 
-- browser profiles: `$XDG_STATE_HOME/skyscanner_multi_domain/browser-profiles/`
-- FX cache: `$XDG_STATE_HOME/skyscanner_multi_domain/fx_rates_cache.json`
+- Old refactor notes and branch history are in `docs/history/2026-04-refactor-notes.md`.
 
-Fallback when `XDG_STATE_HOME` is not set:
+## 3. Data Flow
 
-- `~/.local/state/skyscanner_multi_domain/`
+User input flows through:
 
-Legacy behavior still supported:
+1. UI or CLI parses route/date/market options.
+2. `geo/location_resolver.py` resolves endpoints and country-expanded airport candidates.
+3. `geo/regions.py` builds effective market candidates.
+4. `planning/search_plan.py` ranks route/date/market candidates and can render `--show-plan`.
+5. `scan/orchestrator.py` scans ordered candidates with opencli, CDP fallback, then Scrapling fallback.
+6. `parsing/page_parser.py` extracts Best/Cheapest prices.
+7. `scan/history.py` stores rows, quote snapshots, preview cache, and plan telemetry.
 
-- if an old profile exists under `outputs/*-cdp-profile`, runtime attempts a one-time move into the state directory
+Current SearchPlan behavior is intentionally conservative:
 
-Failure logging behavior:
+- It ranks and explains candidates.
+- It attaches `plan_rank`, `plan_reason`, route/date/market ranks, and telemetry.
+- It does not prune or reduce the final scan set.
 
-- any final market-level failure now persists a debug artifact under `logs/failures/`
-- the log includes route, transport, region, status, error, source URL, and a page-text excerpt when available
+## 4. Do Not Modify By Default
 
-## 5. Important Current Behavior
+- Do not add new user-facing features to `legacy/gui.py` or `gui.py`.
+- Do not put new core logic into root-level compatibility shims.
+- Do not turn `webui/` into a standalone cloud/web product.
+- Do not introduce SearchPlan pruning until explainability, plan metadata, and telemetry are stable.
 
-### Session persistence verification
+## 5. Common Test Commands
 
-`transport_cdp.py` now includes `verify_browser_session_persistence(preferred_browser)` which:
+```bash
+python -m py_compile cli.py desktop_ui_service.py skyscanner_neo.py
+python -m py_compile skyscanner_multi_domain/scan/orchestrator.py
+python -m py_compile skyscanner_multi_domain/planning/search_plan.py
+pytest -q
+python cli.py page -o 北京 -d 阿拉木图 -t 2026-05-20 --date-window 1 --show-plan
+```
 
-1. Starts a local HTTP probe server that sets a unique cookie
-2. Launches the browser with `--remote-debugging-port=<dynamic_port>` pointing to the probe `/set` URL
-3. Reads the cookie via CDP `Runtime.evaluate("document.cookie")`
-4. Kills the browser, waits for CDP port shutdown
-5. Restarts the browser with the same profile, pointing to the probe `/echo` URL
-6. Verifies the same cookie is still present
+## 6. Current Next Tasks
 
-Usage: `python cli.py doctor --verify-session-persistence --persistence-browser comet`
+- Finish package import migration in non-legacy files and keep shim tests passing.
+- Add visible plan phase/status to the desktop WebView UI.
+- Add plan telemetry display in history/details views.
+- Only after that, introduce conservative user-confirmed early stop in fast mode.
 
-Results:
-- Comet (default production browser): ✅ session persists
-- Edge: ❌ session does NOT persist (profile or launch-flag issue TBD)
+## 7. Known Pitfalls
 
-### Smart effective regions
-
-`cli.py` and `gui.py` use `build_effective_region_codes(...)`.
-Effective regions are built from:
-
-- baseline defaults
-- origin country
-- destination country
-- user-provided extra region codes
-
-When endpoint expansion is enabled:
-
-- single-location endpoints still contribute their resolved country to smart regions
-- country endpoints contribute their ISO country code directly
-- mixed location/country routes therefore keep the same smart-region behavior
-
-### Current baseline default regions
-
-- `CN`
-- `HK`
-- `SG`
-- `UK`
-
-Important:
-
-- `JP` and `KR` are intentionally excluded from baseline defaults
-- they can still be added manually
-
-### GUI / CLI region semantics
-
-- GUI field means extra regions, not full replacement
-- CLI `-r/--regions` also appends to smart defaults, not replaces them
-
-### Endpoint expansion semantics
-
-- point-to-point mode remains the default when no country argument/toggle is enabled
-- GUI can enable country expansion independently for origin and destination
-- CLI can enable country expansion independently via `--origin-country` and `--destination-country`
-- country expansion is intentionally capped by `--country-airport-limit` / the GUI default limit to avoid route-count explosion
-- mixed-route scans aggregate per-market winners back into one row per market
-
-### Date window semantics
-
-- the center date is always included
-- the window expands symmetrically around the center date
-- each day still saves its own report
-- the summary file aggregates all dates into one table
-
-## 6. Parsing Notes That Matter
-
-### Best / Cheapest parsing
-
-The parser is locale-aware and uses region-specific labels where needed.
-Examples:
-
-- `CN`: Best uses `综合最佳`, `最优`, `最佳`; Cheapest uses `最便宜`
-- `HK`: Best uses `最優`, `最佳`; Cheapest uses `最便宜`
-- `SG`: Best uses `综合最佳`, `最优`, `最佳`; Cheapest uses `最便宜`
-- `SE`: Best `Bäst`, Cheapest `Billigast`
-- `KR`: Best `추천순`, Cheapest `최저가`
-- `JP`: Best `おすすめ`, `おすすめ順`; Cheapest `最安値`
-- `ID`: Best `Terbaik`; Cheapest `Termurah`
-
-### Long-page text capture fix
-
-Older runs could fail when the sort section appeared after the first 12,000 characters of captured page text.
-Current behavior now:
-
-- long page text is sliced around sort-section hints / labels when they appear later in the page
-- parser applies the same anchored slicing as a fallback guard
-- Scrapling text extraction strips embedded script payloads before parsing, reducing false loading/challenge matches
-
-Regression tests now cover:
-
-- old 12,000-char budget with late sort section
-- label-only anchoring without explicit sort-section hint
-- very long pages where the sort section appears near the end
-
-### Best-candidate recovery logic
-
-If the first Best candidate is lower than Cheapest, parser does not blindly accept it.
-It attempts to recover by selecting a later Best candidate that is `>= Cheapest`.
-If no valid candidate exists, Best is dropped and status becomes `page_text_inconsistent`.
-
-### Challenge / loading pages
-
-The parser explicitly distinguishes:
-
-- `page_challenge`
-- `page_loading`
-- `page_parse_failed`
-- `page_text_best_only`
-- `page_text_cheapest_only`
-- `page_text_inconsistent`
-- `page_text_recovered_best`
-
-It now prefers valid parsed prices over transient loading text when both appear in the same page snapshot.
-
-## 7. Files Most Relevant To Future Work
-
-- `skyscanner_page_parser.py`
-  - start here for Best/Cheapest extraction bugs
-- `skyscanner_regions.py`
-  - start here for market defaults and host aliases
-- `scan_orchestrator.py`
-  - start here for scan routing, fallback logic, and `run_page_scan`
-- `transport_scrapling.py`
-  - start here for Scrapling transport behavior, retry logic, and captcha detection
-- `transport_cdp.py`
-  - start here for CDP browser management, page text capture, and `compare_via_pages`
-- `skyscanner_neo.py`
-  - start here for Neo CLI, capture replay, URL rewriting; also holds backward-compat re-exports
-- `cli.py`
-  - start here for output rendering, endpoint expansion, date-window scanning, and CLI summary behavior
-- `gui.py`
-  - start here for UI behavior, date-window controls, endpoint-mode toggles, scan-thread orchestration, progress/cancel, and link opening
-- `location_resolver.py`
-  - start here for airport/metro/country resolution and candidate-airport expansion
-- `date_window.py`
-  - start here for date-range generation behavior
-
-## 8. Known Constraints
-
-### Anti-bot / challenge pages
-
-Skyscanner may still show challenge or loading pages.
-Results depend on live site behavior and can vary with:
-
-- locale redirects
-- challenge state
-- cookies / login state
-- timing of page readiness
-
-The primary mitigation is now Scrapling retry / text-cleanup logic. The `page` transport remains available if manual fallback is needed.
-
-### JP can still be partial
-
-JP has been observed returning Cheapest-only in some runs.
-That remains a known limitation.
-
-## 9. Safe Next Steps For Another Agent
-
-Recommended order:
-
-1. Read this file
-2. Read `README.md`
-3. Inspect `skyscanner_page_parser.py`, `skyscanner_regions.py`, `scan_orchestrator.py`, `transport_scrapling.py`, and `transport_cdp.py`
-4. Validate parser changes with `python3 -m pytest -q test_skyscanner_neo.py`
-5. Validate date-window behavior with `python3 -m pytest -q test_date_window.py`
-6. Validate live Scrapling behavior first; use `--transport page` only if you need to compare against the browser-based fallback
-
-## 10. Things To Avoid
-
-- Do not change baseline default regions casually; `JP` / `KR` were intentionally excluded
-- Do not revert output back to a single-price table without an explicit request
-- Do not assume project-local `data/browser-profiles/` is the active runtime path
-- Do not trust generic Best labels in CN/HK/SG without scoped validation
-- Do not delete browser profile state unless the user explicitly accepts losing verification state
-- Do not reframe the project docs back to “Edge/CDP-first” unless the primary transport changes again
+- Browser scraping is slow and unstable; avoid high concurrency as a default.
+- History data may contain old rows without plan metadata; code must tolerate missing `plan_*` fields.
+- Root-level shims are compatibility only. Updating logic in both shim and package will cause drift.
+- Some tests intentionally import old root-level names to verify compatibility.

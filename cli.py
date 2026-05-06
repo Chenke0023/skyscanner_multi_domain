@@ -28,14 +28,14 @@ from failure_replay import (
     render_failure_replay_report,
 )
 from fx_rates import FxRateService
-from location_resolver import (
+from skyscanner_multi_domain.geo.location_resolver import (
     COUNTRY_ROUTE_DEFAULT_AIRPORT_LIMIT,
     CountryRecord,
     LocationRecord,
     LocationResolver,
     ResolvedLocation,
 )
-from scan_history import (
+from skyscanner_multi_domain.scan.history import (
     ScanHistoryStore,
     annotate_rows_with_history,
     build_delta_summary_lines,
@@ -50,7 +50,7 @@ from scan_history import (
     override_rows_source_kind,
     source_kind_label,
 )
-from search_plan import (
+from skyscanner_multi_domain.planning.search_plan import (
     TripIntent,
     build_ordered_trip_dates,
     build_search_plan,
