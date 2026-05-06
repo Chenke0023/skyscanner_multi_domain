@@ -20,8 +20,6 @@ from typing import Optional
 
 from app_paths import PROJECT_ROOT, get_reports_dir
 from date_window import (
-    build_date_window,
-    build_round_trip_date_window,
     format_trip_date_label,
 )
 from failure_replay import (
@@ -52,6 +50,7 @@ from scan_history import (
     override_rows_source_kind,
     source_kind_label,
 )
+from search_plan import build_ordered_trip_dates, rank_route_pairs
 from skyscanner_neo import (
     DEFAULT_REGIONS,
     NeoCli,
@@ -821,15 +820,10 @@ class SimpleCLI:
         )
         date_window_days = max(int(getattr(args, "date_window", 0)), 0)
         try:
-            trip_dates = (
-                build_round_trip_date_window(
-                    args.date, args.return_date, date_window_days
-                )
-                if args.return_date
-                else [
-                    (date, None)
-                    for date in build_date_window(args.date, date_window_days)
-                ]
+            trip_dates = build_ordered_trip_dates(
+                args.date,
+                args.return_date,
+                date_window_days,
             )
         except ValueError as exc:
             print(f"日期参数错误: {exc}")
@@ -1202,15 +1196,10 @@ class SimpleCLI:
 
         date_window_days = max(int(getattr(args, "date_window", 0)), 0)
         try:
-            trip_dates = (
-                build_round_trip_date_window(
-                    args.date, args.return_date, date_window_days
-                )
-                if args.return_date
-                else [
-                    (date, None)
-                    for date in build_date_window(args.date, date_window_days)
-                ]
+            trip_dates = build_ordered_trip_dates(
+                args.date,
+                args.return_date,
+                date_window_days,
             )
         except ValueError as exc:
             print(f"日期参数错误: {exc}")
@@ -1274,11 +1263,11 @@ class SimpleCLI:
                 self._print_delta_summary(rows_by_date)
             return 0 if any_winner else (1 if not any_rows else 2)
 
-        pair_routes = [
-            (origin_airport, destination_airport)
-            for origin_airport in origin_points
-            for destination_airport in destination_points
-        ]
+        pair_routes = rank_route_pairs(
+            origin_points,
+            destination_points,
+            latest_record.rows_by_date if latest_record is not None else None,
+        )
         pair_count = len(pair_routes)
 
         async def scan_trip(
