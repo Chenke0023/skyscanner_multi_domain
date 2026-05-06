@@ -381,6 +381,10 @@ class SimpleCLI:
                     "route_rank": row.get("route_rank"),
                     "date_rank": row.get("date_rank"),
                     "market_rank": row.get("market_rank"),
+                    "confidence": row.get("confidence"),
+                    "price_source": row.get("price_source"),
+                    "evidence_text": row.get("evidence_text"),
+                    "parser_warnings": row.get("parser_warnings") or [],
                 }
             )
         return snapshots
@@ -495,6 +499,10 @@ class SimpleCLI:
                     "route_rank": quote.get("route_rank"),
                     "date_rank": quote.get("date_rank"),
                     "market_rank": quote.get("market_rank"),
+                    "confidence": quote.get("confidence"),
+                    "price_source": quote.get("price_source"),
+                    "evidence_text": quote.get("evidence_text"),
+                    "parser_warnings": quote.get("parser_warnings") or [],
                 }
             )
         return self._sort_simplified_rows(simplified)

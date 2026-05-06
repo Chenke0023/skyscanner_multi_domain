@@ -334,6 +334,10 @@ def quotes_to_dicts(quotes: list[FlightQuote]) -> list[dict[str, Any]]:
             "route_rank": quote.route_rank,
             "date_rank": quote.date_rank,
             "market_rank": quote.market_rank,
+            "confidence": quote.confidence,
+            "price_source": quote.price_source,
+            "evidence_text": quote.evidence_text,
+            "parser_warnings": list(quote.parser_warnings or []),
         }
         for quote in quotes
     ]

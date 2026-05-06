@@ -38,6 +38,10 @@ class FlightQuote:
     route_rank: Optional[int] = None
     date_rank: Optional[int] = None
     market_rank: Optional[int] = None
+    confidence: Optional[float] = None
+    price_source: Optional[str] = None
+    evidence_text: Optional[str] = None
+    parser_warnings: list[str] = field(default_factory=list)
 
 
 # ── AttemptTrace ──────────────────────────────────────────────────────────────

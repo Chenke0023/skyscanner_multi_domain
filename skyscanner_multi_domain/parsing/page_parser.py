@@ -257,6 +257,55 @@ class PageParseDiagnostics:
     used_fallback: bool
 
 
+def attach_parser_trust_metadata(
+    quote: FlightQuote,
+    diagnostics: PageParseDiagnostics,
+) -> FlightQuote:
+    warnings: list[str] = []
+    price_source = "unpriced"
+    evidence_text = diagnostics.failure_reason or ""
+    confidence = 0.0
+
+    if diagnostics.selected_cheapest is not None:
+        price_source = "cheapest_block"
+        confidence = 0.9
+        evidence_text = diagnostics.selected_cheapest.raw_block
+    elif diagnostics.selected_best is not None:
+        price_source = "best_block"
+        confidence = 0.78
+        evidence_text = diagnostics.selected_best.raw_block
+        warnings.append("仅解析到 Best 区块，未解析到 Cheapest 对照。")
+    elif diagnostics.fallback_price is not None and quote.price is not None:
+        price_source = "first_price_fallback"
+        confidence = 0.45
+        evidence_text = diagnostics.fallback_price.raw_text
+        warnings.append("使用页面首个价格 fallback，需人工点开确认。")
+
+    if diagnostics.validation_outcome == "recovered_best":
+        price_source = "recovered_best"
+        confidence = min(confidence, 0.72)
+        warnings.append("Best 初始候选与 Cheapest 不一致，已使用恢复后的 Best 候选。")
+    elif diagnostics.validation_outcome == "ignored_inconsistent_best":
+        confidence = min(confidence or 0.55, 0.55)
+        warnings.append("Best/Cheapest 不一致，已忽略错位 Best 候选。")
+    elif diagnostics.validation_outcome in {"best_only", "cheapest_only"}:
+        confidence = min(confidence or 0.7, 0.7)
+        warnings.append("Best/Cheapest 只解析到一侧，可信度降低。")
+
+    if (
+        diagnostics.selected_best is not None
+        and diagnostics.selected_cheapest is not None
+        and diagnostics.selected_best.price != diagnostics.selected_cheapest.price
+    ):
+        warnings.append("Best 与 Cheapest 价格不一致，请点开页面确认票价条件。")
+
+    quote.confidence = round(confidence, 2)
+    quote.price_source = price_source
+    quote.evidence_text = " ".join(evidence_text.split())[:240] if evidence_text else None
+    quote.parser_warnings = warnings
+    return quote
+
+
 def parse_float(value: Any) -> Optional[float]:
     if isinstance(value, (int, float)):
         return float(value)
@@ -628,7 +677,7 @@ def extract_page_quote_with_diagnostics(
             failure_reason=quote.error,
             used_fallback=False,
         )
-        return quote, diagnostics
+        return attach_parser_trust_metadata(quote, diagnostics), diagnostics
 
     best_labels = REGION_BEST_LABELS.get(region.code, ()) or BEST_LABELS
     cheapest_labels = REGION_CHEAPEST_LABELS.get(region.code, ()) or CHEAPEST_LABELS
@@ -740,7 +789,7 @@ def extract_page_quote_with_diagnostics(
             failure_reason=inconsistency_error,
             used_fallback=used_fallback,
         )
-        return quote, diagnostics
+        return attach_parser_trust_metadata(quote, diagnostics), diagnostics
 
     if fallback_price:
         quote = FlightQuote(
@@ -767,7 +816,7 @@ def extract_page_quote_with_diagnostics(
             failure_reason=None,
             used_fallback=True,
         )
-        return quote, diagnostics
+        return attach_parser_trust_metadata(quote, diagnostics), diagnostics
 
     if state.loading_hint:
         quote = FlightQuote(
@@ -792,7 +841,7 @@ def extract_page_quote_with_diagnostics(
             failure_reason=quote.error,
             used_fallback=False,
         )
-        return quote, diagnostics
+        return attach_parser_trust_metadata(quote, diagnostics), diagnostics
 
     if (
         (best_search.matched_labels or cheapest_search.matched_labels)
@@ -830,7 +879,7 @@ def extract_page_quote_with_diagnostics(
         failure_reason=failure_reason,
         used_fallback=False,
     )
-    return quote, diagnostics
+    return attach_parser_trust_metadata(quote, diagnostics), diagnostics
 
 
 def extract_page_quote(

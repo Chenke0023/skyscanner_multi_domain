@@ -413,10 +413,16 @@ def build_plan_telemetry(quotes_by_date: QuotesByDate) -> dict[str, Any]:
         "total_tasks": len(flattened),
         "priced_tasks": len(valid_quotes),
         "first_valid_task_index": _optional_int(first_valid.get("plan_rank")) if first_valid else None,
+        "first_valid_price_task_index": _optional_int(first_valid.get("plan_rank")) if first_valid else None,
         "best_result_found_at_task_index": _optional_int(best_quote.get("plan_rank")) if best_quote else None,
+        "best_price_task_index": _optional_int(best_quote.get("plan_rank")) if best_quote else None,
         "best_result_market_rank": _optional_int(best_quote.get("market_rank")) if best_quote else None,
+        "best_market_rank": _optional_int(best_quote.get("market_rank")) if best_quote else None,
         "best_result_date_rank": _optional_int(best_quote.get("date_rank")) if best_quote else None,
+        "best_date_rank": _optional_int(best_quote.get("date_rank")) if best_quote else None,
         "best_result_route_rank": _optional_int(best_quote.get("route_rank")) if best_quote else None,
+        "best_route_rank": _optional_int(best_quote.get("route_rank")) if best_quote else None,
+        "failed_tasks_by_reason": _failed_tasks_by_reason(flattened),
         "best_result_region": (
             str(best_quote.get("region") or "") or None if best_quote else None
         ),
@@ -424,6 +430,21 @@ def build_plan_telemetry(quotes_by_date: QuotesByDate) -> dict[str, Any]:
             str(best_quote.get("date") or "") or None if best_quote else None
         ),
     }
+
+
+def _failed_tasks_by_reason(quotes: list[dict[str, Any]]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for quote in quotes:
+        if _quote_has_numeric_price(quote):
+            continue
+        reason = str(
+            quote.get("failure_class")
+            or quote.get("status")
+            or quote.get("error")
+            or "unknown"
+        )
+        counts[reason] = counts.get(reason, 0) + 1
+    return counts
 
 
 def _quote_has_numeric_price(quote: dict[str, Any]) -> bool:
