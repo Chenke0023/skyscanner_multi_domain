@@ -899,9 +899,12 @@ async def run_page_scan(
                 batch_quotes = apply_plan_metadata(batch_quotes)
                 merged_quotes = merge_quotes_by_region(merged_quotes, batch_quotes)
                 for quote in batch_quotes:
-                    scanned_region_codes.add(quote.region)
-                    if quote.region not in completed_regions:
-                        completed_regions.append(quote.region)
+                    # Point 1: opencli_not_attempted must not be treated as successfully scanned in batches.
+                    # This allows them to be picked up in the remaining_regions (deep補掃) pass.
+                    if quote.status != "opencli_not_attempted":
+                        scanned_region_codes.add(quote.region)
+                        if quote.region not in completed_regions:
+                            completed_regions.append(quote.region)
                 await emit_progress(
                     stage="plan_batch_complete",
                     quotes=apply_plan_metadata(list(merged_quotes)),
