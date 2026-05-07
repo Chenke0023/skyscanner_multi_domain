@@ -42,6 +42,7 @@ class FlightQuote:
     price_source: Optional[str] = None
     evidence_text: Optional[str] = None
     parser_warnings: list[str] = field(default_factory=list)
+    fallback_attempts: list[dict[str, Any]] = field(default_factory=list)
 
     # Telemetry fields
     tab_open_count: int = 0

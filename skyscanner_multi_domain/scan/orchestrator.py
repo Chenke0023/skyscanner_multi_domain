@@ -338,6 +338,7 @@ def quotes_to_dicts(quotes: list[FlightQuote]) -> list[dict[str, Any]]:
             "price_source": quote.price_source,
             "evidence_text": quote.evidence_text,
             "parser_warnings": list(quote.parser_warnings or []),
+            "fallback_attempts": list(quote.fallback_attempts or []),
             "tab_open_count": quote.tab_open_count,
             "tab_close_count": quote.tab_close_count,
             "reused_tab_count": quote.reused_tab_count,
@@ -584,9 +585,7 @@ async def run_page_scan(
                 fetch_pipeline=fetch_pipeline,
             )
 
-            # WAIT_RENDER: retry loading failures with longer wait in same transport.
-            # This runs regardless of enable_browser_fallback — it's a same-transport
-            # retry, not a transport switch.
+            # WAIT_RENDER retry logic... (existing)
             wait_render_regions = [
                 region
                 for region, quote in zip(batch_regions, quotes)
@@ -609,10 +608,18 @@ async def run_page_scan(
                 merged: list[FlightQuote] = []
                 for quote in quotes:
                     replacement = wait_by_region.get(quote.region)
-                    if replacement is not None and replacement.price is not None:
-                        merged.append(replacement)
-                    elif replacement is not None:
-                        merged.append(replacement)
+                    if replacement is not None:
+                        # Merge wait render attempt
+                        if replacement.price is None:
+                            quote.fallback_attempts.append({
+                                "transport": "scrapling_wait",
+                                "status": replacement.status,
+                                "failure_class": classify_failure(replacement.status),
+                                "error": replacement.error,
+                            })
+                            merged.append(quote)
+                        else:
+                            merged.append(replacement)
                     else:
                         merged.append(quote)
                 quotes = merged
@@ -642,8 +649,18 @@ async def run_page_scan(
                     merged_quotes: list[FlightQuote] = []
                     for quote in quotes:
                         fallback_quote = fallback_by_region.get(quote.region)
-                        if fallback_quote and fallback_quote.price is not None:
-                            merged_quotes.append(fallback_quote)
+                        if fallback_quote:
+                            if fallback_quote.price is not None:
+                                merged_quotes.append(fallback_quote)
+                            else:
+                                # Merge fallback diagnostics even if it failed (v1.2 goal #3)
+                                quote.fallback_attempts.append({
+                                    "transport": "page_fallback",
+                                    "status": fallback_quote.status,
+                                    "failure_class": classify_failure(fallback_quote.status),
+                                    "error": fallback_quote.error,
+                                })
+                                merged_quotes.append(quote)
                         else:
                             merged_quotes.append(quote)
                     quotes = merged_quotes
@@ -686,15 +703,24 @@ async def run_page_scan(
                     args, page_regions, persist_failures=False, run_id=run_id
                 )
                 page_by_region = {quote.region: quote for quote in page_quotes}
-                quotes = [
-                    (
-                        page_by_region[quote.region]
-                        if quote.region in page_by_region
-                        and page_by_region[quote.region].price is not None
-                        else quote
-                    )
-                    for quote in quotes
-                ]
+                
+                new_quotes = []
+                for quote in quotes:
+                    page_quote = page_by_region.get(quote.region)
+                    if page_quote:
+                        if page_quote.price is not None:
+                            new_quotes.append(page_quote)
+                        else:
+                            quote.fallback_attempts.append({
+                                "transport": "page_fallback",
+                                "status": page_quote.status,
+                                "failure_class": classify_failure(page_quote.status),
+                                "error": page_quote.error,
+                            })
+                            new_quotes.append(quote)
+                    else:
+                        new_quotes.append(quote)
+                quotes = new_quotes
 
             legacy_regions = [
                 region
@@ -713,15 +739,24 @@ async def run_page_scan(
                     fetch_pipeline=fetch_pipeline,
                 )
                 legacy_by_region = {quote.region: quote for quote in legacy_quotes}
-                quotes = [
-                    (
-                        legacy_by_region[quote.region]
-                        if quote.region in legacy_by_region
-                        and legacy_by_region[quote.region].price is not None
-                        else quote
-                    )
-                    for quote in quotes
-                ]
+                
+                new_quotes = []
+                for quote in quotes:
+                    legacy_quote = legacy_by_region.get(quote.region)
+                    if legacy_quote:
+                        if legacy_quote.price is not None:
+                            new_quotes.append(legacy_quote)
+                        else:
+                            quote.fallback_attempts.append({
+                                "transport": "scrapling_fallback",
+                                "status": legacy_quote.status,
+                                "failure_class": classify_failure(legacy_quote.status),
+                                "error": legacy_quote.error,
+                            })
+                            new_quotes.append(quote)
+                    else:
+                        new_quotes.append(quote)
+                quotes = new_quotes
             return quotes
 
         if normalized_transport == "page":

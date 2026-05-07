@@ -227,6 +227,58 @@ def _quote_from_opencli_result(
     return quote
 
 
+class OpenCLITabPool:
+    """Bounded pool of OpenCLI tabs with domain-level reuse prioritization."""
+
+    def __init__(self, max_tabs: int = 1):
+        self.max_tabs = max_tabs
+        self.sessions: list[OpenCLITabSession] = []
+        # Mapping of domain to session for pinning
+        self.domain_to_session: dict[str, OpenCLITabSession] = {}
+        self.pool_tab_close_count = 0
+
+    def acquire(self, domain: str, url: str) -> tuple[OpenCLITabSession, dict[str, int]]:
+        """Acquire a session for the given domain. Prioritize domain pinning."""
+        # 1. Try pinned session for this domain
+        if domain in self.domain_to_session:
+            session = self.domain_to_session[domain]
+            _, delta = session.ensure_tab(url)
+            return session, delta
+
+        # 2. Try to create a new session if pool is not full
+        if len(self.sessions) < self.max_tabs:
+            session = OpenCLITabSession()
+            self.sessions.append(session)
+            self.domain_to_session[domain] = session
+            _, delta = session.ensure_tab(url)
+            return session, delta
+
+        # 3. Reuse an existing session (LRU candidate)
+        # To avoid cross-domain pollution, we clear the pin of the old domain.
+        session = self.sessions[0] # Simplest: always reuse the first one in current sequential mode
+        
+        # Remove old pin
+        old_domain = next((d for d, s in self.domain_to_session.items() if s == session), None)
+        if old_domain:
+            del self.domain_to_session[old_domain]
+        
+        self.domain_to_session[domain] = session
+        _, delta = session.ensure_tab(url)
+        return session, delta
+
+    def close_all(self):
+        """Close all tabs in the pool."""
+        for session in self.sessions:
+            session.close()
+            self.pool_tab_close_count += session.session_tab_close_count
+        self.sessions.clear()
+        self.domain_to_session.clear()
+
+    def get_total_tab_close_count(self) -> int:
+        current_active = sum(s.session_tab_close_count for s in self.sessions)
+        return self.pool_tab_close_count + current_active
+
+
 async def compare_via_opencli(
     args: argparse.Namespace,
     selected_regions: list[RegionConfig],
@@ -235,16 +287,18 @@ async def compare_via_opencli(
     build_search_url: Any = None,
     on_region_start: Any = None,
     on_region_complete: Any = None,
-    region_concurrency: int = 3,
+    region_concurrency: int = 1,
     run_id: str = "",
 ) -> list[FlightQuote]:
-    """Fetch flight quotes using opencli browser automation."""
+    """Fetch flight quotes using opencli browser automation with a bounded tab pool."""
     if build_search_url is None:
         from skyscanner_multi_domain.scan.orchestrator import build_search_url as _bsu
         build_search_url = _bsu
 
     return_date = getattr(args, "return_date", None)
     page_wait = max(args.page_wait, 3)
+    # Linked to region_concurrency but capped for safety (v1.2 goal #1)
+    max_tabs = min(max(int(region_concurrency), 1), 3)
 
     requested_urls: dict[str, str] = {}
     for region in selected_regions:
@@ -259,7 +313,8 @@ async def compare_via_opencli(
     page_text_len_by_region: dict[str, int] = {}
     page_url_by_region: dict[str, str] = {}
     start_time = time.time()
-    session = OpenCLITabSession()
+    
+    pool = OpenCLITabPool(max_tabs=max_tabs)
 
     try:
         for region in selected_regions:
@@ -285,14 +340,16 @@ async def compare_via_opencli(
             quote: Optional[FlightQuote] = None
 
             try:
-                tab_id, delta_ensure = session.ensure_tab(url)
+                session, delta_ensure = pool.acquire(region.domain, url)
+                tab_id = session.tab_id
+
                 if not tab_id:
-                    raise RuntimeError("No tab ID returned")
+                    raise RuntimeError("No tab ID returned from pool")
 
                 # State-based progressive wait
                 success, delta_wait_state = await session.wait_progressive_state(tab_id, page_wait)
                 
-                # Content-aware adaptive extraction (even if state-based wait timed out, we might still try extract)
+                # Content-aware adaptive extraction (v1.2 goal: wait + re-extract loop is now in extract_with_progressive_content_wait)
                 quote, page_text, delta_extract = await session.extract_with_progressive_content_wait(tab_id, region, url)
                 
                 # Apply telemetry to quote (per-region deltas)
@@ -317,8 +374,9 @@ async def compare_via_opencli(
                     status="opencli_error",
                     error=str(exc)[:200],
                 )
-                quote.tab_open_count = delta_ensure["tab_open_count"] if 'delta_ensure' in locals() else 0
-                quote.reused_tab_count = delta_ensure["reused_tab_count"] if 'delta_ensure' in locals() else 0
+                if 'delta_ensure' in locals():
+                    quote.tab_open_count = delta_ensure["tab_open_count"]
+                    quote.reused_tab_count = delta_ensure["reused_tab_count"]
 
             if quote is None:
                 quote = FlightQuote(
@@ -347,9 +405,12 @@ async def compare_via_opencli(
             if on_region_complete:
                 on_region_complete(region, quote)
     finally:
-        session.close()
         # Final update of tab_close_count to the LAST quote in the pass
-        # This correctly records that a tab was closed as part of this session's lifecycle.
+        total_closes_before = pool.get_total_tab_close_count()
+        pool.close_all()
+        total_closes_after = pool.get_total_tab_close_count()
+        total_closes = max(total_closes_before, total_closes_after)
+
         if selected_regions:
             # We assign it to the last region that was actually ATTEMPTED
             last_attempted_code = None
@@ -359,15 +420,16 @@ async def compare_via_opencli(
                     break
             
             if last_attempted_code and last_attempted_code in latest_quotes:
-                latest_quotes[last_attempted_code].tab_close_count = session.session_tab_close_count
+                latest_quotes[last_attempted_code].tab_close_count = total_closes
 
-    ordered_quotes: list[FlightQuote] = []
+    # Final return
+    final_quotes = []
     for region in selected_regions:
         q = latest_quotes.get(region.code)
         if q is not None:
-            ordered_quotes.append(q)
+            final_quotes.append(q)
 
-    for quote in ordered_quotes:
+    for quote in final_quotes:
         emit_trace(
             run_id=run_id,
             route_key=route_key,
@@ -394,4 +456,4 @@ async def compare_via_opencli(
             progressive_wait_used=quote.progressive_wait_used,
         )
 
-    return ordered_quotes
+    return final_quotes

@@ -73,3 +73,51 @@ def test_orchestrator_retries_unattempted_opencli_regions() -> None:
         assert [r.code for r in args2] == ["SG"]
 
     asyncio.run(run_test())
+
+def test_orchestrator_merges_fallback_diagnostics_v12() -> None:
+    """Test that orchestrator merges failure diagnostics when fallback also fails."""
+    async def run_test():
+        regions = ["CN"]
+        origin = "BJS"
+        destination = "ALA"
+        date = "2026-05-20"
+        
+        # Initial OpenCLI failure (network/extract fail)
+        opencli_quote = FlightQuote("CN", "domain1", None, "CNY", "url1", "opencli_failed")
+        
+        # Secondary page fallback failure (challenge)
+        page_quote = FlightQuote("CN", "domain1", None, "CNY", "url1", "page_challenge")
+        page_quote.error = "Cloudflare"
+        
+        with patch("skyscanner_multi_domain.transports.opencli.compare_via_opencli", return_value=[opencli_quote]):
+            # Use the actual import location for patching
+            with patch("skyscanner_multi_domain.transports.cdp.detect_cdp_version", return_value={"Browser": "Edge"}):
+                with patch("skyscanner_multi_domain.transports.cdp.compare_via_pages", return_value=[page_quote]):
+                    with patch("skyscanner_multi_domain.scan.orchestrator.build_scan_batches") as mock_batches:
+                        from skyscanner_multi_domain.planning.search_plan import ScanBatch, ScanTask, RouteCandidate, DateCandidate, MarketCandidate
+                        route = RouteCandidate("BJS", "ALA", "BJS", "ALA", 1, "reason", 1.0, 1.0, {})
+                        date_cand = DateCandidate(date, None, 0, "anchor", "reason", 1.0, {})
+                        market_cn = MarketCandidate("CN", 1, "reason", 1.0, 0.5, 1.0, {})
+                        
+                        batch = ScanBatch(1, "probe", [
+                            ScanTask(route, date_cand, market_cn, 1.0, "probe", "reason")
+                        ], "reason")
+                        mock_batches.return_value = [batch]
+                        
+                        quotes = await run_page_scan(
+                            origin, destination, date, regions,
+                            transport="opencli",
+                            allow_browser_fallback=True
+                        )
+        
+        assert len(quotes) == 1
+        quote = quotes[0]
+        assert quote.price is None
+        assert quote.status == "opencli_failed" # Keeps original status as base
+        assert len(quote.fallback_attempts) >= 1
+        fallback = quote.fallback_attempts[0]
+        assert fallback["transport"] == "page_fallback"
+        assert fallback["status"] == "page_challenge"
+        assert "Cloudflare" in fallback["error"]
+
+    asyncio.run(run_test())
