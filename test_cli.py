@@ -4,7 +4,18 @@ from contextlib import redirect_stdout
 from io import StringIO
 from unittest.mock import patch
 
-from cli import SimpleCLI, build_parser, run_failure_replay_command
+from cli import (
+    SimpleCLI,
+    _build_decision_summary,
+    _build_warning_detail_section,
+    _confidence_label,
+    _failed_reason_counts,
+    _price_source_label,
+    _row_cny_value,
+    _warnings_summary,
+    build_parser,
+    run_failure_replay_command,
+)
 
 
 class CliParserTests(unittest.TestCase):
@@ -211,6 +222,332 @@ class RunPageCommandTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(exit_code, 2)
         self.assertIn("日期参数错误", output.getvalue())
+
+
+def _make_simplified_row(**overrides: object) -> dict[str, object]:
+    base: dict[str, object] = {
+        "region_code": "CN",
+        "region_name": "中国",
+        "best_display_price": "2,500.00 CNY",
+        "best_cny_price": 2500.0,
+        "cheapest_display_price": "2,438.00 CNY",
+        "cheapest_cny_price": 2438.0,
+        "link": "https://www.skyscanner.com/transport/flights/bjsa/alt/2026-05-20",
+        "status": "ok",
+        "error": "-",
+        "route": "北京 -> 阿拉木图",
+        "source_kind": "page_render",
+        "source_label": "页面渲染",
+        "delta_vs_last_scan": None,
+        "delta_label": "-",
+        "updated_at": None,
+        "failure_category": None,
+        "failure_action": None,
+        "can_reuse_page": True,
+        "plan_rank": 1,
+        "plan_score": 99.0,
+        "plan_phase": "core_route",
+        "plan_reason": "primary",
+        "route_rank": 1,
+        "date_rank": 1,
+        "market_rank": 1,
+        "confidence": 0.9,
+        "price_source": "cheapest_block",
+        "evidence_text": "Cheapest 2,438 CNY direct",
+        "parser_warnings": [],
+    }
+    base.update(overrides)
+    return base
+
+
+class TrustHelperTests(unittest.TestCase):
+    def test_confidence_label_buckets(self) -> None:
+        self.assertEqual(_confidence_label(0.95), "高")
+        self.assertEqual(_confidence_label(0.85), "高")
+        self.assertEqual(_confidence_label(0.7), "中")
+        self.assertEqual(_confidence_label(0.45), "低")
+        self.assertEqual(_confidence_label(0.1), "极低")
+        self.assertEqual(_confidence_label(None), "未知")
+        self.assertEqual(_confidence_label("0.9"), "未知")
+
+    def test_price_source_label_known_and_unknown(self) -> None:
+        self.assertEqual(_price_source_label("cheapest_block"), "Cheapest 区块")
+        self.assertEqual(_price_source_label("first_price_fallback"), "首个价格 fallback")
+        self.assertEqual(_price_source_label("unpriced"), "未取价")
+        self.assertEqual(_price_source_label(None), "未知")
+        self.assertEqual(_price_source_label(""), "未知")
+        self.assertEqual(_price_source_label("custom_source"), "custom_source")
+
+    def test_warnings_summary_handles_empty_one_or_many(self) -> None:
+        self.assertEqual(_warnings_summary(None), "-")
+        self.assertEqual(_warnings_summary([]), "-")
+        self.assertEqual(_warnings_summary(["仅 best"]), "仅 best")
+        self.assertEqual(_warnings_summary(["a", "b"]), "2 项警告")
+        self.assertEqual(_warnings_summary(["", "  "]), "-")
+
+    def test_failed_reason_counts_groups_by_failure_category(self) -> None:
+        rows = [
+            _make_simplified_row(),
+            _make_simplified_row(
+                cheapest_cny_price=None,
+                best_cny_price=None,
+                failure_category="challenge",
+            ),
+            _make_simplified_row(
+                cheapest_cny_price=None,
+                best_cny_price=None,
+                failure_category="parse_failed",
+            ),
+            _make_simplified_row(
+                cheapest_cny_price=None,
+                best_cny_price=None,
+                failure_category="challenge",
+            ),
+        ]
+        counts = _failed_reason_counts(rows)
+        self.assertEqual(counts, {"challenge": 2, "parse_failed": 1})
+
+    def test_row_cny_value_prefers_cheapest_then_best(self) -> None:
+        self.assertEqual(_row_cny_value(_make_simplified_row()), 2438.0)
+        self.assertEqual(
+            _row_cny_value(
+                _make_simplified_row(cheapest_cny_price=None, best_cny_price=2700.0)
+            ),
+            2700.0,
+        )
+        self.assertIsNone(
+            _row_cny_value(
+                _make_simplified_row(cheapest_cny_price=None, best_cny_price=None)
+            )
+        )
+
+
+class DecisionSummaryTests(unittest.TestCase):
+    def test_decision_summary_lists_primary_and_runner_with_spread(self) -> None:
+        rows = [
+            _make_simplified_row(
+                region_name="中国",
+                cheapest_cny_price=2438.0,
+                best_cny_price=2500.0,
+            ),
+            _make_simplified_row(
+                region_name="香港",
+                cheapest_cny_price=2610.0,
+                best_cny_price=2700.0,
+                confidence=0.78,
+                price_source="best_block",
+            ),
+            _make_simplified_row(
+                region_name="新加坡",
+                cheapest_cny_price=None,
+                best_cny_price=None,
+                failure_category="challenge",
+            ),
+        ]
+        text = "\n".join(_build_decision_summary(rows))
+
+        self.assertIn("## 扫描结论", text)
+        self.assertIn("### 推荐先验证", text)
+        self.assertIn("¥2,438.00", text)
+        self.assertIn("市场：中国", text)
+        self.assertIn("可信度：高", text)
+        self.assertIn("### 备选结果", text)
+        self.assertIn("¥2,610.00", text)
+        self.assertIn("价差：¥172.00", text)
+        self.assertIn("challenge×1", text)
+
+    def test_decision_summary_marks_low_confidence_primary_with_runner_advantage(
+        self,
+    ) -> None:
+        rows = [
+            _make_simplified_row(
+                region_name="中国",
+                cheapest_cny_price=2438.0,
+                best_cny_price=2500.0,
+                confidence=0.45,
+                price_source="first_price_fallback",
+            ),
+            _make_simplified_row(
+                region_name="香港",
+                cheapest_cny_price=2480.0,
+                best_cny_price=2520.0,
+                confidence=0.9,
+                price_source="cheapest_block",
+            ),
+        ]
+        text = "\n".join(_build_decision_summary(rows))
+
+        self.assertIn("最低价需复核；第二低价可信度更高且价差较小。", text)
+        self.assertIn("最低价来自首个价格 fallback，必须人工确认。", text)
+
+    def test_decision_summary_emits_parser_warning_hint(self) -> None:
+        rows = [
+            _make_simplified_row(
+                parser_warnings=["Best 与 Cheapest 价格不一致，请点开页面确认票价条件。"],
+            ),
+        ]
+        text = "\n".join(_build_decision_summary(rows))
+
+        self.assertIn(
+            "解析警告：Best 与 Cheapest 价格不一致，请点开页面确认票价条件。",
+            text,
+        )
+
+    def test_decision_summary_handles_no_priced_rows(self) -> None:
+        rows = [
+            _make_simplified_row(
+                cheapest_cny_price=None,
+                best_cny_price=None,
+                failure_category="challenge",
+            ),
+            _make_simplified_row(
+                cheapest_cny_price=None,
+                best_cny_price=None,
+                failure_category="parse_failed",
+            ),
+        ]
+        text = "\n".join(_build_decision_summary(rows))
+
+        self.assertIn("本次未抓取到任何有效价格", text)
+        self.assertIn("- challenge: 1", text)
+        self.assertIn("- parse_failed: 1", text)
+
+    def test_decision_summary_warns_when_only_fallback_sources_priced(self) -> None:
+        rows = [
+            _make_simplified_row(
+                region_name="中国",
+                cheapest_cny_price=2438.0,
+                price_source="first_price_fallback",
+                confidence=0.45,
+            ),
+            _make_simplified_row(
+                region_name="香港",
+                cheapest_cny_price=2520.0,
+                price_source="recovered_best",
+                confidence=0.6,
+            ),
+        ]
+        text = "\n".join(_build_decision_summary(rows))
+
+        self.assertIn(
+            "所有有效价格均来自 fallback 解析，作为初筛结果，需人工复核。",
+            text,
+        )
+
+    def test_decision_summary_includes_date_when_requested(self) -> None:
+        row = _make_simplified_row(date="2026-05-20")
+        text = "\n".join(_build_decision_summary([row], show_dates=True))
+
+        self.assertIn("日期：2026-05-20", text)
+
+
+class WarningDetailSectionTests(unittest.TestCase):
+    def test_section_lists_warnings_and_evidence(self) -> None:
+        rows = [
+            _make_simplified_row(
+                region_name="中国",
+                parser_warnings=["仅解析到 Best 区块，未解析到 Cheapest 对照。"],
+                evidence_text="Best 2,500 CNY",
+            ),
+            _make_simplified_row(region_name="香港", parser_warnings=[]),
+        ]
+        text = "\n".join(_build_warning_detail_section(rows))
+
+        self.assertIn("## 解析警告与证据", text)
+        self.assertIn("**中国 · 北京 -> 阿拉木图**", text)
+        self.assertIn("- 仅解析到 Best 区块，未解析到 Cheapest 对照。", text)
+        self.assertIn("证据片段：Best 2,500 CNY", text)
+        self.assertNotIn("香港", text)
+
+    def test_section_returns_empty_when_no_warnings(self) -> None:
+        rows = [_make_simplified_row(parser_warnings=[])]
+        self.assertEqual(_build_warning_detail_section(rows), [])
+
+
+class MarkdownReportTrustTests(unittest.TestCase):
+    def test_build_markdown_table_includes_trust_columns_and_decision(self) -> None:
+        cli = SimpleCLI()
+        rows = [
+            _make_simplified_row(
+                region_name="中国",
+                cheapest_cny_price=2438.0,
+                price_source="cheapest_block",
+                confidence=0.9,
+            ),
+            _make_simplified_row(
+                region_name="香港",
+                cheapest_cny_price=2610.0,
+                confidence=0.78,
+                price_source="best_block",
+                parser_warnings=["仅解析到 Best 区块，未解析到 Cheapest 对照。"],
+                evidence_text="Best 2,610 CNY direct",
+            ),
+        ]
+
+        payload = cli.build_markdown_table(
+            rows=rows,
+            origin="北京",
+            destination="阿拉木图",
+            date="2026-05-20",
+        )
+
+        self.assertIn("| 可信度 | 价格来源 | 警告 |", payload)
+        self.assertIn("## 扫描结论", payload)
+        self.assertIn("## 价格明细", payload)
+        self.assertIn("Cheapest 区块", payload)
+        self.assertIn("Best 区块", payload)
+        self.assertIn("仅解析到 Best 区块", payload)
+        self.assertIn("## 解析警告与证据", payload)
+        self.assertIn("证据片段：Best 2,610 CNY direct", payload)
+
+    def test_build_markdown_table_tolerates_rows_without_trust_metadata(self) -> None:
+        cli = SimpleCLI()
+        legacy_row = _make_simplified_row()
+        for key in ("confidence", "price_source", "evidence_text", "parser_warnings"):
+            legacy_row.pop(key, None)
+
+        payload = cli.build_markdown_table(
+            rows=[legacy_row],
+            origin="北京",
+            destination="阿拉木图",
+            date="2026-05-20",
+        )
+
+        self.assertIn("未知", payload)
+        self.assertNotIn("证据片段：", payload)
+
+    def test_build_window_markdown_table_includes_decision_section(self) -> None:
+        cli = SimpleCLI()
+        rows_a = [
+            _make_simplified_row(
+                region_name="中国",
+                cheapest_cny_price=2438.0,
+                price_source="cheapest_block",
+                confidence=0.9,
+            ),
+        ]
+        rows_b = [
+            _make_simplified_row(
+                region_name="香港",
+                cheapest_cny_price=2610.0,
+                confidence=0.78,
+                price_source="best_block",
+            ),
+        ]
+
+        payload = cli.build_window_markdown_table(
+            rows_by_date=[("2026-05-20", rows_a), ("2026-05-21", rows_b)],
+            origin="北京",
+            destination="阿拉木图",
+            start_date="2026-05-20",
+            end_date="2026-05-21",
+        )
+
+        self.assertIn("## 扫描结论", payload)
+        self.assertIn("¥2,438.00", payload)
+        self.assertIn("¥2,610.00", payload)
+        self.assertIn("日期：2026-05-20", payload)
+        self.assertIn("| 可信度 | 价格来源 | 警告 |", payload)
 
 
 if __name__ == "__main__":
