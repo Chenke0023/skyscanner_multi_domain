@@ -651,6 +651,16 @@ async def run_page_scan(
                         fallback_quote = fallback_by_region.get(quote.region)
                         if fallback_quote:
                             if fallback_quote.price is not None:
+                                # Preserve primary failure diagnostic even on success
+                                fallback_quote.fallback_attempts = [
+                                    {
+                                        "transport": "scrapling_primary",
+                                        "status": quote.status,
+                                        "failure_class": classify_failure(quote.status),
+                                        "error": quote.error,
+                                    },
+                                    *list(fallback_quote.fallback_attempts or []),
+                                ]
                                 merged_quotes.append(fallback_quote)
                             else:
                                 # Merge fallback diagnostics even if it failed (v1.2 goal #3)
@@ -709,6 +719,16 @@ async def run_page_scan(
                     page_quote = page_by_region.get(quote.region)
                     if page_quote:
                         if page_quote.price is not None:
+                            # Preserve primary failure diagnostic even on success
+                            page_quote.fallback_attempts = [
+                                {
+                                    "transport": "opencli_primary",
+                                    "status": quote.status,
+                                    "failure_class": classify_failure(quote.status),
+                                    "error": quote.error,
+                                },
+                                *list(page_quote.fallback_attempts or []),
+                            ]
                             new_quotes.append(page_quote)
                         else:
                             quote.fallback_attempts.append({
@@ -745,6 +765,16 @@ async def run_page_scan(
                     legacy_quote = legacy_by_region.get(quote.region)
                     if legacy_quote:
                         if legacy_quote.price is not None:
+                            # Preserve primary failure diagnostic even on success
+                            legacy_quote.fallback_attempts = [
+                                {
+                                    "transport": "opencli_primary",
+                                    "status": quote.status,
+                                    "failure_class": classify_failure(quote.status),
+                                    "error": quote.error,
+                                },
+                                *list(legacy_quote.fallback_attempts or []),
+                            ]
                             new_quotes.append(legacy_quote)
                         else:
                             quote.fallback_attempts.append({

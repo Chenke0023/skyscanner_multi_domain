@@ -93,22 +93,23 @@ def test_orchestrator_merges_fallback_diagnostics_v12() -> None:
             # Use the actual import location for patching
             with patch("skyscanner_multi_domain.transports.cdp.detect_cdp_version", return_value={"Browser": "Edge"}):
                 with patch("skyscanner_multi_domain.transports.cdp.compare_via_pages", return_value=[page_quote]):
-                    with patch("skyscanner_multi_domain.scan.orchestrator.build_scan_batches") as mock_batches:
-                        from skyscanner_multi_domain.planning.search_plan import ScanBatch, ScanTask, RouteCandidate, DateCandidate, MarketCandidate
-                        route = RouteCandidate("BJS", "ALA", "BJS", "ALA", 1, "reason", 1.0, 1.0, {})
-                        date_cand = DateCandidate(date, None, 0, "anchor", "reason", 1.0, {})
-                        market_cn = MarketCandidate("CN", 1, "reason", 1.0, 0.5, 1.0, {})
-                        
-                        batch = ScanBatch(1, "probe", [
-                            ScanTask(route, date_cand, market_cn, 1.0, "probe", "reason")
-                        ], "reason")
-                        mock_batches.return_value = [batch]
-                        
-                        quotes = await run_page_scan(
-                            origin, destination, date, regions,
-                            transport="opencli",
-                            allow_browser_fallback=True
-                        )
+                    with patch("skyscanner_multi_domain.transports.scrapling.compare_via_scrapling", return_value=[opencli_quote]): # Also fail scrapling fallback
+                        with patch("skyscanner_multi_domain.scan.orchestrator.build_scan_batches") as mock_batches:
+                            from skyscanner_multi_domain.planning.search_plan import ScanBatch, ScanTask, RouteCandidate, DateCandidate, MarketCandidate
+                            route = RouteCandidate("BJS", "ALA", "BJS", "ALA", 1, "reason", 1.0, 1.0, {})
+                            date_cand = DateCandidate(date, None, 0, "anchor", "reason", 1.0, {})
+                            market_cn = MarketCandidate("CN", 1, "reason", 1.0, 0.5, 1.0, {})
+                            
+                            batch = ScanBatch(1, "probe", [
+                                ScanTask(route, date_cand, market_cn, 1.0, "probe", "reason")
+                            ], "reason")
+                            mock_batches.return_value = [batch]
+                            
+                            quotes = await run_page_scan(
+                                origin, destination, date, regions,
+                                transport="opencli",
+                                allow_browser_fallback=True
+                            )
         
         assert len(quotes) == 1
         quote = quotes[0]
