@@ -36,10 +36,18 @@ def _opencli_json(args: list[str], timeout: int = 60) -> Any:
     return json.loads(result.stdout)
 
 
-def _tab_new(url: str) -> str:
+def _tab_new(url: str = "") -> str:
     """Open a new tab with the given URL, return tab ID."""
-    result = _opencli_json(["browser", "tab", "new", url])
+    args = ["browser", "tab", "new"]
+    if url:
+        args.append(url)
+    result = _opencli_json(args)
     return result.get("page", "")
+
+
+def _tab_navigate(tab_id: str, url: str) -> None:
+    """Navigate current tab to a new URL."""
+    _opencli_json(["browser", "open", "--tab", tab_id, url])
 
 
 def _tab_select(tab_id: str) -> None:
@@ -78,6 +86,79 @@ def _tab_extract(tab_id: str, chunk_size: int = 15000) -> dict[str, Any]:
         ["browser", "extract", "--tab", tab_id, "--chunk-size", str(chunk_size)],
         timeout=30,
     )
+
+
+class OpenCLITabSession:
+    """Manages OpenCLI tab lifecycle and adaptive extraction/waiting."""
+
+    def __init__(self, tab_id: str = ""):
+        self.tab_id = tab_id
+        self.tab_open_count = 0
+        self.tab_close_count = 0
+        self.reused_tab_count = 0
+        self.extract_attempt_count = 0
+        self.max_chunk_size_used = 0
+        self.progressive_wait_used = 0
+
+    def ensure_tab(self, url: str) -> str:
+        """Open a new tab if none exists, or navigate existing tab."""
+        if not self.tab_id:
+            self.tab_id = _tab_new(url)
+            self.tab_open_count += 1
+        else:
+            _tab_navigate(self.tab_id, url)
+            self.reused_tab_count += 1
+        return self.tab_id
+
+    def close(self):
+        """Close the managed tab."""
+        if self.tab_id:
+            _tab_close(self.tab_id)
+            self.tab_id = ""
+            self.tab_close_count += 1
+
+    async def wait_progressive(
+        self,
+        tab_id: str,
+        initial_wait: float,
+        poll_interval: float = TAB_POLL_INTERVAL,
+        timeout: float = TAB_WAIT_TIMEOUT,
+    ) -> bool:
+        """Wait for page to be interactive, with progressive steps if needed."""
+        await asyncio.sleep(initial_wait)
+        success = await _tab_wait_interactive_async(tab_id, timeout=timeout)
+        if not success:
+            # First progressive wait
+            self.progressive_wait_used += 1
+            await asyncio.sleep(poll_interval * 2)
+            success = await _tab_wait_interactive_async(tab_id, timeout=timeout / 2)
+        return success
+
+    async def extract_adaptive(
+        self,
+        tab_id: str,
+        region: RegionConfig,
+        url: str,
+    ) -> tuple[FlightQuote, str]:
+        """Try extraction with increasing chunk sizes until price is found or limit reached."""
+        chunk_sizes = [15000, 50000, 100000]
+        last_quote = None
+        last_text = ""
+
+        for chunk_size in chunk_sizes:
+            self.extract_attempt_count += 1
+            self.max_chunk_size_used = max(self.max_chunk_size_used, chunk_size)
+
+            result = _tab_extract(tab_id, chunk_size=chunk_size)
+            last_text = str(result.get("content", ""))
+            quote = _quote_from_opencli_result(region, result, url)
+
+            if quote.price is not None:
+                return quote, last_text
+
+            last_quote = quote
+
+        return last_quote or _quote_from_opencli_result(region, {}, url), last_text
 
 
 def _quote_from_opencli_result(
@@ -146,81 +227,96 @@ async def compare_via_opencli(
     page_text_len_by_region: dict[str, int] = {}
     page_url_by_region: dict[str, str] = {}
     start_time = time.time()
+    session = OpenCLITabSession()
 
-    for region in selected_regions:
-        if time.time() - start_time > MAX_REGION_TIME * len(selected_regions):
-            break
+    try:
+        for region in selected_regions:
+            # Check time budget
+            elapsed = time.time() - start_time
+            if elapsed > MAX_REGION_TIME * len(selected_regions):
+                latest_quotes[region.code] = FlightQuote(
+                    region=region.code,
+                    domain=region.domain,
+                    price=None,
+                    currency=region.currency,
+                    source_url=requested_urls[region.code],
+                    status="opencli_not_attempted",
+                    error="Time budget exceeded before attempt",
+                )
+                continue
 
-        if on_region_start:
-            on_region_start(region)
+            if on_region_start:
+                on_region_start(region)
 
-        url = requested_urls[region.code]
-        tab_id = ""
-        page_text = ""
-        quote: Optional[FlightQuote] = None
+            url = requested_urls[region.code]
+            page_text = ""
+            quote: Optional[FlightQuote] = None
 
-        try:
-            tab_id = _tab_new(url)
-            if not tab_id:
-                raise RuntimeError("No tab ID returned")
+            try:
+                tab_id = session.ensure_tab(url)
+                if not tab_id:
+                    raise RuntimeError("No tab ID returned")
 
-            await asyncio.sleep(page_wait)
-
-            if await _tab_wait_interactive_async(tab_id, timeout=TAB_WAIT_TIMEOUT):
-                result = _tab_extract(tab_id)
-                quote = _quote_from_opencli_result(region, result, url)
-                page_text = str(result.get("content", ""))
-            else:
-                page_text = ""
+                if await session.wait_progressive(tab_id, page_wait):
+                    quote, page_text = await session.extract_adaptive(tab_id, region, url)
+                else:
+                    page_text = ""
+                    quote = FlightQuote(
+                        region=region.code,
+                        domain=region.domain,
+                        price=None,
+                        currency=region.currency,
+                        source_url=url,
+                        status="opencli_timeout",
+                        error="Page did not reach interactive state within timeout",
+                    )
+            except Exception as exc:
                 quote = FlightQuote(
                     region=region.code,
                     domain=region.domain,
                     price=None,
                     currency=region.currency,
                     source_url=url,
-                    status="opencli_timeout",
-                    error="Page did not reach interactive state within timeout",
+                    status="opencli_error",
+                    error=str(exc)[:200],
                 )
-        except Exception as exc:
-            quote = FlightQuote(
-                region=region.code,
-                domain=region.domain,
-                price=None,
-                currency=region.currency,
-                source_url=url,
-                status="opencli_error",
-                error=str(exc)[:200],
-            )
-        finally:
-            if tab_id:
-                _tab_close(tab_id)
 
-        if quote is None:
-            quote = FlightQuote(
-                region=region.code,
-                domain=region.domain,
-                price=None,
-                currency=region.currency,
-                source_url=url,
-                status="opencli_failed",
-                error="No price extracted",
-            )
+            if quote is None:
+                quote = FlightQuote(
+                    region=region.code,
+                    domain=region.domain,
+                    price=None,
+                    currency=region.currency,
+                    source_url=url,
+                    status="opencli_failed",
+                    error="No price extracted",
+                )
 
-        if persist_failures and quote.price is None:
-            from skyscanner_multi_domain.scan.orchestrator import _persist_failure_log as _pfl
-            _pfl(
-                quote,
-                transport="opencli",
-                route_key=route_key,
-                page_text=page_text,
-            )
+            # Apply telemetry to quote
+            quote.tab_open_count = session.tab_open_count
+            quote.tab_close_count = session.tab_close_count
+            quote.reused_tab_count = session.reused_tab_count
+            quote.extract_attempt_count = session.extract_attempt_count
+            quote.max_chunk_size_used = session.max_chunk_size_used
+            quote.progressive_wait_used = session.progressive_wait_used
 
-        page_text_len_by_region[region.code] = len(page_text)
-        page_url_by_region[region.code] = quote.source_url
-        latest_quotes[region.code] = quote
+            if persist_failures and quote.price is None:
+                from skyscanner_multi_domain.scan.orchestrator import _persist_failure_log as _pfl
+                _pfl(
+                    quote,
+                    transport="opencli",
+                    route_key=route_key,
+                    page_text=page_text,
+                )
 
-        if on_region_complete:
-            on_region_complete(region, quote)
+            page_text_len_by_region[region.code] = len(page_text)
+            page_url_by_region[region.code] = quote.source_url
+            latest_quotes[region.code] = quote
+
+            if on_region_complete:
+                on_region_complete(region, quote)
+    finally:
+        session.close()
 
     ordered_quotes: list[FlightQuote] = []
     for region in selected_regions:
@@ -247,6 +343,12 @@ async def compare_via_opencli(
             failure_reason=quote.error,
             price=quote.price,
             currency=quote.currency,
+            tab_open_count=quote.tab_open_count,
+            tab_close_count=quote.tab_close_count,
+            reused_tab_count=quote.reused_tab_count,
+            extract_attempt_count=quote.extract_attempt_count,
+            max_chunk_size_used=quote.max_chunk_size_used,
+            progressive_wait_used=quote.progressive_wait_used,
         )
 
     return ordered_quotes
