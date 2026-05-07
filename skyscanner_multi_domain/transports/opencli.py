@@ -93,29 +93,32 @@ class OpenCLITabSession:
 
     def __init__(self, tab_id: str = ""):
         self.tab_id = tab_id
-        self.tab_open_count = 0
-        self.tab_close_count = 0
-        self.reused_tab_count = 0
-        self.extract_attempt_count = 0
-        self.max_chunk_size_used = 0
-        self.progressive_wait_used = 0
+        # Session-level counters (cumulative)
+        self.session_tab_open_count = 0
+        self.session_tab_close_count = 0
+        self.session_reused_tab_count = 0
+        self.session_extract_attempt_count = 0
+        self.session_progressive_wait_used = 0
 
-    def ensure_tab(self, url: str) -> str:
-        """Open a new tab if none exists, or navigate existing tab."""
+    def ensure_tab(self, url: str) -> tuple[str, dict[str, int]]:
+        """Open a new tab if none exists, or navigate existing tab. Returns delta telemetry."""
+        delta = {"tab_open_count": 0, "reused_tab_count": 0}
         if not self.tab_id:
             self.tab_id = _tab_new(url)
-            self.tab_open_count += 1
+            self.session_tab_open_count += 1
+            delta["tab_open_count"] = 1
         else:
             _tab_navigate(self.tab_id, url)
-            self.reused_tab_count += 1
-        return self.tab_id
+            self.session_reused_tab_count += 1
+            delta["reused_tab_count"] = 1
+        return self.tab_id, delta
 
     def close(self):
         """Close the managed tab."""
         if self.tab_id:
             _tab_close(self.tab_id)
             self.tab_id = ""
-            self.tab_close_count += 1
+            self.session_tab_close_count += 1
 
     async def wait_progressive(
         self,
@@ -123,42 +126,63 @@ class OpenCLITabSession:
         initial_wait: float,
         poll_interval: float = TAB_POLL_INTERVAL,
         timeout: float = TAB_WAIT_TIMEOUT,
-    ) -> bool:
-        """Wait for page to be interactive, with progressive steps if needed."""
-        await asyncio.sleep(initial_wait)
+    ) -> tuple[bool, int]:
+        """Wait for page to be interactive, with progressive steps if needed. Returns (success, delta_wait)."""
+        delta_wait = 0
+        if initial_wait > 0:
+            await asyncio.sleep(initial_wait)
         success = await _tab_wait_interactive_async(tab_id, timeout=timeout)
         if not success:
             # First progressive wait
-            self.progressive_wait_used += 1
+            delta_wait += 1
+            self.session_progressive_wait_used += 1
             await asyncio.sleep(poll_interval * 2)
             success = await _tab_wait_interactive_async(tab_id, timeout=timeout / 2)
-        return success
+        return success, delta_wait
 
     async def extract_adaptive(
         self,
         tab_id: str,
         region: RegionConfig,
         url: str,
-    ) -> tuple[FlightQuote, str]:
-        """Try extraction with increasing chunk sizes until price is found or limit reached."""
+    ) -> tuple[FlightQuote, str, dict[str, int]]:
+        """Try extraction with increasing chunk sizes until price is found or limit reached.
+        Includes content-aware progressive waiting.
+        """
         chunk_sizes = [15000, 50000, 100000]
         last_quote = None
         last_text = ""
+        
+        delta = {
+            "extract_attempt_count": 0,
+            "progressive_wait_used": 0,
+            "max_chunk_size_used": 0,
+        }
 
-        for chunk_size in chunk_sizes:
-            self.extract_attempt_count += 1
-            self.max_chunk_size_used = max(self.max_chunk_size_used, chunk_size)
+        for i, chunk_size in enumerate(chunk_sizes):
+            delta["extract_attempt_count"] += 1
+            self.session_extract_attempt_count += 1
+            delta["max_chunk_size_used"] = max(delta["max_chunk_size_used"], chunk_size)
 
             result = _tab_extract(tab_id, chunk_size=chunk_size)
             last_text = str(result.get("content", ""))
             quote = _quote_from_opencli_result(region, result, url)
 
             if quote.price is not None:
-                return quote, last_text
+                return quote, last_text, delta
 
+            # Content-aware wait: if we failed to find a price, maybe wait more.
+            # Only if it's a parse/loading issue and we have more sizes to try.
+            if i < len(chunk_sizes) - 1:
+                # status indicates it's worth waiting (not a hard error or already interactive)
+                if quote.status in ("page_parse_failed", "opencli_failed", "opencli_timeout"):
+                    delta["progressive_wait_used"] += 1
+                    self.session_progressive_wait_used += 1
+                    await asyncio.sleep(TAB_POLL_INTERVAL * 2)
+            
             last_quote = quote
 
-        return last_quote or _quote_from_opencli_result(region, {}, url), last_text
+        return last_quote or _quote_from_opencli_result(region, {}, url), last_text, delta
 
 
 def _quote_from_opencli_result(
@@ -253,12 +277,20 @@ async def compare_via_opencli(
             quote: Optional[FlightQuote] = None
 
             try:
-                tab_id = session.ensure_tab(url)
+                tab_id, delta_ensure = session.ensure_tab(url)
                 if not tab_id:
                     raise RuntimeError("No tab ID returned")
 
-                if await session.wait_progressive(tab_id, page_wait):
-                    quote, page_text = await session.extract_adaptive(tab_id, region, url)
+                success, delta_wait = await session.wait_progressive(tab_id, page_wait)
+                if success:
+                    quote, page_text, delta_extract = await session.extract_adaptive(tab_id, region, url)
+                    
+                    # Apply telemetry to quote (deltas)
+                    quote.tab_open_count = delta_ensure["tab_open_count"]
+                    quote.reused_tab_count = delta_ensure["reused_tab_count"]
+                    quote.progressive_wait_used = delta_wait + delta_extract["progressive_wait_used"]
+                    quote.extract_attempt_count = delta_extract["extract_attempt_count"]
+                    quote.max_chunk_size_used = delta_extract["max_chunk_size_used"]
                 else:
                     page_text = ""
                     quote = FlightQuote(
@@ -270,6 +302,11 @@ async def compare_via_opencli(
                         status="opencli_timeout",
                         error="Page did not reach interactive state within timeout",
                     )
+                    quote.tab_open_count = delta_ensure["tab_open_count"]
+                    quote.reused_tab_count = delta_ensure["reused_tab_count"]
+                    quote.progressive_wait_used = delta_wait
+                    quote.extract_attempt_count = 0
+                    quote.max_chunk_size_used = 0
             except Exception as exc:
                 quote = FlightQuote(
                     region=region.code,
@@ -292,14 +329,6 @@ async def compare_via_opencli(
                     error="No price extracted",
                 )
 
-            # Apply telemetry to quote
-            quote.tab_open_count = session.tab_open_count
-            quote.tab_close_count = session.tab_close_count
-            quote.reused_tab_count = session.reused_tab_count
-            quote.extract_attempt_count = session.extract_attempt_count
-            quote.max_chunk_size_used = session.max_chunk_size_used
-            quote.progressive_wait_used = session.progressive_wait_used
-
             if persist_failures and quote.price is None:
                 from skyscanner_multi_domain.scan.orchestrator import _persist_failure_log as _pfl
                 _pfl(
@@ -317,6 +346,12 @@ async def compare_via_opencli(
                 on_region_complete(region, quote)
     finally:
         session.close()
+        # Final update of tab_close_count to the LAST quote in the pass
+        # (Since we reuse one tab, the close belongs to the final region attempt)
+        if selected_regions:
+            last_region_code = selected_regions[-1].code
+            if last_region_code in latest_quotes:
+                latest_quotes[last_region_code].tab_close_count = session.session_tab_close_count
 
     ordered_quotes: list[FlightQuote] = []
     for region in selected_regions:
