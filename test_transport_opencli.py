@@ -61,13 +61,13 @@ def test_opencli_tab_reuse_and_telemetry_deltas_v11() -> None:
         # CN telemetry (Point #3: per-region delta)
         assert quote_cn.tab_open_count == 1
         assert quote_cn.reused_tab_count == 0
-        assert quote_cn.tab_close_count == 0
+        assert quote_cn.tab_close_count == 0 # Not closed yet
         assert quote_cn.extract_attempt_count == 1
         
         # SG telemetry (Point #3: per-region delta)
         assert quote_sg.tab_open_count == 0
         assert quote_sg.reused_tab_count == 1
-        # Point #2: tab_close_count after session.close attributed to last quote
+        # Point #2: total_closes after pool.close_all attributed to last quote
         assert quote_sg.tab_close_count == 1 
         assert quote_sg.extract_attempt_count == 1
     
@@ -174,4 +174,70 @@ def test_opencli_time_budget_not_attempted_v11() -> None:
         assert quotes[1].region == "SG"
         assert quotes[1].status == "opencli_not_attempted"
     
+    asyncio.run(run_test())
+
+def test_opencli_tab_pool_domain_pinning_v12() -> None:
+    """Test that OpenCLITabPool pins domains to sessions and limits max tabs."""
+    async def run_test():
+        # max_tabs = 2
+        # Regions: CN, HK (same domain), UK (different domain), SG (third domain)
+        regions = [
+            RegionConfig("CN", "China", "https://www.skyscanner.com.cn", "zh-CN", "CNY"),
+            RegionConfig("HK", "Hong Kong", "https://www.skyscanner.com.cn", "zh-HK", "HKD"), # Same domain
+            RegionConfig("UK", "UK", "https://www.skyscanner.net", "en-GB", "GBP"),
+            RegionConfig("SG", "Singapore", "https://www.skyscanner.sg", "en-SG", "SGD"),
+        ]
+        
+        args = argparse.Namespace(origin="BJS", destination="ALA", date="2026-05-20", page_wait=0)
+        
+        # Mock OpenCLI calls
+        with patch("skyscanner_multi_domain.transports.opencli._opencli_json") as mock_json:
+            mock_json.side_effect = [
+                {"page": "tab-1"},  # New tab for CN (CN domain)
+                {"content": "Price 100", "url": "url1"}, # Extract CN
+                {},                 # Navigate tab-1 for HK (Reuse same domain)
+                {"content": "Price 200", "url": "url2"}, # Extract HK
+                {"page": "tab-2"},  # New tab for UK (Pool size < 2)
+                {"content": "Price 300", "url": "url3"}, # Extract UK
+                {},                 # Navigate tab-1 for SG (Reuse tab-1, oldest/least pinned domain UK stays in tab-2)
+                {"content": "Price 400", "url": "url4"}, # Extract SG
+                {}, # tab-1 close
+                {}, # tab-2 close
+            ]
+
+            with patch("skyscanner_multi_domain.transports.opencli._tab_wait_interactive_async") as mock_wait:
+                mock_wait.return_value = True
+
+                with patch("skyscanner_multi_domain.transports.opencli.extract_page_quote") as mock_parser:
+                    mock_parser.side_effect = [
+                        FlightQuote("CN", "d1", 100.0, "C", "u1", "ok"),
+                        FlightQuote("HK", "d1", 200.0, "H", "u2", "ok"),
+                        FlightQuote("UK", "d2", 300.0, "G", "u3", "ok"),
+                        FlightQuote("SG", "d3", 400.0, "S", "u4", "ok"),
+                    ]
+
+                    # Call with concurrency 2
+                    quotes = await compare_via_opencli(args, regions, persist_failures=False, region_concurrency=2)
+
+        assert len(quotes) == 4
+        # CN: new tab
+        assert quotes[0].tab_open_count == 1
+        assert quotes[0].reused_tab_count == 0
+        
+        # HK: reused CN tab (same domain)
+        assert quotes[1].tab_open_count == 0
+        assert quotes[1].reused_tab_count == 1
+        
+        # UK: new tab (pool size 1 -> 2)
+        assert quotes[2].tab_open_count == 1
+        assert quotes[2].reused_tab_count == 0
+        
+        # SG: reused oldest tab (pool full at 2)
+        assert quotes[3].tab_open_count == 0
+        assert quotes[3].reused_tab_count == 1
+        
+        # Final close count attributed to last quote
+        # We opened 2 tabs (tab-1, tab-2) and closed them all.
+        assert quotes[3].tab_close_count == 2
+
     asyncio.run(run_test())
