@@ -1,6 +1,6 @@
 # AI Agent Handoff
 
-Last updated: 2026-05-06
+Last updated: 2026-05-07
 Project root: `skyscanner_multi_domain`
 
 ## 1. Current Product Path
@@ -69,7 +69,9 @@ User input flows through:
 4. `planning/search_plan.py` ranks route/date/market candidates and can render `--show-plan`.
 5. `scan/orchestrator.py` scans ordered candidates with opencli, CDP fallback, then Scrapling fallback.
 6. `parsing/page_parser.py` extracts Best/Cheapest prices.
-7. `scan/history.py` stores rows, quote snapshots, preview cache, and plan telemetry.
+7. Parser trust metadata is attached to quotes and result rows: confidence, price source, evidence text, and parser warnings.
+8. CLI Markdown reports add a decision summary, trust columns, and warning/evidence details.
+9. `scan/history.py` stores rows, quote snapshots, preview cache, and plan telemetry.
 
 Current SearchPlan behavior is intentionally conservative:
 
@@ -101,8 +103,14 @@ python cli.py page -o 北京 -d 阿拉木图 -t 2026-05-20 --date-window 1 --sho
 - Keep `desktop_ui_service -> cli.SimpleCLI` as explicit P1 debt; do not expand desktop reuse of `SimpleCLI`.
 - Add visible plan phase/status to the desktop WebView UI.
 - Add plan telemetry display in history/details views.
-- Add parser diagnostics/confidence to result objects and reports.
+- Surface parser trust badges, warning details, and decision context in WebView result/history views.
 - Only after explainability, batch progress, and telemetry are stable, consider conservative user-confirmed early stop in fast mode.
+
+Recently completed:
+
+- Parser diagnostics/confidence metadata now flows through `FlightQuote` and scan/report rows.
+- CLI Markdown reports show a `扫描结论` section, confidence/source/warning columns, and warning/evidence details.
+- Parser trust metadata tests and CLI report tests cover missing legacy fields, fallback warnings, decision risk hints, and date-window reports.
 
 The fuller execution backlog is in `docs/todo.md`.
 

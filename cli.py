@@ -80,6 +80,245 @@ CLI_REGION_CONCURRENCY = 3
 CLI_DATE_WINDOW_CONCURRENCY = 2
 CLI_AIRPORT_PAIR_CONCURRENCY = 2
 
+_PRICE_SOURCE_LABELS: dict[str, str] = {
+    "cheapest_block": "Cheapest 区块",
+    "best_block": "Best 区块",
+    "first_price_fallback": "首个价格 fallback",
+    "recovered_best": "恢复解析",
+    "manual_confirmed": "人工确认",
+    "unpriced": "未取价",
+}
+
+
+def _confidence_label(value: object) -> str:
+    if not isinstance(value, (int, float)):
+        return "未知"
+    if value >= 0.85:
+        return "高"
+    if value >= 0.6:
+        return "中"
+    if value >= 0.3:
+        return "低"
+    return "极低"
+
+
+def _price_source_label(value: object) -> str:
+    if value in (None, "", "unknown"):
+        return "未知"
+    return _PRICE_SOURCE_LABELS.get(str(value), str(value))
+
+
+def _warnings_summary(warnings: object) -> str:
+    if not isinstance(warnings, (list, tuple)):
+        return "-"
+    cleaned = [str(item).strip() for item in warnings if str(item).strip()]
+    if not cleaned:
+        return "-"
+    if len(cleaned) == 1:
+        return cleaned[0]
+    return f"{len(cleaned)} 项警告"
+
+
+def _failed_reason_counts(rows: list[dict[str, object]]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for row in rows:
+        category = row.get("failure_category")
+        if not category:
+            continue
+        reason = str(category).strip() or "unknown"
+        counts[reason] = counts.get(reason, 0) + 1
+    return counts
+
+
+def _row_cny_value(row: dict[str, object]) -> float | None:
+    cheapest = row.get("cheapest_cny_price")
+    if isinstance(cheapest, (int, float)):
+        return float(cheapest)
+    best = row.get("best_cny_price")
+    if isinstance(best, (int, float)):
+        return float(best)
+    return None
+
+
+def _row_warning_lines(row: dict[str, object]) -> list[str]:
+    warnings = row.get("parser_warnings")
+    if not isinstance(warnings, (list, tuple)):
+        return []
+    return [str(item).strip() for item in warnings if str(item).strip()]
+
+
+def _build_decision_summary(
+    rows: list[dict[str, object]],
+    *,
+    show_dates: bool = False,
+) -> list[str]:
+    valid_pairs: list[tuple[dict[str, object], float]] = []
+    for row in rows:
+        value = _row_cny_value(row)
+        if value is not None:
+            valid_pairs.append((row, value))
+
+    failed_counts = _failed_reason_counts(rows)
+
+    if not valid_pairs:
+        lines = ["## 扫描结论", "", "本次未抓取到任何有效价格，请检查市场可达性后重试。", ""]
+        if failed_counts:
+            lines.append("失败原因汇总：")
+            lines.extend(
+                f"- {reason}: {count}"
+                for reason, count in sorted(failed_counts.items())
+            )
+            lines.append("")
+        return lines
+
+    valid_pairs.sort(key=lambda item: item[1])
+    primary_row, primary_value = valid_pairs[0]
+    runner_row: dict[str, object] | None = None
+    runner_value: float | None = None
+    if len(valid_pairs) > 1:
+        runner_row, runner_value = valid_pairs[1]
+
+    lines = ["## 扫描结论", "", "### 推荐先验证", ""]
+    lines.append(f"- 最低价：¥{primary_value:,.2f}")
+    if show_dates:
+        lines.append(f"- 日期：{primary_row.get('date') or '-'}")
+    lines.append(f"- 航段：{primary_row.get('route') or '-'}")
+    lines.append(f"- 市场：{primary_row.get('region_name') or '-'}")
+    lines.append(f"- 价格来源：{_price_source_label(primary_row.get('price_source'))}")
+    lines.append(f"- 可信度：{_confidence_label(primary_row.get('confidence'))}")
+    link = primary_row.get("link")
+    if isinstance(link, str) and link:
+        lines.append(f"- 链接：[打开结果页]({link})")
+    lines.append("")
+
+    if runner_row is not None and runner_value is not None:
+        spread = runner_value - primary_value
+        lines.extend(["### 备选结果", ""])
+        lines.append(f"- 第二低价：¥{runner_value:,.2f}")
+        lines.append(f"- 价差：¥{spread:,.2f}")
+        if show_dates:
+            lines.append(f"- 日期：{runner_row.get('date') or '-'}")
+        lines.append(f"- 航段：{runner_row.get('route') or '-'}")
+        lines.append(f"- 市场：{runner_row.get('region_name') or '-'}")
+        lines.append(f"- 可信度：{_confidence_label(runner_row.get('confidence'))}")
+        lines.append("")
+
+    risk_lines = _build_decision_risk_hints(
+        rows=rows,
+        valid_pairs=valid_pairs,
+        primary_row=primary_row,
+        primary_value=primary_value,
+        runner_row=runner_row,
+        runner_value=runner_value,
+        failed_counts=failed_counts,
+    )
+    if risk_lines:
+        lines.extend(["### 风险提示", ""])
+        lines.extend(f"- {line}" for line in risk_lines)
+        lines.append("")
+    return lines
+
+
+_RISKY_FAILURE_TOKENS: tuple[str, ...] = (
+    "challenge",
+    "loading",
+    "network",
+    "browser_missing",
+    "parse_failed",
+    "blocked",
+    "timeout",
+)
+
+
+def _build_decision_risk_hints(
+    *,
+    rows: list[dict[str, object]],
+    valid_pairs: list[tuple[dict[str, object], float]],
+    primary_row: dict[str, object],
+    primary_value: float,
+    runner_row: dict[str, object] | None,
+    runner_value: float | None,
+    failed_counts: dict[str, int],
+) -> list[str]:
+    hints: list[str] = []
+    primary_conf = primary_row.get("confidence")
+    primary_source = primary_row.get("price_source")
+    runner_conf = runner_row.get("confidence") if runner_row is not None else None
+
+    if isinstance(primary_conf, (int, float)) and primary_conf < 0.6:
+        if (
+            runner_value is not None
+            and isinstance(runner_conf, (int, float))
+            and runner_conf >= 0.85
+            and primary_value > 0
+            and runner_value - primary_value < primary_value * 0.05
+        ):
+            hints.append("最低价需复核；第二低价可信度更高且价差较小。")
+        else:
+            hints.append("最低价可信度偏低，建议点开页面复核。")
+    if primary_source == "first_price_fallback":
+        hints.append("最低价来自首个价格 fallback，必须人工确认。")
+
+    for warning in _row_warning_lines(primary_row):
+        hints.append(f"解析警告：{warning}")
+
+    risky_hits = {
+        reason: count
+        for reason, count in failed_counts.items()
+        if any(token in reason for token in _RISKY_FAILURE_TOKENS)
+    }
+    if risky_hits:
+        summary = "、".join(
+            f"{reason}×{count}" for reason, count in sorted(risky_hits.items())
+        )
+        hints.append(
+            f"{sum(risky_hits.values())} 个市场失败（{summary}），可能存在漏价。"
+        )
+
+    fallback_sources = {"first_price_fallback", "recovered_best"}
+    fallback_only = all(
+        (row.get("price_source") in fallback_sources)
+        or row.get("price_source") in (None, "", "unknown")
+        for row, _ in valid_pairs
+    )
+    if valid_pairs and fallback_only:
+        hints.append("所有有效价格均来自 fallback 解析，作为初筛结果，需人工复核。")
+    return hints
+
+
+def _build_warning_detail_section(
+    rows: list[dict[str, object]],
+    *,
+    show_dates: bool = False,
+) -> list[str]:
+    detail_rows = [row for row in rows if _row_warning_lines(row)]
+    if not detail_rows:
+        return []
+    lines = ["## 解析警告与证据", ""]
+    for row in detail_rows:
+        header_parts: list[str] = []
+        region_name = row.get("region_name") or row.get("region_code")
+        if region_name:
+            header_parts.append(str(region_name))
+        route = row.get("route")
+        if route and str(route) != "-":
+            header_parts.append(str(route))
+        if show_dates:
+            date_value = row.get("date")
+            if date_value and str(date_value) != "-":
+                header_parts.append(str(date_value))
+        header = " · ".join(header_parts) if header_parts else "未命名行"
+        confidence = _confidence_label(row.get("confidence"))
+        source = _price_source_label(row.get("price_source"))
+        lines.append(f"- **{header}** — 可信度 {confidence} · 价格来源 {source}")
+        for warning in _row_warning_lines(row):
+            lines.append(f"  - {warning}")
+        evidence = row.get("evidence_text")
+        if isinstance(evidence, str) and evidence.strip():
+            lines.append(f"  - 证据片段：{evidence.strip()}")
+    lines.append("")
+    return lines
+
 
 def _trip_file_token(date: str, return_date: str | None = None) -> str:
     token = date.replace("-", "")
@@ -561,10 +800,12 @@ class SimpleCLI:
             lines.append("暂无可用价格结果。")
             return "\n".join(lines) + "\n"
 
+        lines.extend(_build_decision_summary(rows))
+        lines.extend(["## 价格明细", ""])
         lines.extend(
             [
-                "| 航段 | 地区 | 来源 | 计划 | 最佳（原币） | 最佳（人民币） | 最低价（原币） | 最低价（人民币） | 较上次变化 | 状态 | 错误 | 链接 |",
-                "| --- | --- | --- | --- | ---: | ---: | ---: | ---: | --- | --- | --- | --- |",
+                "| 航段 | 地区 | 来源 | 计划 | 最佳（原币） | 最佳（人民币） | 最低价（原币） | 最低价（人民币） | 可信度 | 价格来源 | 警告 | 较上次变化 | 状态 | 错误 | 链接 |",
+                "| --- | --- | --- | --- | ---: | ---: | ---: | ---: | --- | --- | --- | --- | --- | --- | --- |",
             ]
         )
         for row in rows:
@@ -579,8 +820,10 @@ class SimpleCLI:
                 else "-"
             )
             lines.append(
-                f"| {row.get('route') or '-'} | {row['region_name']} | {row.get('source_label') or '-'} | {self._format_plan_cell(row)} | {row.get('best_display_price') or '-'} | {best_cny_text} | {row.get('cheapest_display_price') or '-'} | {cheapest_cny_text} | {row.get('delta_label') or '-'} | {row.get('status') or '-'} | {row.get('error') or '-'} | [打开结果页]({row['link']}) |"
+                f"| {row.get('route') or '-'} | {row['region_name']} | {row.get('source_label') or '-'} | {self._format_plan_cell(row)} | {row.get('best_display_price') or '-'} | {best_cny_text} | {row.get('cheapest_display_price') or '-'} | {cheapest_cny_text} | {_confidence_label(row.get('confidence'))} | {_price_source_label(row.get('price_source'))} | {_warnings_summary(row.get('parser_warnings'))} | {row.get('delta_label') or '-'} | {row.get('status') or '-'} | {row.get('error') or '-'} | [打开结果页]({row['link']}) |"
             )
+        lines.append("")
+        lines.extend(_build_warning_detail_section(rows))
         return "\n".join(lines) + "\n"
 
     def build_combined_markdown_table(
@@ -605,10 +848,12 @@ class SimpleCLI:
             lines.append("暂无可用价格结果。")
             return "\n".join(lines) + "\n"
 
+        lines.extend(_build_decision_summary(rows, show_dates=True))
+        lines.extend(["## 价格明细", ""])
         lines.extend(
             [
-                "| 日期 | 航段 | 地区 | 来源 | 计划 | 最佳（原币） | 最佳（人民币） | 最低价（原币） | 最低价（人民币） | 较上次变化 | 状态 | 错误 | 链接 |",
-                "| --- | --- | --- | --- | --- | ---: | ---: | ---: | ---: | --- | --- | --- | --- |",
+                "| 日期 | 航段 | 地区 | 来源 | 计划 | 最佳（原币） | 最佳（人民币） | 最低价（原币） | 最低价（人民币） | 可信度 | 价格来源 | 警告 | 较上次变化 | 状态 | 错误 | 链接 |",
+                "| --- | --- | --- | --- | --- | ---: | ---: | ---: | ---: | --- | --- | --- | --- | --- | --- | --- |",
             ]
         )
         for row in rows:
@@ -637,6 +882,9 @@ class SimpleCLI:
                         best_cny_text,
                         str(row.get("cheapest_display_price") or "-"),
                         cheapest_cny_text,
+                        _confidence_label(row.get("confidence")),
+                        _price_source_label(row.get("price_source")),
+                        _warnings_summary(row.get("parser_warnings")),
                         str(row.get("delta_label") or "-"),
                         str(row.get("status") or "-"),
                         str(row.get("error") or "-"),
@@ -645,6 +893,8 @@ class SimpleCLI:
                 )
                 + " |"
             )
+        lines.append("")
+        lines.extend(_build_warning_detail_section(rows, show_dates=True))
         return "\n".join(lines) + "\n"
 
     def build_window_markdown_table(
@@ -677,10 +927,18 @@ class SimpleCLI:
             lines.append("暂无可用价格结果。")
             return "\n".join(lines) + "\n"
 
+        flattened_rows: list[dict[str, object]] = []
+        for date, rows in rows_by_date:
+            for row in rows:
+                merged = dict(row)
+                merged.setdefault("date", date)
+                flattened_rows.append(merged)
+        lines.extend(_build_decision_summary(flattened_rows, show_dates=True))
+        lines.extend(["## 价格明细", ""])
         lines.extend(
             [
-                "| 日期 | 航段 | 地区 | 来源 | 最佳（原币） | 最佳（人民币） | 最低价（原币） | 最低价（人民币） | 较上次变化 | 状态 | 错误 | 链接 |",
-                "| --- | --- | --- | --- | ---: | ---: | ---: | ---: | --- | --- | --- | --- |",
+                "| 日期 | 航段 | 地区 | 来源 | 最佳（原币） | 最佳（人民币） | 最低价（原币） | 最低价（人民币） | 可信度 | 价格来源 | 警告 | 较上次变化 | 状态 | 错误 | 链接 |",
+                "| --- | --- | --- | --- | ---: | ---: | ---: | ---: | --- | --- | --- | --- | --- | --- | --- |",
             ]
         )
         for date, rows in rows_by_date:
@@ -696,18 +954,25 @@ class SimpleCLI:
                     else "-"
                 )
                 lines.append(
-                    f"| {date} | {row.get('route') or '-'} | {row['region_name']} | {row.get('source_label') or '-'} | {row.get('best_display_price') or '-'} | {best_cny_text} | {row.get('cheapest_display_price') or '-'} | {cheapest_cny_text} | {row.get('delta_label') or '-'} | {row.get('status') or '-'} | {row.get('error') or '-'} | [打开结果页]({row['link']}) |"
+                    f"| {date} | {row.get('route') or '-'} | {row['region_name']} | {row.get('source_label') or '-'} | {row.get('best_display_price') or '-'} | {best_cny_text} | {row.get('cheapest_display_price') or '-'} | {cheapest_cny_text} | {_confidence_label(row.get('confidence'))} | {_price_source_label(row.get('price_source'))} | {_warnings_summary(row.get('parser_warnings'))} | {row.get('delta_label') or '-'} | {row.get('status') or '-'} | {row.get('error') or '-'} | [打开结果页]({row['link']}) |"
                 )
+        lines.append("")
+        lines.extend(_build_warning_detail_section(flattened_rows, show_dates=True))
         return "\n".join(lines) + "\n"
 
     def print_quotes(self, rows: list[SimplifiedQuoteRow]) -> None:
         if not rows:
             print("\n暂无可用价格结果。")
             return
+        decision_lines = _build_decision_summary(rows)
+        if decision_lines:
+            print()
+            for line in decision_lines:
+                print(line)
         print(
-            "\n| 航段 | 地区 | 来源 | 最佳（原币） | 最佳（人民币） | 最低价（原币） | 最低价（人民币） | 较上次变化 | 状态 | 错误 | 链接 |"
+            "\n| 航段 | 地区 | 来源 | 最佳（原币） | 最佳（人民币） | 最低价（原币） | 最低价（人民币） | 可信度 | 价格来源 | 警告 | 较上次变化 | 状态 | 错误 | 链接 |"
         )
-        print("| --- | --- | --- | ---: | ---: | ---: | ---: | --- | --- | --- | --- |")
+        print("| --- | --- | --- | ---: | ---: | ---: | ---: | --- | --- | --- | --- | --- | --- | --- |")
         for row in rows:
             best_cny_text = (
                 f"¥{row['best_cny_price']:,.2f}"
@@ -720,7 +985,7 @@ class SimpleCLI:
                 else "-"
             )
             print(
-                f"| {row.get('route') or '-'} | {row['region_name']} | {row.get('source_label') or '-'} | {row.get('best_display_price') or '-'} | {best_cny_text} | {row.get('cheapest_display_price') or '-'} | {cheapest_cny_text} | {row.get('delta_label') or '-'} | {row.get('status') or '-'} | {row.get('error') or '-'} | {row['link']} |"
+                f"| {row.get('route') or '-'} | {row['region_name']} | {row.get('source_label') or '-'} | {row.get('best_display_price') or '-'} | {best_cny_text} | {row.get('cheapest_display_price') or '-'} | {cheapest_cny_text} | {_confidence_label(row.get('confidence'))} | {_price_source_label(row.get('price_source'))} | {_warnings_summary(row.get('parser_warnings'))} | {row.get('delta_label') or '-'} | {row.get('status') or '-'} | {row.get('error') or '-'} | {row['link']} |"
             )
 
     def save_results(

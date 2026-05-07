@@ -254,6 +254,101 @@ class ExtractPageQuoteTests(unittest.TestCase):
         self.assertEqual(quote.status, "page_text_inconsistent")
 
 
+class ParserTrustMetadataTests(unittest.TestCase):
+    def test_cheapest_block_yields_high_confidence_and_no_warnings(self) -> None:
+        page_text = "\n".join(
+            [
+                "Show results by",
+                "Best",
+                "£222",
+                "Cheapest",
+                "£222",
+            ]
+        )
+
+        quote = extract_page_quote(REGIONS["UK"], "https://example.com", page_text)
+
+        self.assertEqual(quote.price_source, "cheapest_block")
+        self.assertGreaterEqual(quote.confidence or 0.0, 0.85)
+        self.assertEqual(quote.parser_warnings, [])
+        self.assertTrue(quote.evidence_text)
+
+    def test_cheapest_only_lowers_confidence_and_emits_warning(self) -> None:
+        page_text = "\n".join(["Show results by", "Cheapest", "£111"])
+
+        quote = extract_page_quote(REGIONS["UK"], "https://example.com", page_text)
+
+        self.assertEqual(quote.price_source, "cheapest_block")
+        self.assertLessEqual(quote.confidence or 1.0, 0.7)
+        self.assertTrue(
+            any("只解析到一侧" in warning for warning in quote.parser_warnings)
+        )
+
+    def test_recovered_best_marks_source_and_warns(self) -> None:
+        page_text = "\n".join(
+            [
+                "Show results by",
+                "Best",
+                "£100",
+                "Best",
+                "£300",
+                "Cheapest",
+                "£200",
+            ]
+        )
+
+        quote = extract_page_quote(REGIONS["UK"], "https://example.com", page_text)
+
+        self.assertEqual(quote.price_source, "recovered_best")
+        self.assertLessEqual(quote.confidence or 1.0, 0.72)
+        self.assertTrue(
+            any("恢复后的 Best" in warning for warning in quote.parser_warnings)
+        )
+
+    def test_best_and_cheapest_disagreement_emits_warning(self) -> None:
+        page_text = "\n".join(
+            [
+                "Show results by",
+                "Best",
+                "£300",
+                "Cheapest",
+                "£222",
+            ]
+        )
+
+        quote = extract_page_quote(REGIONS["UK"], "https://example.com", page_text)
+
+        self.assertEqual(quote.best_price, 300.0)
+        self.assertEqual(quote.cheapest_price, 222.0)
+        self.assertTrue(
+            any(
+                "Best 与 Cheapest 价格不一致" in warning
+                for warning in quote.parser_warnings
+            )
+        )
+
+    def test_inconsistent_best_only_keeps_cheapest_with_warning(self) -> None:
+        page_text = "\n".join(
+            [
+                "Show results by",
+                "Best",
+                "£261",
+                "Cheapest",
+                "£493",
+            ]
+        )
+
+        quote = extract_page_quote(REGIONS["UK"], "https://example.com", page_text)
+
+        self.assertIsNotNone(quote.confidence)
+        self.assertLessEqual(quote.confidence or 1.0, 0.55)
+        self.assertTrue(
+            any(
+                "Best/Cheapest 不一致" in warning for warning in quote.parser_warnings
+            )
+        )
+
+
 class FailureLogTests(unittest.TestCase):
     def test_persist_failure_log_writes_excerpt_and_path(self) -> None:
         quote = FlightQuote(

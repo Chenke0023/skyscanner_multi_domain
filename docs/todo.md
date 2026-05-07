@@ -127,30 +127,32 @@ Notes:
 
 ### 6. Parser diagnostics in result objects
 
-Status: planned.
+Status: implemented baseline.
 
-Todo:
+Current implementation:
 
-- Add confidence to `FlightQuote` / result rows.
-- Add evidence fields.
-- Track price source: `cheapest_block`, `best_block`, `first_price_fallback`, `recovered_best`, or `manual_confirmed`.
-- Preserve parser warnings.
+- `FlightQuote` carries parser trust metadata: `confidence`, `price_source`, `evidence_text`, and `parser_warnings`.
+- Scan/result row snapshots preserve the same trust fields for reports and history consumers.
+- Price source values include `cheapest_block`, `best_block`, `first_price_fallback`, `recovered_best`, `manual_confirmed`, and `unpriced`.
+- Parser warnings are preserved for Best/Cheapest disagreement, one-sided parses, recovered Best prices, and fallback-only extraction.
 
 Acceptance:
 
 - First-price fallback is medium/low confidence by default.
 - Best/Cheapest disagreement produces a warning.
-- Reports can display confidence and price source.
+- Reports display confidence, price source, parser warning summaries, and warning evidence.
 
 ### 7. Decision report
 
-Status: planned.
+Status: implemented baseline for CLI Markdown reports.
 
-Todo:
+Current implementation:
 
-- Add a Markdown conclusion section.
-- Show lowest price, runner-up, spread, confidence, recommendation reason, and risks.
-- Keep raw table as appendix.
+- Markdown exports now add a top-level `扫描结论` section before the raw price table.
+- The conclusion names the first result to verify, runner-up, spread, route, market, date when relevant, confidence, source, and result link.
+- Risk hints call out low-confidence primary prices, first-price fallback, parser warnings, risky failed markets, and fallback-only priced sets.
+- Raw price rows remain under `价格明细` and now include confidence, price source, and parser warning summary columns.
+- Rows with parser warnings also produce a `解析警告与证据` section with evidence snippets when available.
 
 Acceptance:
 
@@ -235,7 +237,7 @@ Todo:
 
 ### 13. SearchPlan telemetry
 
-Status: baseline telemetry exists; expand after batch progress.
+Status: baseline telemetry exists; expand in WebView/history after PR-A.
 
 Track:
 
@@ -302,8 +304,8 @@ npm --prefix webui run build
 1. Keep the explicit `desktop_ui_service -> cli.SimpleCLI` debt visible.
 2. Display SearchPlan phase/status in desktop WebView.
 3. Expand plan telemetry in history/details views.
-4. Add parser diagnostics to result objects.
-5. Build a decision-oriented report summary.
+4. Surface parser trust badges and warning details in WebView result rows.
+5. Surface decision/report trust fields in scan history details.
 
 ## Do Not Do Yet
 
