@@ -10,6 +10,10 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from skyscanner_multi_domain.runtime.paths import get_scan_history_file
+from skyscanner_multi_domain.planning.execution_policy import (
+    EXACT_POLICY,
+    build_execution_policy_telemetry,
+)
 
 
 PREVIEW_MAX_AGE_HOURS = 6
@@ -611,6 +615,18 @@ def build_snapshot_summary(quotes_by_date: QuotesByDate) -> dict[str, Any]:
     }
 
 
+def build_default_execution_policy_telemetry(quotes_by_date: QuotesByDate) -> dict[str, Any]:
+    flattened = [quote for _trip_label, quotes in quotes_by_date for quote in quotes]
+    return build_execution_policy_telemetry(
+        policy=EXACT_POLICY,
+        planned_tasks=len(flattened),
+        executed_tasks=len(flattened),
+        deferred_tasks=0,
+        skipped_tasks=0,
+        reasons=["exact_mode_runs_full_plan"],
+    )
+
+
 def _failed_tasks_by_reason(quotes: list[dict[str, Any]]) -> dict[str, int]:
     counts: dict[str, int] = {}
     for quote in quotes:
@@ -860,6 +876,7 @@ class AlertConfig:
     target_price: float | None
     drop_amount: float | None
     auto_refresh_minutes: int | None
+    auto_refresh_mode: str
     notify_on_recovery: bool
     notify_on_new_low: bool
     last_notified_price: float | None
@@ -909,6 +926,7 @@ class ScanHistoryStore:
                     target_price REAL,
                     drop_amount REAL,
                     auto_refresh_minutes INTEGER,
+                    auto_refresh_mode TEXT NOT NULL DEFAULT 'app',
                     notify_on_recovery INTEGER NOT NULL DEFAULT 1,
                     notify_on_new_low INTEGER NOT NULL DEFAULT 1,
                     last_notified_price REAL,
@@ -917,6 +935,14 @@ class ScanHistoryStore:
                 );
                 """
             )
+            columns = {
+                str(row["name"])
+                for row in connection.execute("PRAGMA table_info(alert_configs)").fetchall()
+            }
+            if "auto_refresh_mode" not in columns:
+                connection.execute(
+                    "ALTER TABLE alert_configs ADD COLUMN auto_refresh_mode TEXT NOT NULL DEFAULT 'app'"
+                )
 
     def _row_to_record(self, row: sqlite3.Row) -> ScanRecord:
         query_payload = json.loads(str(row["query_payload_json"]))
@@ -945,6 +971,7 @@ class ScanHistoryStore:
             auto_refresh_minutes=(
                 int(row["auto_refresh_minutes"]) if row["auto_refresh_minutes"] is not None else None
             ),
+            auto_refresh_mode=str(row["auto_refresh_mode"] or "app"),
             notify_on_recovery=bool(int(row["notify_on_recovery"])),
             notify_on_new_low=bool(int(row["notify_on_new_low"])),
             last_notified_price=(
@@ -969,6 +996,7 @@ class ScanHistoryStore:
         query_payload["fetch_quality_telemetry"] = build_fetch_quality_telemetry(quotes_by_date)
         query_payload["parser_recovery_telemetry"] = build_parser_recovery_telemetry(quotes_by_date)
         query_payload["snapshot_summary"] = build_snapshot_summary(quotes_by_date)
+        query_payload["execution_policy_telemetry"] = build_default_execution_policy_telemetry(quotes_by_date)
         query_key = build_query_key(query_payload)
         title = build_query_title(query_payload)
         created_at = datetime.now().isoformat(timespec="seconds")
@@ -1065,11 +1093,13 @@ class ScanHistoryStore:
         target_price: float | None,
         drop_amount: float | None,
         auto_refresh_minutes: int | None,
+        auto_refresh_mode: str = "app",
         notify_on_recovery: bool = True,
         notify_on_new_low: bool = True,
     ) -> AlertConfig:
         query_key = build_query_key(query_payload)
         title = build_query_title(query_payload)
+        normalized_auto_refresh_mode = auto_refresh_mode if auto_refresh_mode in {"app", "background"} else "app"
         with self._connect() as connection:
             connection.execute(
                 """
@@ -1082,12 +1112,14 @@ class ScanHistoryStore:
                     target_price,
                     drop_amount,
                     auto_refresh_minutes,
+                    auto_refresh_mode,
                     notify_on_recovery,
                     notify_on_new_low,
                     last_notified_price,
                     last_notified_at,
                     last_auto_refresh_at
                 ) VALUES (
+                    ?,
                     ?,
                     ?,
                     ?,
@@ -1112,6 +1144,7 @@ class ScanHistoryStore:
                     target_price,
                     drop_amount,
                     auto_refresh_minutes,
+                    normalized_auto_refresh_mode,
                     1 if notify_on_recovery else 0,
                     1 if notify_on_new_low else 0,
                     query_key,
@@ -1177,11 +1210,18 @@ class ScanHistoryStore:
                 ),
             )
 
-    def get_due_auto_refresh_configs(self, *, limit: int = 1) -> list[AlertConfig]:
+    def get_due_auto_refresh_configs(
+        self,
+        *,
+        limit: int = 1,
+        auto_refresh_mode: str | None = None,
+    ) -> list[AlertConfig]:
         now = datetime.now()
         due_configs: list[AlertConfig] = []
         for config in self.list_alert_configs():
             if config.auto_refresh_minutes is None or config.auto_refresh_minutes <= 0:
+                continue
+            if auto_refresh_mode is not None and config.auto_refresh_mode != auto_refresh_mode:
                 continue
             if not self.is_favorite_query_key(config.query_key):
                 continue

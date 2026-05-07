@@ -23,3 +23,11 @@ def test_readiness_classifies_price_ready_with_context() -> None:
 def test_readiness_classifies_unknown_parse_surface() -> None:
     text = "Skyscanner results page with route information and filters but no recognizable fare yet"
     assert classify_opencli_page_readiness(text) == "unknown_parse_surface"
+
+
+def test_readiness_classifies_redirect() -> None:
+    assert classify_opencli_page_readiness("Go to Skyscanner United Kingdom") == "region_redirect"
+
+
+def test_readiness_classifies_unsupported() -> None:
+    assert classify_opencli_page_readiness("Sorry, we don't fly this route") == "unsupported_route"

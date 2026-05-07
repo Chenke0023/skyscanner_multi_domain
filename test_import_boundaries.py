@@ -44,6 +44,9 @@ DOCUMENTED_PACKAGE_MODULES = {
     "skyscanner_multi_domain.geo.regions",
     "skyscanner_multi_domain.models",
     "skyscanner_multi_domain.parsing.page_parser",
+    "skyscanner_multi_domain.parsing.price_candidates",
+    "skyscanner_multi_domain.parsing.readiness",
+    "skyscanner_multi_domain.planning.execution_policy",
     "skyscanner_multi_domain.planning.date_window",
     "skyscanner_multi_domain.planning.search_plan",
     "skyscanner_multi_domain.pricing.fx_rates",
@@ -51,6 +54,7 @@ DOCUMENTED_PACKAGE_MODULES = {
     "skyscanner_multi_domain.scan.history",
     "skyscanner_multi_domain.scan.orchestrator",
     "skyscanner_multi_domain.scan.output_rows",
+    "skyscanner_multi_domain.scan.repair",
     "skyscanner_multi_domain.transports.cdp",
     "skyscanner_multi_domain.transports.opencli",
     "skyscanner_multi_domain.transports.scrapling",
@@ -113,3 +117,21 @@ def test_primary_entries_importable() -> None:
 def test_documented_package_modules_exist() -> None:
     for module_name in sorted(DOCUMENTED_PACKAGE_MODULES):
         importlib.import_module(module_name)
+
+
+def test_legacy_gui_does_not_import_new_trust_modules() -> None:
+    tree = ast.parse((ROOT / "legacy" / "gui.py").read_text(encoding="utf-8"))
+    forbidden = {
+        "skyscanner_multi_domain.parsing.price_candidates",
+        "skyscanner_multi_domain.diagnostics.snapshots",
+        "skyscanner_multi_domain.scan.repair",
+        "skyscanner_multi_domain.planning.execution_policy",
+    }
+    imports: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            imports.update(alias.name for alias in node.names)
+        elif isinstance(node, ast.ImportFrom) and node.module:
+            imports.add(node.module)
+
+    assert imports.isdisjoint(forbidden)

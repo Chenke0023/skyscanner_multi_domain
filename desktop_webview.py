@@ -114,6 +114,12 @@ class DesktopBridge:
     def clear_alert_config(self, payload: dict[str, Any] | None = None) -> dict[str, Any]:
         return self.service.clear_alert_config(payload)
 
+    def install_background_auto_refresh(self, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        return self.service.install_background_auto_refresh(payload)
+
+    def uninstall_background_auto_refresh(self) -> dict[str, Any]:
+        return self.service.uninstall_background_auto_refresh()
+
     def queue_failure_region(self, payload: dict[str, Any]) -> dict[str, Any]:
         return self.service.queue_failure_region(payload)
 

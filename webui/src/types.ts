@@ -46,6 +46,7 @@ export type AlertConfig = {
   target_price: number | null;
   drop_amount: number | null;
   auto_refresh_minutes: number | null;
+  auto_refresh_mode: "app" | "background";
   notify_on_recovery: boolean;
   notify_on_new_low: boolean;
   last_notified_price: number | null;
@@ -69,6 +70,11 @@ export type ResultRow = Record<string, unknown> & {
   price_source?: string | null;
   parser_warnings?: string[];
   evidence_text?: string | null;
+  fallback_attempts?: Array<Record<string, unknown>>;
+  readiness?: string | null;
+  price_candidates_count?: number | null;
+  selected_candidate_rank?: number | null;
+  candidate_sources?: string[];
 };
 
 export type CalendarPayload = {
@@ -124,6 +130,15 @@ export type UIState = {
     displayRows: ResultRow[];
     rowsByDate: Array<[string, ResultRow[]]>;
     quoteSnapshotsByDate: Array<[string, Record<string, unknown>[]]>;
+    trust?: {
+      fetchQualityTelemetry?: Record<string, unknown>;
+      parserRecoveryTelemetry?: Record<string, unknown>;
+      snapshotSummary?: Record<string, unknown>;
+      repairPlan?: {
+        summary?: Record<string, unknown>;
+        tasks?: Array<Record<string, unknown>>;
+      };
+    };
   };
   outputs: {
     currentOutput: string | null;

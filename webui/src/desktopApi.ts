@@ -20,6 +20,8 @@ type DesktopApiShape = {
   toggle_favorite_current_query(payload?: Record<string, unknown>): Promise<Record<string, unknown>>;
   save_alert_config(payload: Record<string, unknown>): Promise<Record<string, unknown>>;
   clear_alert_config(payload?: Record<string, unknown>): Promise<Record<string, unknown>>;
+  install_background_auto_refresh(payload?: Record<string, unknown>): Promise<Record<string, unknown>>;
+  uninstall_background_auto_refresh(): Promise<Record<string, unknown>>;
   queue_failure_region(payload: Record<string, unknown>): Promise<Record<string, unknown>>;
   run_retry_queue(): Promise<Record<string, unknown>>;
 };
@@ -90,6 +92,12 @@ const createMockState = (): UIState => ({
     displayRows: [],
     rowsByDate: [],
     quoteSnapshotsByDate: [],
+    trust: {
+      fetchQualityTelemetry: {},
+      parserRecoveryTelemetry: {},
+      snapshotSummary: {},
+      repairPlan: { summary: {}, tasks: [] },
+    },
   },
   outputs: { currentOutput: null, reportsDir: "" },
 });
@@ -181,6 +189,14 @@ class MockDesktopApi implements DesktopApiShape {
 
   async clear_alert_config(): Promise<Record<string, unknown>> {
     return {};
+  }
+
+  async install_background_auto_refresh(): Promise<Record<string, unknown>> {
+    return { ok: true, intervalMinutes: 600, limit: 1, onlyOnAcPower: true };
+  }
+
+  async uninstall_background_auto_refresh(): Promise<Record<string, unknown>> {
+    return { ok: true };
   }
 
   async queue_failure_region(): Promise<Record<string, unknown>> {

@@ -29,7 +29,9 @@ Developer entry:
 Core engine:
 
 - `skyscanner_multi_domain/planning/search_plan.py` — candidate scoring, explain plan, batches, plan metadata
+- `skyscanner_multi_domain/planning/execution_policy.py` — exact/fast/repair execution policy scaffold; exact is default
 - `skyscanner_multi_domain/scan/orchestrator.py` — scan orchestration, fallback routing, quote formatting
+- `skyscanner_multi_domain/scan/repair.py` — failed-market repair plan builder
 - `skyscanner_multi_domain/scan/history.py` — scan history, preview cache, plan telemetry
 - `skyscanner_multi_domain/transports/opencli.py` — default browser automation transport
 - `skyscanner_multi_domain/transports/cdp.py` — CDP/browser fallback transport
@@ -88,10 +90,12 @@ Current SearchPlan behavior is intentionally conservative:
 - It does not prune or reduce the final scan set.
 - It does not early stop or skip scan tasks.
 - It does not bypass challenge/captcha pages; challenge handling is identify, record, and require manual review or later retry.
+- ExecutionPolicy is a separate layer from SearchPlan. Exact mode is default. Fast mode scaffold must stay explicit, auditable, and disabled by default.
 
 ## 4. Do Not Modify By Default
 
 - Do not add new user-facing features to `legacy/gui.py` or `gui.py`.
+- Follow `docs/legacy_tk_policy.md`; legacy Tk is frozen for compatibility only.
 - Do not put new core logic into root-level compatibility shims.
 - Do not add new product logic to `skyscanner_neo.py`; move new Neo-related code into package modules first.
 - Do not turn `webui/` into a standalone cloud/web product.
@@ -105,6 +109,7 @@ Current SearchPlan behavior is intentionally conservative:
 python -m py_compile cli.py desktop_ui_service.py skyscanner_neo.py
 python -m py_compile skyscanner_multi_domain/scan/orchestrator.py
 python -m py_compile skyscanner_multi_domain/planning/search_plan.py
+python -m py_compile skyscanner_multi_domain/planning/execution_policy.py skyscanner_multi_domain/scan/repair.py
 python -m py_compile skyscanner_multi_domain/parsing/readiness.py skyscanner_multi_domain/parsing/price_candidates.py
 python -m py_compile tools/replay_parser_snapshots.py
 pytest -q
@@ -131,6 +136,8 @@ Recently completed:
 - OpenCLI fetch quality telemetry distinguishes final price found, OpenCLI direct hits, fallback rescued results, failure classes, tab reuse, extract attempts, and max chunk observed.
 - PriceCandidate metadata flows through quotes/history: candidate count, selected rank, and candidate sources.
 - OpenCLI failure snapshots and `tools/replay_parser_snapshots.py` provide an offline parser recovery loop.
+- Repair Mode can build failed-market repair plans without rescanning successful markets; challenge tasks are manual review by default.
+- WebView state exposes fetch quality, parser recovery, snapshot, candidate, fallback, and repair-plan fields for Trust UX.
 
 The fuller execution backlog is in `docs/todo.md`.
 

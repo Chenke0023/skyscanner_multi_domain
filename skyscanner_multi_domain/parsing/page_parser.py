@@ -38,6 +38,40 @@ LOADING_HINTS = (
     "查找最优惠",
     "loading",
 )
+REDIRECT_HINTS = (
+    "go to skyscanner",
+    "take me to",
+    "we've found a better",
+    "redirecting",
+    "前往",
+    "带我去",
+    "找到更好的",
+    "正在重定向",
+    "switch to",
+)
+UNSUPPORTED_ROUTE_HINTS = (
+    "we don't fly",
+    "no routes",
+    "route not supported",
+    "try another route",
+    "不提供",
+    "没有航线",
+    "不支持此航线",
+    "尝试其他航线",
+    "sorry, we don't",
+)
+NO_FLIGHTS_HINTS = (
+    "no flights found",
+    "no results",
+    "try different dates",
+    "try another date",
+    "unavailable",
+    "no flight results",
+    "没有找到航班",
+    "无结果",
+    "未找到航班",
+    "0 results",
+)
 CURRENCY_TOKENS = (
     "HK$",
     "US$",
@@ -244,9 +278,13 @@ class PageStateRecognition:
     state: str
     challenge_hint: Optional[str]
     loading_hint: Optional[str]
-    scope_strategy: str
-    sort_marker_found: bool
-    scoped_price_found: bool
+    redirect_hint: Optional[str] = None
+    unsupported_hint: Optional[str] = None
+    no_flights_hint: Optional[str] = None
+    is_blank: bool = False
+    scope_strategy: str = "unknown"
+    sort_marker_found: bool = False
+    scoped_price_found: bool = False
 
 
 @dataclass(frozen=True)
@@ -700,6 +738,10 @@ def best_candidates_for_region(
 def recognize_page_state(page_text: str, scoped_text: str, scope_strategy: str) -> PageStateRecognition:
     challenge_hint = find_page_hint(page_text, CHALLENGE_HINTS)
     loading_hint = find_page_hint(page_text, LOADING_HINTS)
+    redirect_hint = find_page_hint(page_text, REDIRECT_HINTS)
+    unsupported_hint = find_page_hint(page_text, UNSUPPORTED_ROUTE_HINTS)
+    no_flights_hint = find_page_hint(page_text, NO_FLIGHTS_HINTS)
+    is_blank = len(page_text.strip()) < 100
     scoped_price_found = parse_price_fragment(scoped_text) is not None
     sort_marker_found = find_first_sort_marker(page_text) >= 0
 
@@ -707,6 +749,14 @@ def recognize_page_state(page_text: str, scoped_text: str, scope_strategy: str) 
         state = "challenge"
     elif loading_hint and not scoped_price_found:
         state = "loading"
+    elif redirect_hint and not scoped_price_found:
+        state = "redirect"
+    elif unsupported_hint and not scoped_price_found:
+        state = "unsupported"
+    elif no_flights_hint and not scoped_price_found:
+        state = "no_flights"
+    elif is_blank and not scoped_price_found:
+        state = "blank"
     elif sort_marker_found or scoped_price_found:
         state = "results"
     else:
@@ -716,6 +766,10 @@ def recognize_page_state(page_text: str, scoped_text: str, scope_strategy: str) 
         state=state,
         challenge_hint=challenge_hint,
         loading_hint=loading_hint,
+        redirect_hint=redirect_hint,
+        unsupported_hint=unsupported_hint,
+        no_flights_hint=no_flights_hint,
+        is_blank=is_blank,
         scope_strategy=scope_strategy,
         sort_marker_found=sort_marker_found,
         scoped_price_found=scoped_price_found,
@@ -749,6 +803,106 @@ def extract_page_quote_with_diagnostics(
             selected_cheapest=None,
             final_status=quote.status,
             validation_outcome="blocked_by_challenge",
+            failure_stage="page_state_recognition",
+            failure_reason=quote.error,
+            used_fallback=False,
+        )
+        return attach_parser_trust_metadata(quote, diagnostics), diagnostics
+
+    if state.state == "redirect":
+        quote = FlightQuote(
+            region=region.code,
+            domain=region.domain,
+            price=None,
+            currency=region.currency,
+            source_url=source_url,
+            status="page_region_redirect",
+            error=f"页面发生了区域重定向: {state.redirect_hint}",
+        )
+        diagnostics = PageParseDiagnostics(
+            state=state,
+            best_candidates=(),
+            cheapest_candidates=(),
+            fallback_price=None,
+            selected_best=None,
+            selected_cheapest=None,
+            final_status=quote.status,
+            validation_outcome="region_redirect",
+            failure_stage="page_state_recognition",
+            failure_reason=quote.error,
+            used_fallback=False,
+        )
+        return attach_parser_trust_metadata(quote, diagnostics), diagnostics
+
+    if state.state == "unsupported":
+        quote = FlightQuote(
+            region=region.code,
+            domain=region.domain,
+            price=None,
+            currency=region.currency,
+            source_url=source_url,
+            status="page_unsupported_route",
+            error=f"该航线在当前区域不支持: {state.unsupported_hint}",
+        )
+        diagnostics = PageParseDiagnostics(
+            state=state,
+            best_candidates=(),
+            cheapest_candidates=(),
+            fallback_price=None,
+            selected_best=None,
+            selected_cheapest=None,
+            final_status=quote.status,
+            validation_outcome="unsupported_route",
+            failure_stage="page_state_recognition",
+            failure_reason=quote.error,
+            used_fallback=False,
+        )
+        return attach_parser_trust_metadata(quote, diagnostics), diagnostics
+
+    if state.state == "no_flights":
+        quote = FlightQuote(
+            region=region.code,
+            domain=region.domain,
+            price=None,
+            currency=region.currency,
+            source_url=source_url,
+            status="page_no_flights",
+            error=f"页面明确提示无航班结果: {state.no_flights_hint}",
+        )
+        diagnostics = PageParseDiagnostics(
+            state=state,
+            best_candidates=(),
+            cheapest_candidates=(),
+            fallback_price=None,
+            selected_best=None,
+            selected_cheapest=None,
+            final_status=quote.status,
+            validation_outcome="no_flights",
+            failure_stage="page_state_recognition",
+            failure_reason=quote.error,
+            used_fallback=False,
+        )
+        return attach_parser_trust_metadata(quote, diagnostics), diagnostics
+
+    if state.state == "blank":
+        quote = FlightQuote(
+            region=region.code,
+            domain=region.domain,
+            price=None,
+            currency=region.currency,
+            source_url=source_url,
+            status="page_empty_shell",
+            error="页面内容近乎空白，可能加载失败或被拦截",
+        )
+        diagnostics = PageParseDiagnostics(
+            state=state,
+            best_candidates=(),
+            cheapest_candidates=(),
+            fallback_price=None,
+            selected_best=None,
+            selected_cheapest=None,
+            final_status=quote.status,
+            validation_outcome="empty_shell",
             failure_stage="page_state_recognition",
             failure_reason=quote.error,
             used_fallback=False,

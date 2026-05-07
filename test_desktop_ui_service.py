@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from unittest.mock import patch
 
 from desktop_ui_service import DesktopUIService
 from scan_history import ScanHistoryStore
@@ -64,6 +65,7 @@ def test_save_alert_config_returns_serializable_summary(tmp_path: Path) -> None:
             "targetPrice": "900",
             "dropAmount": "50",
             "autoRefreshMinutes": "30",
+            "autoRefreshMode": "background",
             "notificationsEnabled": True,
             "notifyOnRecovery": True,
             "notifyOnNewLow": True,
@@ -73,6 +75,27 @@ def test_save_alert_config_returns_serializable_summary(tmp_path: Path) -> None:
     assert "目标价" in str(result["summary"])
     assert result["config"] is not None
     assert result["config"]["auto_refresh_minutes"] == 30
+    assert result["config"]["auto_refresh_mode"] == "background"
+    assert "后台自动复扫" in str(result["summary"])
+
+
+def test_install_background_auto_refresh_uses_ui_interval(tmp_path: Path) -> None:
+    service = build_service(tmp_path)
+
+    with patch("desktop_ui_service.install_auto_refresh_launchd", return_value=0) as install:
+        result = service.install_background_auto_refresh(
+            {
+                "intervalMinutes": "600",
+                "limit": "1",
+                "onlyOnAcPower": True,
+            }
+        )
+
+    assert result["ok"] is True
+    assert result["intervalMinutes"] == 600
+    args = install.call_args.args[0]
+    assert args.interval_minutes == 600
+    assert args.only_on_ac_power is True
 
 
 def test_queue_failure_region_updates_retry_queue(tmp_path: Path) -> None:

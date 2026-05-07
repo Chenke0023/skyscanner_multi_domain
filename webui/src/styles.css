@@ -339,6 +339,82 @@ button {
   color: var(--color-accent-strong);
 }
 
+.trust-summary-panel,
+.trust-detail-panel {
+  padding: 14px;
+  border: 1px solid var(--color-line);
+  border-radius: 12px;
+  background: var(--color-paper);
+}
+
+.trust-summary-panel h3,
+.trust-detail-panel h4 {
+  margin: 0 0 10px;
+  font-size: 0.95rem;
+}
+
+.trust-metric-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+  gap: 8px;
+}
+
+.trust-metric {
+  min-height: 58px;
+  padding: 10px;
+  border: 1px solid var(--color-line);
+  border-radius: 8px;
+  background: var(--color-paper-weak);
+}
+
+.trust-metric span,
+.evidence-item span,
+.evidence-item small {
+  display: block;
+  color: var(--color-muted);
+  font-size: 12px;
+}
+
+.trust-metric strong {
+  display: block;
+  margin-top: 4px;
+  font-size: 16px;
+}
+
+.failure-chip-row,
+.repair-action-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.failure-chip {
+  padding: 5px 8px;
+  border: 1px solid var(--color-line);
+  border-radius: 999px;
+  font-size: 12px;
+  color: var(--color-muted);
+}
+
+.evidence-list {
+  display: grid;
+  gap: 8px;
+}
+
+.evidence-item {
+  padding: 10px;
+  border: 1px solid var(--color-line);
+  border-radius: 8px;
+  background: var(--color-paper-weak);
+}
+
+.evidence-item p {
+  margin: 6px 0 0;
+  font-size: 12px;
+  color: var(--color-ink);
+}
+
 .summary-supporting,
 .summary-meta,
 .summary-insight {

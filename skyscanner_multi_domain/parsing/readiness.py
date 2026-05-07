@@ -10,6 +10,8 @@ OpenCLIReadiness = Literal[
     "challenge",
     "empty_shell",
     "no_flights",
+    "region_redirect",
+    "unsupported_route",
     "unknown_parse_surface",
 ]
 
@@ -47,6 +49,30 @@ LOADING_MARKERS = (
     "正在查找",
 )
 
+REDIRECT_MARKERS = (
+    "go to skyscanner",
+    "take me to",
+    "we've found a better",
+    "redirecting",
+    "前往",
+    "带我去",
+    "找到更好的",
+    "正在重定向",
+    "switch to",
+)
+
+UNSUPPORTED_MARKERS = (
+    "we don't fly",
+    "no routes",
+    "route not supported",
+    "try another route",
+    "不提供",
+    "没有航线",
+    "不支持此航线",
+    "尝试其他航线",
+    "sorry, we don't",
+)
+
 NO_FLIGHTS_MARKERS = (
     "no flights found",
     "no results",
@@ -57,6 +83,7 @@ NO_FLIGHTS_MARKERS = (
     "没有找到航班",
     "无结果",
     "未找到航班",
+    "0 results",
 )
 
 PRICE_CONTEXT_MARKERS = (
@@ -96,6 +123,10 @@ def classify_opencli_page_readiness(page_text: str) -> OpenCLIReadiness:
 
     if any(marker in lower for marker in CHALLENGE_MARKERS) and not has_price:
         return "challenge"
+    if any(marker in lower for marker in REDIRECT_MARKERS) and not has_price:
+        return "region_redirect"
+    if any(marker in lower for marker in UNSUPPORTED_MARKERS) and not has_price:
+        return "unsupported_route"
     if any(marker in lower for marker in NO_FLIGHTS_MARKERS):
         return "no_flights"
     if has_price and has_price_context:

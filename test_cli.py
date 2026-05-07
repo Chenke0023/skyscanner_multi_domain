@@ -6,6 +6,8 @@ from unittest.mock import patch
 
 from cli import (
     SimpleCLI,
+    _build_args_from_saved_query,
+    _is_ac_power_connected,
     _build_decision_summary,
     _build_warning_detail_section,
     _confidence_label,
@@ -19,6 +21,30 @@ from cli import (
 
 
 class CliParserTests(unittest.TestCase):
+    def test_background_auto_refresh_commands_parse(self) -> None:
+        parser = build_parser()
+
+        once = parser.parse_args(["auto-refresh-once", "--limit", "2", "--dry-run", "--only-on-ac-power"])
+        install = parser.parse_args(["install-auto-refresh", "--interval-minutes", "30", "--only-on-ac-power"])
+        uninstall = parser.parse_args(["uninstall-auto-refresh"])
+
+        self.assertEqual(once.command, "auto-refresh-once")
+        self.assertEqual(once.limit, 2)
+        self.assertTrue(once.dry_run)
+        self.assertTrue(once.only_on_ac_power)
+        self.assertEqual(install.command, "install-auto-refresh")
+        self.assertEqual(install.interval_minutes, 30)
+        self.assertTrue(install.only_on_ac_power)
+        self.assertEqual(uninstall.command, "uninstall-auto-refresh")
+
+    def test_ac_power_detection_parses_pmset_output(self) -> None:
+        with patch("cli.subprocess.run") as run:
+            run.return_value = Namespace(returncode=0, stdout="Now drawing from 'AC Power'\\n", stderr="")
+            self.assertTrue(_is_ac_power_connected())
+
+            run.return_value = Namespace(returncode=0, stdout="Now drawing from 'Battery Power'\\n", stderr="")
+            self.assertFalse(_is_ac_power_connected())
+
     def test_page_command_accepts_return_date(self) -> None:
         parser = build_parser()
 
@@ -110,6 +136,30 @@ class CliParserTests(unittest.TestCase):
 
         self.assertEqual(args.failure_dir, "/tmp/failures")
         self.assertFalse(args.show_samples)
+
+    def test_build_args_from_saved_query_supports_background_point_route(self) -> None:
+        args = _build_args_from_saved_query(
+            {
+                "identity": {
+                    "mode": "point_to_point",
+                    "origin_input": "北京",
+                    "destination_input": "香港",
+                    "date": "2026-06-01",
+                    "return_date": None,
+                    "date_window_days": 2,
+                    "manual_regions": ["hk", "sg"],
+                    "exact_airport": False,
+                }
+            },
+            Namespace(wait=8, timeout=20, transport="opencli", fetch_pipeline="balanced", save=False),
+        )
+
+        self.assertEqual(args.origin, "北京")
+        self.assertEqual(args.destination, "香港")
+        self.assertEqual(args.date, "2026-06-01")
+        self.assertEqual(args.date_window, 2)
+        self.assertEqual(args.regions, "HK,SG")
+        self.assertFalse(args.save)
 
 
 class MarkdownFormattingTests(unittest.TestCase):

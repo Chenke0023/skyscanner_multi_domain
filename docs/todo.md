@@ -235,7 +235,35 @@ Todo:
 
 ## P2: Telemetry And Quality
 
-### 13. OpenCLI Fetch Reliability & Parser Recovery v2
+### 13. Search Efficiency, Recovery UX & Report v3
+
+Status: implemented scaffold/baseline.
+
+Current implementation:
+
+- `scan/repair.py` builds repair plans from failed quotes.
+- Successful markets are excluded from repair plans.
+- `no_flights` is not repaired.
+- `challenge` maps to manual review and is not automatically retried.
+- `planning/execution_policy.py` defines Exact/Fast/Repair policy models.
+- Exact mode remains the default and runs all planned tasks.
+- Fast mode can defer non-probe batches in policy evaluation, but automatic skipping and early stop are not enabled by default.
+- History persists exact-mode execution policy telemetry.
+- WebView state exposes fetch quality, parser recovery, snapshot summary, repair plan, candidate metadata, fallback attempts, readiness, confidence, source, evidence, and warnings.
+- WebView shows fetch trust summary, failure repair grouping, repair action buttons, and parser evidence snippets.
+- Markdown decision reports mark Exact Mode/full scan and include candidate sources/fallback chain when available.
+- `docs/legacy_tk_policy.md` freezes legacy Tk.
+- Import-boundary tests prevent legacy Tk from importing new trust/recovery modules.
+
+Policy:
+
+- No default pruning.
+- No default early stop.
+- No default task skipping.
+- No challenge/captcha bypass.
+- No legacy Tk feature work.
+
+### 14. OpenCLI Fetch Reliability & Parser Recovery v2
 
 Status: implemented baseline.
 
@@ -275,7 +303,7 @@ Policy:
 - No challenge/captcha bypass.
 - No legacy Tk GUI feature work.
 
-### 14. SearchPlan telemetry
+### 15. SearchPlan telemetry
 
 Status: implemented baseline in history/details.
 
@@ -295,7 +323,7 @@ Current implementation:
 - Desktop history details show task coverage, first valid task, best-price task, best market rank, and failure reasons.
 - Desktop history details also summarize parser trust source distribution, low-confidence result count, fallback/recovered parse count, and parser warning count.
 
-### 15. Market reliability score
+### 16. Market reliability score
 
 Status: planned.
 
@@ -313,7 +341,7 @@ Uses:
 - result confidence
 - UI risk hints
 
-### 16. User-confirmed price loop
+### 17. User-confirmed price loop
 
 Status: planned.
 
@@ -325,7 +353,7 @@ Todo:
 
 ## P3: Release And CI
 
-### 17. Release hygiene
+### 18. Release hygiene
 
 Todo:
 
@@ -335,7 +363,7 @@ Todo:
 - macOS app build smoke
 - simplified README install/run path
 
-### 18. CI
+### 19. CI
 
 Minimum:
 
