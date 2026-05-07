@@ -338,9 +338,16 @@ def quotes_to_dicts(quotes: list[FlightQuote]) -> list[dict[str, Any]]:
             "price_source": quote.price_source,
             "evidence_text": quote.evidence_text,
             "parser_warnings": list(quote.parser_warnings or []),
+            "tab_open_count": quote.tab_open_count,
+            "tab_close_count": quote.tab_close_count,
+            "reused_tab_count": quote.reused_tab_count,
+            "extract_attempt_count": quote.extract_attempt_count,
+            "max_chunk_size_used": quote.max_chunk_size_used,
+            "progressive_wait_used": quote.progressive_wait_used,
         }
         for quote in quotes
     ]
+
 
 
 async def run_page_scan(
@@ -659,30 +666,6 @@ async def run_page_scan(
                 run_id=run_id,
             )
 
-            wait_render_regions = [
-                region
-                for region, quote in zip(batch_regions, quotes)
-                if quote.price is None and should_retry_wait_render(quote.status)
-            ]
-            if wait_render_regions:
-                longer_args = argparse.Namespace(**vars(args))
-                longer_args.page_wait = max(args.page_wait * 3, 30)
-                wait_quotes = await compare_via_opencli(
-                    longer_args,
-                    wait_render_regions,
-                    persist_failures=False,
-                    build_search_url=build_search_url,
-                    on_region_start=on_region_start,
-                    on_region_complete=on_region_complete,
-                    region_concurrency=max(int(region_concurrency), 1),
-                    run_id=run_id,
-                )
-                wait_by_region = {quote.region: quote for quote in wait_quotes}
-                quotes = [
-                    wait_by_region.get(quote.region, quote)
-                    for quote in quotes
-                ]
-
             if not enable_fallbacks:
                 return quotes
 
@@ -716,7 +699,7 @@ async def run_page_scan(
             legacy_regions = [
                 region
                 for region, quote in zip(batch_regions, quotes)
-                if quote.price is None and quote.status != "px_challenge"
+                if quote.price is None and quote.status != "px_challenge" and quote.status != "opencli_not_attempted"
             ]
             if legacy_regions:
                 legacy_quotes = await compare_via_scrapling(
@@ -915,10 +898,10 @@ async def run_page_scan(
                 )
                 batch_quotes = apply_plan_metadata(batch_quotes)
                 merged_quotes = merge_quotes_by_region(merged_quotes, batch_quotes)
-                for region in batch_regions:
-                    scanned_region_codes.add(region.code)
-                    if region.code not in completed_regions:
-                        completed_regions.append(region.code)
+                for quote in batch_quotes:
+                    scanned_region_codes.add(quote.region)
+                    if quote.region not in completed_regions:
+                        completed_regions.append(quote.region)
                 await emit_progress(
                     stage="plan_batch_complete",
                     quotes=apply_plan_metadata(list(merged_quotes)),
@@ -956,10 +939,10 @@ async def run_page_scan(
                 )
                 remaining_quotes = apply_plan_metadata(remaining_quotes)
                 merged_quotes = merge_quotes_by_region(merged_quotes, remaining_quotes)
-                for region in remaining_regions:
-                    scanned_region_codes.add(region.code)
-                    if region.code not in completed_regions:
-                        completed_regions.append(region.code)
+                for quote in remaining_quotes:
+                    scanned_region_codes.add(quote.region)
+                    if quote.region not in completed_regions:
+                        completed_regions.append(quote.region)
                 await emit_progress(
                     stage="plan_batch_complete",
                     quotes=apply_plan_metadata(list(merged_quotes)),

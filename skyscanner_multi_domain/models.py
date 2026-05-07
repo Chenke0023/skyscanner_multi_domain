@@ -43,6 +43,14 @@ class FlightQuote:
     evidence_text: Optional[str] = None
     parser_warnings: list[str] = field(default_factory=list)
 
+    # Telemetry fields
+    tab_open_count: int = 0
+    tab_close_count: int = 0
+    reused_tab_count: int = 0
+    extract_attempt_count: int = 0
+    max_chunk_size_used: int = 0
+    progressive_wait_used: int = 0
+
 
 # ── AttemptTrace ──────────────────────────────────────────────────────────────
 
@@ -69,6 +77,14 @@ class AttemptTrace:
     currency: Optional[str] = None
     timestamp: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat(timespec="seconds"))
 
+    # Telemetry fields
+    tab_open_count: int = 0
+    tab_close_count: int = 0
+    reused_tab_count: int = 0
+    extract_attempt_count: int = 0
+    max_chunk_size_used: int = 0
+    progressive_wait_used: int = 0
+
     def to_dict(self) -> dict:
         result = {
             "run_id": self.run_id,
@@ -91,6 +107,12 @@ class AttemptTrace:
             "price": self.price,
             "currency": self.currency,
             "timestamp": self.timestamp,
+            "tab_open_count": self.tab_open_count,
+            "tab_close_count": self.tab_close_count,
+            "reused_tab_count": self.reused_tab_count,
+            "extract_attempt_count": self.extract_attempt_count,
+            "max_chunk_size_used": self.max_chunk_size_used,
+            "progressive_wait_used": self.progressive_wait_used,
         }
         return result
 
