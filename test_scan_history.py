@@ -5,6 +5,7 @@ from pathlib import Path
 from scan_history import (
     ScanHistoryStore,
     build_delta_summary_lines,
+    build_fetch_quality_telemetry,
     build_history_series,
     get_failed_region_codes,
     annotate_rows_with_history,
@@ -88,6 +89,73 @@ def test_build_delta_summary_lines_only_returns_changed_rows() -> None:
     assert lines == ["2026-05-20 | PEK -> ALA | 香港 | 降 ¥50.00"]
 
 
+def test_build_fetch_quality_telemetry_counts_opencli_and_fallback_metrics() -> None:
+    telemetry = build_fetch_quality_telemetry(
+        [
+            (
+                "2026-05-20",
+                [
+                    {
+                        "region": "HK",
+                        "price": 888.0,
+                        "confidence": 0.9,
+                        "status": "ok",
+                        "tab_open_count": 1,
+                        "reused_tab_count": 0,
+                        "tab_close_count": 0,
+                        "extract_attempt_count": 1,
+                        "max_chunk_size_used": 15000,
+                    },
+                    {
+                        "region": "SG",
+                        "price": 900.0,
+                        "confidence": 0.45,
+                        "status": "ok",
+                        "fallback_attempts": [
+                            {"transport": "opencli_primary", "status": "page_parse_failed"}
+                        ],
+                        "tab_open_count": 0,
+                        "reused_tab_count": 1,
+                        "tab_close_count": 1,
+                        "extract_attempt_count": 3,
+                        "max_chunk_size_used": 100000,
+                    },
+                    {
+                        "region": "CN",
+                        "price": None,
+                        "status": "opencli_timeout",
+                        "tab_open_count": 1,
+                        "extract_attempt_count": 2,
+                        "max_chunk_size_used": 50000,
+                    },
+                    {"region": "US", "price": None, "status": "px_challenge"},
+                    {"region": "GB", "price": None, "status": "page_parse_failed"},
+                    {"region": "JP", "price": None, "status": "opencli_not_attempted"},
+                ],
+            )
+        ]
+    )
+
+    assert telemetry["opencli_total_regions"] == 6
+    assert telemetry["opencli_price_found_count"] == 2
+    assert telemetry["opencli_price_found_rate"] == 2 / 6
+    assert telemetry["opencli_high_confidence_count"] == 1
+    assert telemetry["opencli_low_confidence_count"] == 1
+    assert telemetry["opencli_parse_failed_count"] == 1
+    assert telemetry["opencli_timeout_count"] == 1
+    assert telemetry["opencli_loading_count"] == 1
+    assert telemetry["opencli_challenge_count"] == 1
+    assert telemetry["opencli_not_attempted_count"] == 1
+    assert telemetry["fallback_attempted_count"] == 1
+    assert telemetry["fallback_rescued_count"] == 1
+    assert telemetry["fallback_rescue_rate"] == 1.0
+    assert telemetry["tab_open_total"] == 2
+    assert telemetry["tab_reuse_total"] == 1
+    assert telemetry["tab_close_total"] == 1
+    assert telemetry["extract_attempt_total"] == 6
+    assert telemetry["max_chunk_observed"] == 100000
+
+
 def test_scan_history_store_round_trip(tmp_path: Path) -> None:
     store = ScanHistoryStore(tmp_path / "scan_history.sqlite3")
     query_payload = {
@@ -135,6 +203,8 @@ def test_scan_history_store_round_trip(tmp_path: Path) -> None:
     assert latest is not None
     assert preview is not None
     assert latest.rows_by_date == rows_by_date
+    assert latest.query_payload["fetch_quality_telemetry"]["opencli_total_regions"] == 1
+    assert latest.query_payload["fetch_quality_telemetry"]["opencli_price_found_count"] == 1
     assert get_failed_region_codes(latest.quotes_by_date) == []
 
 

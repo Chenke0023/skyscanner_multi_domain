@@ -39,6 +39,7 @@ from skyscanner_multi_domain.scan.history import (
     ScanHistoryStore,
     annotate_rows_with_history,
     build_delta_summary_lines,
+    build_fetch_quality_telemetry,
     can_reuse_page_for_row,
     classify_failure,
     get_failed_region_codes,
@@ -643,6 +644,24 @@ class SimpleCLI:
         print("\n变化摘要:")
         for line in lines:
             print(f"- {line}")
+
+    def _print_fetch_quality_summary(self, quotes_by_date: list[tuple[str, list[QuoteRow]]]) -> None:
+        telemetry = build_fetch_quality_telemetry(quotes_by_date)
+        total = int(telemetry.get("opencli_total_regions") or 0)
+        if total <= 0:
+            return
+        found = int(telemetry.get("opencli_price_found_count") or 0)
+        fallback_rescued = int(telemetry.get("fallback_rescued_count") or 0)
+        challenge = int(telemetry.get("opencli_challenge_count") or 0)
+        opened = int(telemetry.get("tab_open_total") or 0)
+        reused = int(telemetry.get("tab_reuse_total") or 0)
+        print(
+            "[fetch] opencli "
+            f"{found}/{total} markets found price, "
+            f"fallback rescued {fallback_rescued}, "
+            f"challenge {challenge}, "
+            f"tabs opened {opened}, reused {reused}"
+        )
 
     def _sort_simplified_rows(
         self, rows: list[SimplifiedQuoteRow]
@@ -1443,6 +1462,7 @@ class SimpleCLI:
                 print("没有返回任何结果。检查地区代码或浏览器/CDP 环境。")
             rows_by_date.append((trip_label, rows))
             quote_snapshots_by_date.append((trip_label, quote_snapshots))
+            self._print_fetch_quality_summary([(trip_label, quote_snapshots)])
             if rows:
                 any_rows = True
 
@@ -1904,6 +1924,7 @@ class SimpleCLI:
 
             rows_by_date.append((trip_label, rows))
             quote_snapshots_by_date.append((trip_label, quote_snapshots))
+            self._print_fetch_quality_summary([(trip_label, quote_snapshots)])
             if rows:
                 any_rows = True
 

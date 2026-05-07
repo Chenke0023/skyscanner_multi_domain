@@ -142,9 +142,10 @@ def test_opencli_time_budget_not_attempted_v11() -> None:
             # start_time = 1000
             # MAX_REGION_TIME = 45, len=2 -> budget = 90
             
-            # Increased values to satisfy more time.time() calls in v1.2.1
+            # Values match the budget checks; LRU timestamps are deterministic
+            # counters and no longer consume time.time().
             # We want the first region (CN) to stay under budget, but the second (SG) to exceed it.
-            mock_time.side_effect = [1000] + [1001] * 5 + [1100] * 20
+            mock_time.side_effect = [1000, 1001, 1100]
             
             mock_tab_id = "test-tab-budget"
             with patch("skyscanner_multi_domain.transports.opencli._opencli_json") as mock_json:
@@ -258,9 +259,9 @@ def test_pool_lru_and_clean_transition() -> None:
             assert s1.tab_id == "t1"
             assert s2.tab_id == "t2"
             
-            # Update last_used for s1
-            s1.last_used = 100
-            s2.last_used = 200
+            # Update last_used_index for s1
+            s1.last_used_index = 100
+            s2.last_used_index = 200
             
             # 2. Acquire domain3 (should evict s1 because it's older)
             s3, _ = pool.acquire("domain3", "url3")
