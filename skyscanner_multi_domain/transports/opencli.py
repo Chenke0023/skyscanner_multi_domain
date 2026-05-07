@@ -99,7 +99,7 @@ class OpenCLITabSession:
         self.session_reused_tab_count = 0
         self.session_extract_attempt_count = 0
         self.session_progressive_wait_count = 0
-        self.last_used = time.time()
+        self.last_used_index = 0
 
     def ensure_tab(self, url: str, clean: bool = False) -> tuple[str, dict[str, int]]:
         """Open a new tab if none exists, or navigate existing tab. Returns delta telemetry.
@@ -108,8 +108,6 @@ class OpenCLITabSession:
         no cross-domain pollution.
         """
         delta = {"tab_open_count": 0, "reused_tab_count": 0}
-        self.last_used = time.time()
-        
         if clean and self.tab_id:
             _tab_close(self.tab_id)
             self.tab_id = ""
@@ -141,7 +139,6 @@ class OpenCLITabSession:
         timeout: float = TAB_WAIT_TIMEOUT,
     ) -> tuple[bool, int]:
         """Wait for page to be interactive (state-based). Returns (success, delta_wait_count)."""
-        self.last_used = time.time()
         delta_wait = 0
         if initial_wait > 0:
             await asyncio.sleep(initial_wait)
@@ -165,7 +162,6 @@ class OpenCLITabSession:
         
         If price is missing, wait and try larger chunks.
         """
-        self.last_used = time.time()
         attempts = [
             (15000, 0),  # (chunk_size, extra_wait)
             (50000, 8),
@@ -251,12 +247,18 @@ class OpenCLITabPool:
         # Mapping of domain to session for pinning
         self.domain_to_session: dict[str, OpenCLITabSession] = {}
         self.pool_tab_close_count = 0
+        self._use_counter = 0
+
+    def _mark_used(self, session: OpenCLITabSession) -> None:
+        self._use_counter += 1
+        session.last_used_index = self._use_counter
 
     def acquire(self, domain: str, url: str) -> tuple[OpenCLITabSession, dict[str, int]]:
         """Acquire a session for the given domain. Prioritize domain pinning and use LRU for eviction."""
         # 1. Try pinned session for this domain
         if domain in self.domain_to_session:
             session = self.domain_to_session[domain]
+            self._mark_used(session)
             _, delta = session.ensure_tab(url, clean=False)
             return session, delta
 
@@ -265,12 +267,13 @@ class OpenCLITabPool:
             session = OpenCLITabSession()
             self.sessions.append(session)
             self.domain_to_session[domain] = session
+            self._mark_used(session)
             _, delta = session.ensure_tab(url, clean=False)
             return session, delta
 
         # 3. Reuse an existing session using LRU strategy
-        # Find session with the oldest last_used time
-        session = min(self.sessions, key=lambda s: s.last_used)
+        # Find session with the oldest deterministic use index.
+        session = min(self.sessions, key=lambda s: s.last_used_index)
         
         # Remove old pin if exists
         old_domain = next((d for d, s in self.domain_to_session.items() if s == session), None)
@@ -279,6 +282,7 @@ class OpenCLITabPool:
         
         self.domain_to_session[domain] = session
         # Use clean=True for cross-domain repurpose to avoid pollution
+        self._mark_used(session)
         _, delta = session.ensure_tab(url, clean=True)
         return session, delta
 
@@ -309,7 +313,11 @@ async def compare_via_opencli(
     region_concurrency: int = 1,
     run_id: str = "",
 ) -> list[FlightQuote]:
-    """Fetch flight quotes using opencli browser automation with a bounded tab pool."""
+    """Fetch flight quotes using opencli browser automation with a bounded tab pool.
+
+    OpenCLI runs regions serially. region_concurrency controls the maximum retained
+    tab lanes for reuse, capped at three; it does not parallelize region execution.
+    """
     if build_search_url is None:
         from skyscanner_multi_domain.scan.orchestrator import build_search_url as _bsu
         build_search_url = _bsu
@@ -357,6 +365,13 @@ async def compare_via_opencli(
             url = requested_urls[region.code]
             page_text = ""
             quote: Optional[FlightQuote] = None
+            delta_ensure = {"tab_open_count": 0, "reused_tab_count": 0}
+            delta_wait_state = 0
+            delta_extract = {
+                "extract_attempt_count": 0,
+                "progressive_wait_used": 0,
+                "max_chunk_size_used": 0,
+            }
 
             try:
                 session, delta_ensure = pool.acquire(region.domain, url)
@@ -394,9 +409,8 @@ async def compare_via_opencli(
                     status="opencli_error",
                     error=str(exc)[:200],
                 )
-                if 'delta_ensure' in locals():
-                    quote.tab_open_count = delta_ensure["tab_open_count"]
-                    quote.reused_tab_count = delta_ensure["reused_tab_count"]
+                quote.tab_open_count = delta_ensure["tab_open_count"]
+                quote.reused_tab_count = delta_ensure["reused_tab_count"]
 
             if quote is None:
                 quote = FlightQuote(

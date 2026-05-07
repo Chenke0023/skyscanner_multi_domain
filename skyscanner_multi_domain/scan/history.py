@@ -432,6 +432,83 @@ def build_plan_telemetry(quotes_by_date: QuotesByDate) -> dict[str, Any]:
     }
 
 
+def build_fetch_quality_telemetry(quotes_by_date: QuotesByDate) -> dict[str, Any]:
+    flattened: list[dict[str, Any]] = []
+    for _trip_label, quotes in quotes_by_date:
+        flattened.extend(deepcopy(quote) for quote in quotes)
+
+    total_regions = len(flattened)
+    price_found_count = sum(1 for quote in flattened if _quote_has_numeric_price(quote))
+    high_confidence_count = sum(
+        1
+        for quote in flattened
+        if _quote_has_numeric_price(quote) and _numeric_confidence(quote.get("confidence")) >= 0.85
+    )
+    low_confidence_count = sum(
+        1
+        for quote in flattened
+        if _quote_has_numeric_price(quote) and _numeric_confidence(quote.get("confidence")) < 0.85
+    )
+    fallback_attempted_count = sum(
+        1 for quote in flattened if isinstance(quote.get("fallback_attempts"), list) and quote["fallback_attempts"]
+    )
+    fallback_rescued_count = sum(
+        1
+        for quote in flattened
+        if _quote_has_numeric_price(quote)
+        and isinstance(quote.get("fallback_attempts"), list)
+        and quote["fallback_attempts"]
+    )
+    max_chunk_observed = max(
+        (_optional_int(quote.get("max_chunk_size_used")) or 0 for quote in flattened),
+        default=0,
+    )
+
+    status_counts = {
+        "parse_failed": 0,
+        "timeout": 0,
+        "loading": 0,
+        "challenge": 0,
+        "not_attempted": 0,
+    }
+    for quote in flattened:
+        status = str(quote.get("status") or "").strip().lower()
+        if status in {"page_parse_failed", "scrapling_parse_failed", "opencli_parse_failed"}:
+            status_counts["parse_failed"] += 1
+        if "timeout" in status:
+            status_counts["timeout"] += 1
+        if status in {"page_loading", "opencli_loading", "opencli_timeout"}:
+            status_counts["loading"] += 1
+        if status in {"px_challenge", "page_challenge", "captcha_solve_failed"} or "challenge" in status:
+            status_counts["challenge"] += 1
+        if status == "opencli_not_attempted":
+            status_counts["not_attempted"] += 1
+
+    fallback_rescue_rate = (
+        fallback_rescued_count / fallback_attempted_count if fallback_attempted_count else 0.0
+    )
+    return {
+        "opencli_total_regions": total_regions,
+        "opencli_price_found_count": price_found_count,
+        "opencli_price_found_rate": price_found_count / total_regions if total_regions else 0.0,
+        "opencli_high_confidence_count": high_confidence_count,
+        "opencli_low_confidence_count": low_confidence_count,
+        "opencli_parse_failed_count": status_counts["parse_failed"],
+        "opencli_timeout_count": status_counts["timeout"],
+        "opencli_loading_count": status_counts["loading"],
+        "opencli_challenge_count": status_counts["challenge"],
+        "opencli_not_attempted_count": status_counts["not_attempted"],
+        "fallback_attempted_count": fallback_attempted_count,
+        "fallback_rescued_count": fallback_rescued_count,
+        "fallback_rescue_rate": fallback_rescue_rate,
+        "tab_open_total": sum(_optional_int(quote.get("tab_open_count")) or 0 for quote in flattened),
+        "tab_reuse_total": sum(_optional_int(quote.get("reused_tab_count")) or 0 for quote in flattened),
+        "tab_close_total": sum(_optional_int(quote.get("tab_close_count")) or 0 for quote in flattened),
+        "extract_attempt_total": sum(_optional_int(quote.get("extract_attempt_count")) or 0 for quote in flattened),
+        "max_chunk_observed": max_chunk_observed,
+    }
+
+
 def _failed_tasks_by_reason(quotes: list[dict[str, Any]]) -> dict[str, int]:
     counts: dict[str, int] = {}
     for quote in quotes:
@@ -473,6 +550,14 @@ def _optional_int(value: Any) -> int | None:
     if isinstance(value, float) and value.is_integer():
         return int(value)
     return None
+
+
+def _numeric_confidence(value: Any) -> float:
+    if isinstance(value, bool):
+        return 0.0
+    if isinstance(value, (int, float)):
+        return float(value)
+    return 0.0
 
 
 def build_history_series(
@@ -739,6 +824,7 @@ class ScanHistoryStore:
     ) -> int:
         query_payload = deepcopy(query_payload)
         query_payload["plan_telemetry"] = build_plan_telemetry(quotes_by_date)
+        query_payload["fetch_quality_telemetry"] = build_fetch_quality_telemetry(quotes_by_date)
         query_key = build_query_key(query_payload)
         title = build_query_title(query_payload)
         created_at = datetime.now().isoformat(timespec="seconds")
