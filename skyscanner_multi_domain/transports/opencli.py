@@ -10,8 +10,13 @@ import time
 from typing import Any, Optional
 
 from skyscanner_multi_domain.diagnostics.attempt_trace import emit_trace
+from skyscanner_multi_domain.diagnostics.snapshots import (
+    save_opencli_snapshot,
+    should_save_opencli_snapshot,
+)
 from skyscanner_multi_domain.models import FlightQuote, RegionConfig
 from skyscanner_multi_domain.parsing.page_parser import extract_page_quote
+from skyscanner_multi_domain.parsing.readiness import classify_opencli_page_readiness
 
 TAB_WAIT_TIMEOUT = 20
 TAB_POLL_INTERVAL = 2.0
@@ -190,12 +195,20 @@ class OpenCLITabSession:
             result = _tab_extract(tab_id, chunk_size=chunk_size)
             last_text = str(result.get("content", ""))
             quote = _quote_from_opencli_result(region, result, url)
+            quote.readiness = classify_opencli_page_readiness(last_text)
 
             if quote.price is not None:
                 return quote, last_text, delta
             
-            # If it's a captcha, stop immediately
-            if quote.status in ("px_challenge", "page_challenge"):
+            # Terminal content states should not burn retries.
+            if quote.readiness == "challenge" or quote.status in ("px_challenge", "page_challenge"):
+                if quote.status not in ("px_challenge", "page_challenge"):
+                    quote.status = "page_challenge"
+                    quote.error = "OpenCLI page readiness classified the page as a challenge"
+                return quote, last_text, delta
+            if quote.readiness == "no_flights":
+                quote.status = "opencli_no_flights"
+                quote.error = "OpenCLI page readiness classified the page as no flights"
                 return quote, last_text, delta
 
             last_quote = quote
@@ -299,7 +312,7 @@ class OpenCLITabPool:
         return self.pool_tab_close_count + current_active
 
 
-TERMINAL_STATUSES = {"px_challenge", "page_challenge"}
+TERMINAL_STATUSES = {"px_challenge", "page_challenge", "opencli_no_flights", "page_no_flights"}
 
 
 async def compare_via_opencli(
@@ -422,6 +435,22 @@ async def compare_via_opencli(
                     status="opencli_failed",
                     error="No price extracted",
                 )
+
+            if should_save_opencli_snapshot(quote):
+                try:
+                    save_opencli_snapshot(
+                        route={
+                            "origin": args.origin,
+                            "destination": args.destination,
+                            "date": args.date,
+                            "return_date": return_date,
+                        },
+                        region=region,
+                        quote=quote,
+                        page_text=page_text,
+                    )
+                except Exception:
+                    pass
 
             if persist_failures and quote.price is None:
                 from skyscanner_multi_domain.scan.orchestrator import _persist_failure_log as _pfl

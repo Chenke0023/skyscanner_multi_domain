@@ -39,6 +39,7 @@ FailureClass = Literal[
     "challenge_other", # reCAPTCHA / hCaptcha / Turnstile — captcha solver
     "parse",           # page visible but price not found in parser
     "empty_shell",     # page body nearly empty / near-blank shell
+    "no_flights",      # search completed but no itinerary results exist
     "browser_missing", # CDP transport: no browser tab for domain
     "transport_error", # opencli / page eval internal error
     "other",           # everything else
@@ -70,6 +71,8 @@ _STATUS_TO_CLASS: dict[str, FailureClass] = {
     # parse
     "page_parse_failed":     "parse",
     "scrapling_parse_failed": "parse",
+    "opencli_no_flights":     "no_flights",
+    "page_no_flights":        "no_flights",
     # shell
     "page_missing":          "browser_missing",
     "page_missing_ws":       "browser_missing",
@@ -86,10 +89,11 @@ def failure_action(failure_class: FailureClass) -> FailureAction:
         "network":         FailureAction.RETRY_BROWSER,
         "loading":         FailureAction.WAIT_RENDER,
         "challenge_px":    FailureAction.MANUAL_SESSION,
-        "challenge_cf":    FailureAction.RETRY_BROWSER,
+        "challenge_cf":    FailureAction.MANUAL_SESSION,
         "challenge_other": FailureAction.RETRY_SAME,
         "parse":           FailureAction.RETRY_BROWSER,
         "empty_shell":     FailureAction.RETRY_BROWSER,
+        "no_flights":      FailureAction.NONE,
         "browser_missing": FailureAction.NONE,
         "transport_error": FailureAction.RETRY_BROWSER,
         "other":           FailureAction.NONE,
@@ -339,6 +343,10 @@ def quotes_to_dicts(quotes: list[FlightQuote]) -> list[dict[str, Any]]:
             "evidence_text": quote.evidence_text,
             "parser_warnings": list(quote.parser_warnings or []),
             "fallback_attempts": list(quote.fallback_attempts or []),
+            "price_candidates_count": quote.price_candidates_count,
+            "selected_candidate_rank": quote.selected_candidate_rank,
+            "candidate_sources": list(quote.candidate_sources or []),
+            "readiness": quote.readiness,
             "tab_open_count": quote.tab_open_count,
             "tab_close_count": quote.tab_close_count,
             "reused_tab_count": quote.reused_tab_count,

@@ -40,6 +40,9 @@ class FailureActionTests(unittest.TestCase):
     def test_challenge_px_yields_manual_session_action(self) -> None:
         assert failure_action("challenge_px") == FailureAction.MANUAL_SESSION
 
+    def test_challenge_cf_yields_manual_session_action(self) -> None:
+        assert failure_action("challenge_cf") == FailureAction.MANUAL_SESSION
+
     def test_network_yields_retry_browser_action(self) -> None:
         assert failure_action("network") == FailureAction.RETRY_BROWSER
 
@@ -53,6 +56,9 @@ class CanFallbackToBrowserTests(unittest.TestCase):
 
     def test_px_challenge_is_false(self) -> None:
         assert can_fallback_to_browser("px_challenge") is False
+
+    def test_page_challenge_is_false(self) -> None:
+        assert can_fallback_to_browser("page_challenge") is False
 
     def test_scrapling_failed_is_true(self) -> None:
         assert can_fallback_to_browser("scrapling_failed") is True

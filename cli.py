@@ -40,6 +40,8 @@ from skyscanner_multi_domain.scan.history import (
     annotate_rows_with_history,
     build_delta_summary_lines,
     build_fetch_quality_telemetry,
+    build_parser_recovery_telemetry,
+    build_snapshot_summary,
     can_reuse_page_for_row,
     classify_failure,
     get_failed_region_codes,
@@ -625,6 +627,10 @@ class SimpleCLI:
                     "price_source": row.get("price_source"),
                     "evidence_text": row.get("evidence_text"),
                     "parser_warnings": row.get("parser_warnings") or [],
+                    "price_candidates_count": row.get("price_candidates_count") or 0,
+                    "selected_candidate_rank": row.get("selected_candidate_rank"),
+                    "candidate_sources": row.get("candidate_sources") or [],
+                    "readiness": row.get("readiness"),
                 }
             )
         return snapshots
@@ -647,21 +653,34 @@ class SimpleCLI:
 
     def _print_fetch_quality_summary(self, quotes_by_date: list[tuple[str, list[QuoteRow]]]) -> None:
         telemetry = build_fetch_quality_telemetry(quotes_by_date)
-        total = int(telemetry.get("opencli_total_regions") or 0)
+        total = int(telemetry.get("fetch_total_regions") or 0)
         if total <= 0:
             return
-        found = int(telemetry.get("opencli_price_found_count") or 0)
+        found = int(telemetry.get("fetch_price_found_count") or 0)
+        opencli_direct = int(telemetry.get("opencli_direct_price_found_count") or 0)
         fallback_rescued = int(telemetry.get("fallback_rescued_count") or 0)
-        challenge = int(telemetry.get("opencli_challenge_count") or 0)
+        challenge = int(telemetry.get("fetch_challenge_count") or 0)
         opened = int(telemetry.get("tab_open_total") or 0)
         reused = int(telemetry.get("tab_reuse_total") or 0)
         print(
-            "[fetch] opencli "
+            "[fetch] final "
             f"{found}/{total} markets found price, "
+            f"opencli direct {opencli_direct}, "
             f"fallback rescued {fallback_rescued}, "
             f"challenge {challenge}, "
             f"tabs opened {opened}, reused {reused}"
         )
+        parser_telemetry = build_parser_recovery_telemetry(quotes_by_date)
+        snapshot_summary = build_snapshot_summary(quotes_by_date)
+        candidate_total = int(parser_telemetry.get("price_candidate_total") or 0)
+        if candidate_total:
+            print(
+                "[parse] "
+                f"candidates {candidate_total}, "
+                f"recovered {int(parser_telemetry.get('candidate_recovered_price_count') or 0)}, "
+                f"low confidence {int(parser_telemetry.get('low_confidence_price_count') or 0)}, "
+                f"snapshots recommended {int(snapshot_summary.get('snapshot_recommended_count') or 0)}"
+            )
 
     def _sort_simplified_rows(
         self, rows: list[SimplifiedQuoteRow]
@@ -761,6 +780,10 @@ class SimpleCLI:
                     "price_source": quote.get("price_source"),
                     "evidence_text": quote.get("evidence_text"),
                     "parser_warnings": quote.get("parser_warnings") or [],
+                    "price_candidates_count": quote.get("price_candidates_count") or 0,
+                    "selected_candidate_rank": quote.get("selected_candidate_rank"),
+                    "candidate_sources": quote.get("candidate_sources") or [],
+                    "readiness": quote.get("readiness"),
                 }
             )
         return self._sort_simplified_rows(simplified)
