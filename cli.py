@@ -14,11 +14,15 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import fcntl
+import plistlib
+import subprocess
+import sys
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
-from skyscanner_multi_domain.runtime.paths import PROJECT_ROOT, get_reports_dir
+from skyscanner_multi_domain.runtime.paths import PROJECT_ROOT, RUNTIME_DIR, get_log_file, get_reports_dir
 from skyscanner_multi_domain.planning.date_window import (
     format_trip_date_label,
 )
@@ -82,6 +86,8 @@ CHEAPEST_LABEL = "最低价"
 CLI_REGION_CONCURRENCY = 3
 CLI_DATE_WINDOW_CONCURRENCY = 2
 CLI_AIRPORT_PAIR_CONCURRENCY = 2
+LAUNCHD_LABEL = "com.skyscanner-multi-domain.auto-refresh"
+DEFAULT_LAUNCHD_INTERVAL_MINUTES = 600
 
 _PRICE_SOURCE_LABELS: dict[str, str] = {
     "cheapest_block": "Cheapest 区块",
@@ -181,13 +187,32 @@ def _build_decision_summary(
     if len(valid_pairs) > 1:
         runner_row, runner_value = valid_pairs[1]
 
-    lines = ["## 扫描结论", "", "### 推荐先验证", ""]
+    policy_mode = str(primary_row.get("execution_policy_mode") or "exact")
+    lines = ["## 扫描结论", ""]
+    if policy_mode == "fast":
+        lines.append("Fast Mode 已启用：本报告不是完整市场全集扫描结果。")
+    else:
+        lines.append("Exact Mode：已扫描完整计划市场集。")
+    lines.extend(["", "### 推荐先验证", ""])
     lines.append(f"- 最低价：¥{primary_value:,.2f}")
     if show_dates:
         lines.append(f"- 日期：{primary_row.get('date') or '-'}")
     lines.append(f"- 航段：{primary_row.get('route') or '-'}")
     lines.append(f"- 市场：{primary_row.get('region_name') or '-'}")
     lines.append(f"- 价格来源：{_price_source_label(primary_row.get('price_source'))}")
+    candidate_sources = primary_row.get("candidate_sources")
+    if isinstance(candidate_sources, list) and candidate_sources:
+        lines.append(f"- 候选来源：{', '.join(str(item) for item in candidate_sources)}")
+    fallback_attempts = primary_row.get("fallback_attempts")
+    if isinstance(fallback_attempts, list) and fallback_attempts:
+        chain = " -> ".join(
+            str(item.get("transport") or item.get("status") or "?")
+            for item in fallback_attempts
+            if isinstance(item, dict)
+        )
+        lines.append(f"- Fallback：{chain or '无'}")
+    else:
+        lines.append("- Fallback：无")
     lines.append(f"- 可信度：{_confidence_label(primary_row.get('confidence'))}")
     link = primary_row.get("link")
     if isinstance(link, str) and link:
@@ -261,6 +286,8 @@ def _build_decision_risk_hints(
             hints.append("最低价可信度偏低，建议点开页面复核。")
     if primary_source == "first_price_fallback":
         hints.append("最低价来自首个价格 fallback，必须人工确认。")
+    if any(str(row.get("execution_policy_mode") or "exact") == "fast" for row, _ in valid_pairs):
+        hints.append("Fast Mode 结果不是完整市场全集扫描，不能等同于全量最低价。")
 
     for warning in _row_warning_lines(primary_row):
         hints.append(f"解析警告：{warning}")
@@ -277,6 +304,13 @@ def _build_decision_risk_hints(
         hints.append(
             f"{sum(risky_hits.values())} 个市场失败（{summary}），可能存在漏价。"
         )
+    challenge_count = sum(
+        1
+        for row in rows
+        if "challenge" in str(row.get("status") or row.get("failure_category") or "").lower()
+    )
+    if challenge_count:
+        hints.append(f"{challenge_count} 个市场出现 challenge，未自动重复尝试，存在覆盖风险。")
 
     fallback_sources = {"first_price_fallback", "recovered_best"}
     fallback_only = all(
@@ -341,6 +375,64 @@ def run_failure_replay_command(args: argparse.Namespace) -> int:
     report = build_failure_replay_report(failure_dir)
     print(render_failure_replay_report(report, show_samples=args.show_samples))
     return 0 if report.total_samples else 1
+
+
+def _auto_refresh_lock_path() -> Path:
+    RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
+    return RUNTIME_DIR / "background_auto_refresh.lock"
+
+
+def _is_ac_power_connected() -> bool:
+    result = subprocess.run(
+        ["pmset", "-g", "batt"],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        return False
+    output = f"{result.stdout}\n{result.stderr}".lower()
+    return "'ac power'" in output or "ac power" in output
+
+
+def _build_args_from_saved_query(
+    query_payload: dict[str, object],
+    args: argparse.Namespace,
+) -> argparse.Namespace:
+    identity = query_payload.get("identity") if isinstance(query_payload, dict) else {}
+    if not isinstance(identity, dict):
+        identity = {}
+    manual_regions = identity.get("manual_regions")
+    regions = ",".join(str(code).strip().upper() for code in manual_regions if str(code).strip()) if isinstance(manual_regions, list) else ""
+    mode = str(identity.get("mode") or "point_to_point")
+    origin_input = str(identity.get("origin_input") or identity.get("origin_label") or identity.get("origin_code") or "")
+    destination_input = str(
+        identity.get("destination_input") or identity.get("destination_label") or identity.get("destination_code") or ""
+    )
+    origin_is_country = bool(identity.get("origin_is_country"))
+    destination_is_country = bool(identity.get("destination_is_country"))
+    return argparse.Namespace(
+        command="page",
+        origin=None if mode == "expanded_route" and origin_is_country else origin_input,
+        destination=None if mode == "expanded_route" and destination_is_country else destination_input,
+        origin_country=origin_input if mode == "expanded_route" and origin_is_country else None,
+        destination_country=destination_input if mode == "expanded_route" and destination_is_country else None,
+        country_airport_limit=int(identity.get("airport_limit") or COUNTRY_ROUTE_DEFAULT_AIRPORT_LIMIT),
+        date=str(identity.get("date") or ""),
+        return_date=str(identity.get("return_date") or "") or None,
+        date_window=max(int(identity.get("date_window_days") or 0), 0),
+        regions=regions,
+        wait=int(getattr(args, "wait", 10)),
+        timeout=int(getattr(args, "timeout", 30)),
+        transport=str(getattr(args, "transport", "opencli")),
+        exact_airport=bool(identity.get("exact_airport")),
+        preview_only=False,
+        rerun_failed=False,
+        show_delta=bool(getattr(args, "show_delta", False)),
+        show_plan=False,
+        fetch_pipeline=str(getattr(args, "fetch_pipeline", "balanced")),
+        save=bool(getattr(args, "save", True)),
+    )
 
 
 class SimpleCLI:
@@ -627,10 +719,12 @@ class SimpleCLI:
                     "price_source": row.get("price_source"),
                     "evidence_text": row.get("evidence_text"),
                     "parser_warnings": row.get("parser_warnings") or [],
+                    "fallback_attempts": row.get("fallback_attempts") or [],
                     "price_candidates_count": row.get("price_candidates_count") or 0,
                     "selected_candidate_rank": row.get("selected_candidate_rank"),
                     "candidate_sources": row.get("candidate_sources") or [],
                     "readiness": row.get("readiness"),
+                    "execution_policy_mode": row.get("execution_policy_mode") or "exact",
                 }
             )
         return snapshots
@@ -780,10 +874,12 @@ class SimpleCLI:
                     "price_source": quote.get("price_source"),
                     "evidence_text": quote.get("evidence_text"),
                     "parser_warnings": quote.get("parser_warnings") or [],
+                    "fallback_attempts": quote.get("fallback_attempts") or [],
                     "price_candidates_count": quote.get("price_candidates_count") or 0,
                     "selected_candidate_rank": quote.get("selected_candidate_rank"),
                     "candidate_sources": quote.get("candidate_sources") or [],
                     "readiness": quote.get("readiness"),
+                    "execution_policy_mode": quote.get("execution_policy_mode") or "exact",
                 }
             )
         return self._sort_simplified_rows(simplified)
@@ -2082,6 +2178,101 @@ class SimpleCLI:
         return asyncio.run(self.run_page_command(args))
 
 
+async def run_auto_refresh_once_command(args: argparse.Namespace) -> int:
+    lock_file = _auto_refresh_lock_path().open("a+", encoding="utf-8")
+    try:
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        print("后台自动复扫已在运行，本次跳过。")
+        lock_file.close()
+        return 0
+    try:
+        if bool(getattr(args, "only_on_ac_power", False)) and not _is_ac_power_connected():
+            print("当前未接入电源，后台自动复扫跳过。")
+            return 0
+        store = ScanHistoryStore()
+        due_configs = store.get_due_auto_refresh_configs(
+            limit=max(int(getattr(args, "limit", 1)), 1),
+            auto_refresh_mode="background",
+        )
+        if not due_configs:
+            print("没有到期的后台自动复扫任务。")
+            return 0
+        if bool(getattr(args, "dry_run", False)):
+            for config in due_configs:
+                print(f"DRY RUN: {config.title}")
+            return 0
+        failures = 0
+        cli = SimpleCLI()
+        for config in due_configs:
+            print(f"后台自动复扫触发: {config.title}")
+            store.mark_alert_auto_refreshed(config.query_payload)
+            scan_args = _build_args_from_saved_query(config.query_payload, args)
+            result = await cli.run_page_command(scan_args)
+            if result != 0:
+                failures += 1
+                print(f"后台自动复扫失败: {config.title} (exit={result})")
+        return 1 if failures else 0
+    finally:
+        try:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+        finally:
+            lock_file.close()
+
+
+def _launch_agent_path() -> Path:
+    return Path.home() / "Library" / "LaunchAgents" / f"{LAUNCHD_LABEL}.plist"
+
+
+def install_auto_refresh_launchd(args: argparse.Namespace) -> int:
+    interval_seconds = max(int(getattr(args, "interval_minutes", DEFAULT_LAUNCHD_INTERVAL_MINUTES)), 1) * 60
+    plist_path = _launch_agent_path()
+    plist_path.parent.mkdir(parents=True, exist_ok=True)
+    stdout_log = get_log_file("background_auto_refresh.out.log")
+    stderr_log = get_log_file("background_auto_refresh.err.log")
+    program_args = [
+        sys.executable,
+        str(PROJECT_ROOT / "cli.py"),
+        "auto-refresh-once",
+        "--limit",
+        str(max(int(getattr(args, "limit", 1)), 1)),
+    ]
+    if not bool(getattr(args, "save", True)):
+        program_args.append("--no-save")
+    if bool(getattr(args, "only_on_ac_power", False)):
+        program_args.append("--only-on-ac-power")
+    plist = {
+        "Label": LAUNCHD_LABEL,
+        "ProgramArguments": program_args,
+        "WorkingDirectory": str(PROJECT_ROOT),
+        "StartInterval": interval_seconds,
+        "RunAtLoad": bool(getattr(args, "run_at_load", True)),
+        "StandardOutPath": str(stdout_log),
+        "StandardErrorPath": str(stderr_log),
+        "EnvironmentVariables": {
+            "PATH": "/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin",
+        },
+    }
+    with plist_path.open("wb") as handle:
+        plistlib.dump(plist, handle, sort_keys=False)
+    subprocess.run(["launchctl", "unload", str(plist_path)], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    subprocess.run(["launchctl", "load", str(plist_path)], check=False)
+    print(f"已安装后台自动复扫 launchd: {plist_path}")
+    print(f"调度间隔: {interval_seconds // 60} 分钟；日志: {stdout_log}")
+    return 0
+
+
+def uninstall_auto_refresh_launchd() -> int:
+    plist_path = _launch_agent_path()
+    if plist_path.exists():
+        subprocess.run(["launchctl", "unload", str(plist_path)], check=False)
+        plist_path.unlink()
+        print(f"已卸载后台自动复扫 launchd: {plist_path}")
+    else:
+        print("未找到后台自动复扫 launchd 配置。")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Skyscanner 多市场 CLI。默认推荐浏览器页面模式（Comet 优先）。",
@@ -2132,6 +2323,53 @@ def build_parser() -> argparse.ArgumentParser:
         dest="show_samples",
         action="store_false",
         help="仅打印汇总统计",
+    )
+
+    auto_once = subparsers.add_parser(
+        "auto-refresh-once",
+        help="检查并执行一次到期的后台自动复扫任务",
+    )
+    auto_once.add_argument("--limit", type=int, default=1, help="本次最多执行多少条后台复扫配置")
+    auto_once.add_argument("--wait", type=int, default=10, help="打开结果页后的等待秒数")
+    auto_once.add_argument("--timeout", type=int, default=30, help="HTTP/CDP 超时")
+    auto_once.add_argument(
+        "--transport",
+        choices=["scrapling", "page", "opencli"],
+        default="opencli",
+        help="后台复扫使用的抓取传输",
+    )
+    auto_once.add_argument(
+        "--fetch-pipeline",
+        choices=["fast", "balanced", "session_heavy"],
+        default="balanced",
+        help="Scrapling 抓取策略链",
+    )
+    auto_once.add_argument("--show-delta", action="store_true", help="扫描结束后打印变化摘要")
+    auto_once.add_argument("--dry-run", action="store_true", help="只打印到期任务，不执行扫描")
+    auto_once.add_argument("--only-on-ac-power", action="store_true", help="仅在接入电源时运行后台复扫")
+    auto_once.add_argument("--save", dest="save", action="store_true", default=True, help="保存 Markdown 结果")
+    auto_once.add_argument("--no-save", dest="save", action="store_false", help="不保存 Markdown 结果")
+
+    install_auto = subparsers.add_parser(
+        "install-auto-refresh",
+        help="安装 macOS launchd 后台自动复扫调度",
+    )
+    install_auto.add_argument(
+        "--interval-minutes",
+        type=int,
+        default=DEFAULT_LAUNCHD_INTERVAL_MINUTES,
+        help="launchd 检查间隔，默认 600 分钟",
+    )
+    install_auto.add_argument("--limit", type=int, default=1, help="每次调度最多执行多少条后台复扫配置")
+    install_auto.add_argument("--run-at-load", dest="run_at_load", action="store_true", default=True)
+    install_auto.add_argument("--no-run-at-load", dest="run_at_load", action="store_false")
+    install_auto.add_argument("--only-on-ac-power", action="store_true", help="写入 launchd 后仅接电时执行复扫")
+    install_auto.add_argument("--save", dest="save", action="store_true", default=True)
+    install_auto.add_argument("--no-save", dest="save", action="store_false")
+
+    subparsers.add_parser(
+        "uninstall-auto-refresh",
+        help="卸载 macOS launchd 后台自动复扫调度",
     )
 
     page = subparsers.add_parser("page", help="打开各市场结果页并抽取最佳价和最低价")
@@ -2245,6 +2483,15 @@ def main() -> int:
 
     if args.command == "replay-failures":
         return run_failure_replay_command(args)
+
+    if args.command == "auto-refresh-once":
+        return asyncio.run(run_auto_refresh_once_command(args))
+
+    if args.command == "install-auto-refresh":
+        return install_auto_refresh_launchd(args)
+
+    if args.command == "uninstall-auto-refresh":
+        return uninstall_auto_refresh_launchd()
 
     if args.command == "page":
         return asyncio.run(cli.run_page_command(args))

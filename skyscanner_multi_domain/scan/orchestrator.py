@@ -40,6 +40,8 @@ FailureClass = Literal[
     "parse",           # page visible but price not found in parser
     "empty_shell",     # page body nearly empty / near-blank shell
     "no_flights",      # search completed but no itinerary results exist
+    "redirect",        # region redirect (e.g. forced to home country domain)
+    "unsupported",     # route not supported by this market
     "browser_missing", # CDP transport: no browser tab for domain
     "transport_error", # opencli / page eval internal error
     "other",           # everything else
@@ -73,6 +75,9 @@ _STATUS_TO_CLASS: dict[str, FailureClass] = {
     "scrapling_parse_failed": "parse",
     "opencli_no_flights":     "no_flights",
     "page_no_flights":        "no_flights",
+    "page_region_redirect":   "redirect",
+    "page_unsupported_route": "unsupported",
+    "page_empty_shell":       "empty_shell",
     # shell
     "page_missing":          "browser_missing",
     "page_missing_ws":       "browser_missing",
@@ -94,6 +99,8 @@ def failure_action(failure_class: FailureClass) -> FailureAction:
         "parse":           FailureAction.RETRY_BROWSER,
         "empty_shell":     FailureAction.RETRY_BROWSER,
         "no_flights":      FailureAction.NONE,
+        "redirect":        FailureAction.NONE,
+        "unsupported":     FailureAction.NONE,
         "browser_missing": FailureAction.NONE,
         "transport_error": FailureAction.RETRY_BROWSER,
         "other":           FailureAction.NONE,

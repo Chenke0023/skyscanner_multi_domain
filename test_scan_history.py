@@ -294,6 +294,7 @@ def test_alert_config_round_trip_and_due_refresh(tmp_path: Path) -> None:
     due = store.get_due_auto_refresh_configs(limit=5)
 
     assert saved.target_price == 999.0
+    assert saved.auto_refresh_mode == "app"
     assert fetched is not None
     assert fetched.drop_amount == 120.0
     assert len(due) == 1
@@ -301,6 +302,30 @@ def test_alert_config_round_trip_and_due_refresh(tmp_path: Path) -> None:
 
     store.mark_alert_auto_refreshed(query_payload)
     assert store.get_due_auto_refresh_configs(limit=5) == []
+
+
+def test_background_auto_refresh_configs_are_filterable(tmp_path: Path) -> None:
+    store = ScanHistoryStore(tmp_path / "scan_history.sqlite3")
+    query_payload = {
+        "identity": {"mode": "point_to_point", "origin_code": "PEK", "destination_code": "HKG"},
+        "display": {"title": "北京 -> 香港"},
+    }
+
+    store.toggle_favorite(query_payload)
+    saved = store.save_alert_config(
+        query_payload,
+        notifications_enabled=True,
+        target_price=None,
+        drop_amount=None,
+        auto_refresh_minutes=30,
+        auto_refresh_mode="background",
+    )
+
+    assert saved.auto_refresh_mode == "background"
+    assert store.get_due_auto_refresh_configs(limit=5, auto_refresh_mode="app") == []
+    due = store.get_due_auto_refresh_configs(limit=5, auto_refresh_mode="background")
+    assert len(due) == 1
+    assert due[0].query_key == saved.query_key
 
 
 def test_toggle_favorite_removes_alert_config(tmp_path: Path) -> None:

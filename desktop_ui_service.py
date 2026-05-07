@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import argparse
 import importlib.util
 import re
 import subprocess
@@ -14,7 +15,7 @@ from pathlib import Path
 from typing import Any
 
 from skyscanner_multi_domain.runtime.paths import get_gui_state_file, get_reports_dir
-from cli import SimpleCLI
+from cli import DEFAULT_LAUNCHD_INTERVAL_MINUTES, SimpleCLI, install_auto_refresh_launchd, uninstall_auto_refresh_launchd
 from skyscanner_multi_domain.scan.output_rows import CombinedQuoteRow
 from skyscanner_multi_domain.planning.date_window import format_trip_date_label
 from desktop_logic import (
@@ -57,8 +58,11 @@ from skyscanner_multi_domain.geo.location_resolver import COUNTRY_ROUTE_DEFAULT_
 from skyscanner_multi_domain.scan.history import (
     AlertConfig,
     annotate_rows_with_history,
+    build_fetch_quality_telemetry,
+    build_parser_recovery_telemetry,
     build_query_key,
     build_query_title,
+    build_snapshot_summary,
     get_failed_region_codes,
     get_quotes_for_trip_label,
     get_rows_for_trip_label,
@@ -72,6 +76,7 @@ from skyscanner_multi_domain.scan.history import (
     ScanHistoryStore,
 )
 from skyscanner_multi_domain.planning.search_plan import build_ordered_trip_dates, rank_route_pairs
+from skyscanner_multi_domain.scan.repair import build_repair_plan
 from skyscanner_neo import (
     DEFAULT_REGIONS,
     NeoCli,
@@ -345,6 +350,9 @@ class DesktopUIService:
                 str(payload.get("autoRefreshMinutes") or ""),
                 "自动复扫",
             )
+            auto_refresh_mode = str(payload.get("autoRefreshMode") or "app").strip()
+            if auto_refresh_mode not in {"app", "background"}:
+                raise ValueError("自动复扫模式必须是应用内或后台。")
             if target_price is None and drop_amount is None and auto_refresh_minutes is None:
                 raise ValueError("至少填写一个提醒条件或自动复扫间隔。")
             if not self.history_store.is_favorite_query_key(build_query_key(query_payload)):
@@ -356,6 +364,7 @@ class DesktopUIService:
                 target_price=target_price,
                 drop_amount=drop_amount,
                 auto_refresh_minutes=auto_refresh_minutes,
+                auto_refresh_mode=auto_refresh_mode,
                 notify_on_recovery=bool(payload.get("notifyOnRecovery", True)),
                 notify_on_new_low=bool(payload.get("notifyOnNewLow", True)),
             )
@@ -376,6 +385,47 @@ class DesktopUIService:
             self._apply_alert_config_locked(None)
             self._log_locked("已清除当前路线的提醒设置。")
             return {"ok": True}
+
+    def install_background_auto_refresh(self, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        payload = payload or {}
+        interval_minutes = self._parse_optional_positive_int(
+            str(payload.get("intervalMinutes") or DEFAULT_LAUNCHD_INTERVAL_MINUTES),
+            "后台调度间隔",
+        )
+        if interval_minutes is None:
+            interval_minutes = DEFAULT_LAUNCHD_INTERVAL_MINUTES
+        limit = self._parse_optional_positive_int(str(payload.get("limit") or "1"), "每次执行数量") or 1
+        only_on_ac_power = bool(payload.get("onlyOnAcPower", True))
+        result = install_auto_refresh_launchd(
+            argparse.Namespace(
+                interval_minutes=interval_minutes,
+                limit=limit,
+                run_at_load=True,
+                only_on_ac_power=only_on_ac_power,
+                save=True,
+            )
+        )
+        if result != 0:
+            raise RuntimeError("后台调度安装失败。")
+        with self._lock:
+            self._log_locked(
+                f"已安装后台自动复扫调度: 每 {interval_minutes} 分钟检查一次"
+                + ("，仅接电运行。" if only_on_ac_power else "。")
+            )
+        return {
+            "ok": True,
+            "intervalMinutes": interval_minutes,
+            "limit": limit,
+            "onlyOnAcPower": only_on_ac_power,
+        }
+
+    def uninstall_background_auto_refresh(self) -> dict[str, Any]:
+        result = uninstall_auto_refresh_launchd()
+        if result != 0:
+            raise RuntimeError("后台调度卸载失败。")
+        with self._lock:
+            self._log_locked("已卸载后台自动复扫调度。")
+        return {"ok": True}
 
     def queue_failure_region(self, payload: dict[str, Any]) -> dict[str, Any]:
         region_code = str(payload.get("regionCode") or "").strip().upper()
@@ -721,7 +771,8 @@ class DesktopUIService:
         if config.drop_amount is not None:
             parts.append(f"再降 ≥ ¥{config.drop_amount:,.0f}")
         if config.auto_refresh_minutes is not None and config.auto_refresh_minutes > 0:
-            parts.append(f"自动复扫 {config.auto_refresh_minutes} 分钟")
+            mode_label = "后台" if config.auto_refresh_mode == "background" else "应用内"
+            parts.append(f"{mode_label}自动复扫 {config.auto_refresh_minutes} 分钟")
         if config.notifications_enabled:
             parts.append("桌面通知开启")
         return "；".join(parts) if parts else "当前路线已保存提醒，但未启用具体条件。"
@@ -1048,6 +1099,9 @@ class DesktopUIService:
         trust_lines = self._format_trust_history_lines(history_records[0])
         if trust_lines:
             lines.extend(trust_lines)
+        fetch_lines = self._format_fetch_quality_lines(history_records[0])
+        if fetch_lines:
+            lines.extend(fetch_lines)
         return "\n".join(lines)
 
     def _format_plan_telemetry_lines(self, telemetry: dict[str, Any]) -> list[str]:
@@ -1112,6 +1166,59 @@ class DesktopUIService:
             f"- Fallback/恢复解析结果: {len(fallback_rows)}",
             f"- Parser warnings: {len(warnings)}",
         ]
+
+    def _format_fetch_quality_lines(self, record: Any) -> list[str]:
+        payload = getattr(record, "query_payload", {}) or {}
+        fetch = payload.get("fetch_quality_telemetry")
+        parser = payload.get("parser_recovery_telemetry")
+        snapshot = payload.get("snapshot_summary")
+        if not isinstance(fetch, dict):
+            return []
+        lines = [
+            "",
+            "抓取质量:",
+            f"- 最终命中: {fetch.get('fetch_price_found_count', 0)}/{fetch.get('fetch_total_regions', 0)}",
+            f"- OpenCLI 直接命中: {fetch.get('opencli_direct_price_found_count', 0)}",
+            f"- Fallback 救回: {fetch.get('fallback_rescued_count', 0)}",
+            f"- Challenge: {fetch.get('fetch_challenge_count', 0)}",
+            f"- Tabs opened/reused: {fetch.get('tab_open_total', 0)}/{fetch.get('tab_reuse_total', 0)}",
+        ]
+        if isinstance(parser, dict):
+            lines.append(f"- Parser candidates: {parser.get('price_candidate_total', 0)}")
+        if isinstance(snapshot, dict):
+            lines.append(f"- Snapshot recommended: {snapshot.get('snapshot_recommended_count', 0)}")
+        return lines
+
+    def _build_trust_payload_locked(self) -> dict[str, Any]:
+        quote_snapshots = deepcopy(self._quote_snapshots_by_date)
+        flat_quotes = [
+            quote
+            for _trip_label, quotes in quote_snapshots
+            for quote in quotes
+            if isinstance(quote, dict)
+        ]
+        repair_plan = build_repair_plan(flat_quotes)
+        return {
+            "fetchQualityTelemetry": build_fetch_quality_telemetry(quote_snapshots),
+            "parserRecoveryTelemetry": build_parser_recovery_telemetry(quote_snapshots),
+            "snapshotSummary": build_snapshot_summary(quote_snapshots),
+            "repairPlan": {
+                "summary": repair_plan.summary,
+                "tasks": [
+                    {
+                        "region": task.region,
+                        "route_label": task.route_label,
+                        "date_label": task.date_label,
+                        "url": task.url,
+                        "original_status": task.original_status,
+                        "original_failure_class": task.original_failure_class,
+                        "recommended_action": task.recommended_action,
+                        "automatic": task.automatic,
+                    }
+                    for task in repair_plan.tasks
+                ],
+            },
+        }
 
     def _refresh_result_views_locked(self) -> None:
         success_rows = [deepcopy(row) for row in self._display_rows if _row_has_price(row)]
@@ -1430,6 +1537,7 @@ class DesktopUIService:
                 "displayRows": deepcopy(self._display_rows),
                 "rowsByDate": deepcopy(self._rows_by_date),
                 "quoteSnapshotsByDate": deepcopy(self._quote_snapshots_by_date),
+                "trust": self._build_trust_payload_locked(),
             },
             "outputs": {
                 "currentOutput": _serialize_path(self._current_output),
@@ -1443,7 +1551,7 @@ class DesktopUIService:
             if self._busy or now - self._last_auto_refresh_check_at < 30:
                 return
             self._last_auto_refresh_check_at = now
-        due_configs = self.history_store.get_due_auto_refresh_configs(limit=1)
+        due_configs = self.history_store.get_due_auto_refresh_configs(limit=1, auto_refresh_mode="app")
         if not due_configs:
             return
         config = due_configs[0]

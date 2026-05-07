@@ -250,9 +250,39 @@ Current OpenCLI behavior:
 - OpenCLI is the default browser automation fetch path.
 - The OpenCLI tab pool is serial and bounded: `region_concurrency` controls retained tab lanes, not parallel market execution.
 - The scanner does not prune markets, early stop, or skip tasks.
+- Exact Mode is the default execution policy and scans the full planned market set.
+- Fast Mode is policy scaffold only; pruning, early stop, and task skipping are not enabled by default.
+- Repair Mode builds targeted failed-market repair plans without rescanning successful markets.
 - Challenge/captcha pages are identified and recorded; they are not bypassed.
 - Fetch history stores `fetch_quality_telemetry`, `parser_recovery_telemetry`, and `snapshot_summary`.
 - Failed or low-confidence OpenCLI parses can write bounded JSON snapshots under `logs/snapshots/opencli/` for offline parser replay.
+
+后台自动复扫：
+
+```bash
+# 只检查到期的后台复扫配置，不执行扫描
+python3 cli.py auto-refresh-once --dry-run
+
+# 执行一次到期的后台复扫配置
+python3 cli.py auto-refresh-once --limit 1
+
+# 仅在接入电源时执行后台复扫
+python3 cli.py auto-refresh-once --limit 1 --only-on-ac-power
+
+# 安装 macOS launchd 调度器，默认每 600 分钟检查一次
+python3 cli.py install-auto-refresh --limit 1 --only-on-ac-power
+
+# 卸载 macOS launchd 调度器
+python3 cli.py uninstall-auto-refresh
+```
+
+后台任务只处理 UI 中选择为“后台”的自动复扫配置；“应用内”配置仍由桌面 App 打开时的轮询触发。后台命令使用 `runtime/background_auto_refresh.lock` 做进程锁，避免多次调度重叠执行。
+
+Legacy Tk status:
+
+- `legacy/gui.py` and root-level `gui.py` are frozen compatibility entry points.
+- New end-user UX must be implemented in `desktop_webview.py`, `desktop_ui_service.py`, and `webui/`.
+- See `docs/legacy_tk_policy.md`.
 
 验证浏览器会话持久化：
 

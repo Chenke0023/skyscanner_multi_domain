@@ -18,6 +18,7 @@ type AlertDraft = {
   targetPrice: string;
   dropAmount: string;
   autoRefreshMinutes: string;
+  autoRefreshMode: "app" | "background";
   notificationsEnabled: boolean;
   notifyOnRecovery: boolean;
   notifyOnNewLow: boolean;
@@ -27,9 +28,20 @@ const defaultAlertDraft: AlertDraft = {
   targetPrice: "",
   dropAmount: "",
   autoRefreshMinutes: "",
+  autoRefreshMode: "app",
   notificationsEnabled: true,
   notifyOnRecovery: true,
   notifyOnNewLow: true,
+};
+
+type BackgroundScheduleDraft = {
+  intervalMinutes: string;
+  onlyOnAcPower: boolean;
+};
+
+const defaultBackgroundScheduleDraft: BackgroundScheduleDraft = {
+  intervalMinutes: "600",
+  onlyOnAcPower: true,
 };
 
 const emptySuggestions: SuggestionMap = {
@@ -79,6 +91,16 @@ function warningsSummary(value: unknown): string {
   if (!cleaned.length) return "-";
   if (cleaned.length === 1) return cleaned[0];
   return `${cleaned.length} 项`;
+}
+
+function numberValue(value: unknown): number {
+  return typeof value === "number" ? value : 0;
+}
+
+function listSummary(value: unknown): string {
+  if (!Array.isArray(value)) return "-";
+  const cleaned = value.map((item) => String(item).trim()).filter(Boolean);
+  return cleaned.length ? cleaned.join(", ") : "-";
 }
 
 function planProgressText(progress: UIState["status"]["progress"]): string {
@@ -469,6 +491,86 @@ function DataTable({
   );
 }
 
+function FetchSummaryCard({ trust }: { trust: UIState["results"]["trust"] }) {
+  const fetch = trust?.fetchQualityTelemetry ?? {};
+  const parser = trust?.parserRecoveryTelemetry ?? {};
+  const snapshot = trust?.snapshotSummary ?? {};
+  const repair = trust?.repairPlan?.summary ?? {};
+  const total = numberValue(fetch.fetch_total_regions);
+  if (!total) return null;
+  const items = [
+    ["最终命中", `${numberValue(fetch.fetch_price_found_count)} / ${total}`],
+    ["OpenCLI 直接", numberValue(fetch.opencli_direct_price_found_count)],
+    ["Fallback 救回", numberValue(fetch.fallback_rescued_count)],
+    ["Challenge", numberValue(fetch.fetch_challenge_count)],
+    ["Parse failed", numberValue(fetch.fetch_parse_failed_count)],
+    ["Tabs", `${numberValue(fetch.tab_open_total)} opened / ${numberValue(fetch.tab_reuse_total)} reused`],
+    ["Candidates", numberValue(parser.price_candidate_total)],
+    ["Snapshots", numberValue(snapshot.snapshot_recommended_count)],
+    ["Repair", numberValue(repair.total_repair_tasks)],
+  ];
+  return (
+    <section className="trust-summary-panel">
+      <div>
+        <p className="eyebrow">Fetch Trust</p>
+        <h3>抓取与解析质量</h3>
+      </div>
+      <div className="trust-metric-grid">
+        {items.map(([label, value]) => (
+          <div key={String(label)} className="trust-metric">
+            <span>{label}</span>
+            <strong>{String(value)}</strong>
+          </div>
+        ))}
+      </div>
+    </section>
+  );
+}
+
+function FailureReasonPanel({ trust }: { trust: UIState["results"]["trust"] }) {
+  const byClass = trust?.repairPlan?.summary?.by_failure_class;
+  const tasks = trust?.repairPlan?.tasks ?? [];
+  if (!tasks.length && (!byClass || typeof byClass !== "object")) return null;
+  const entries = byClass && typeof byClass === "object" ? Object.entries(byClass) : [];
+  return (
+    <section className="trust-detail-panel">
+      <h4>失败市场修复</h4>
+      <div className="failure-chip-row">
+        {entries.map(([reason, count]) => (
+          <span key={reason} className="failure-chip">{reason}: {String(count)}</span>
+        ))}
+      </div>
+      <div className="repair-action-row">
+        <button className="toolbar-button" type="button">重试 parse_failed</button>
+        <button className="toolbar-button" type="button">重试 timeout</button>
+        <button className="toolbar-button" type="button">打开 challenge 链接</button>
+      </div>
+    </section>
+  );
+}
+
+function ParserEvidencePanel({ rows }: { rows: ResultRow[] }) {
+  const interesting = rows.filter((row) => row.evidence_text || row.price_candidates_count || row.fallback_attempts?.length).slice(0, 5);
+  if (!interesting.length) return null;
+  return (
+    <section className="trust-detail-panel">
+      <h4>解析证据</h4>
+      <div className="evidence-list">
+        {interesting.map((row, index) => (
+          <div key={`${String(row.region_code)}-${index}`} className="evidence-item">
+            <strong>{String(row.region_name ?? row.region_code ?? "-")}</strong>
+            <span>来源 {priceSourceLabel(row.price_source)} · 候选 {String(row.price_candidates_count ?? 0)} · 选中 #{String(row.selected_candidate_rank ?? "-")}</span>
+            <small>候选来源：{listSummary(row.candidate_sources)}</small>
+            <small>Readiness：{String(row.readiness ?? "-")}</small>
+            {row.evidence_text ? <p>{String(row.evidence_text)}</p> : null}
+            {row.fallback_attempts?.length ? <small>Fallback chain: {row.fallback_attempts.map((attempt) => String(attempt.transport ?? attempt.status ?? "?")).join(" -> ")}</small> : null}
+          </div>
+        ))}
+      </div>
+    </section>
+  );
+}
+
 function HistoryList({
   title,
   records,
@@ -520,6 +622,7 @@ function App() {
   const [form, setForm] = useState<FormState | null>(null);
   const [bootstrapError, setBootstrapError] = useState("");
   const [alertDraft, setAlertDraft] = useState<AlertDraft>(defaultAlertDraft);
+  const [backgroundScheduleDraft, setBackgroundScheduleDraft] = useState<BackgroundScheduleDraft>(defaultBackgroundScheduleDraft);
   const [leftDrawerOpen, setLeftDrawerOpen] = useState(false);
   const [rightDrawerOpen, setRightDrawerOpen] = useState(false);
   const [showDetails, setShowDetails] = useState(false);
@@ -568,6 +671,7 @@ function App() {
           autoRefreshMinutes: state.alerts.config?.auto_refresh_minutes
             ? String(state.alerts.config.auto_refresh_minutes)
             : "",
+          autoRefreshMode: state.alerts.config?.auto_refresh_mode ?? "app",
           notificationsEnabled: state.alerts.config?.notifications_enabled ?? true,
           notifyOnRecovery: state.alerts.config?.notify_on_recovery ?? true,
           notifyOnNewLow: state.alerts.config?.notify_on_new_low ?? true,
@@ -717,6 +821,32 @@ function App() {
       setActionMessage("提醒设置已保存。");
     } catch (error) {
       setActionMessage(error instanceof Error ? error.message : "提醒保存失败。");
+    }
+    resetActionMessage();
+  };
+
+  const handleInstallBackgroundSchedule = async () => {
+    try {
+      const result = await desktopApi.install_background_auto_refresh({
+        intervalMinutes: backgroundScheduleDraft.intervalMinutes,
+        limit: 1,
+        onlyOnAcPower: backgroundScheduleDraft.onlyOnAcPower,
+      });
+      const interval = String(result.intervalMinutes ?? backgroundScheduleDraft.intervalMinutes);
+      setBackgroundScheduleDraft((current) => ({ ...current, intervalMinutes: interval }));
+      setActionMessage(`后台调度已安装：每 ${interval} 分钟检查一次。`);
+    } catch (error) {
+      setActionMessage(error instanceof Error ? error.message : "后台调度安装失败。");
+    }
+    resetActionMessage();
+  };
+
+  const handleUninstallBackgroundSchedule = async () => {
+    try {
+      await desktopApi.uninstall_background_auto_refresh();
+      setActionMessage("后台调度已卸载。");
+    } catch (error) {
+      setActionMessage(error instanceof Error ? error.message : "后台调度卸载失败。");
     }
     resetActionMessage();
   };
@@ -940,6 +1070,8 @@ function App() {
               ) : null}
             </section>
 
+            <FetchSummaryCard trust={uiState.results.trust} />
+
             {uiState.results.topRecommendations.length > 0 && (
               <div className="top-rec-panel">
                 <div className="panel-label">Top 方案</div>
@@ -1003,6 +1135,7 @@ function App() {
 
                     <div className="table-section">
                       <h4>成功结果 <small>{filteredResults.successRows.length}</small></h4>
+                      <ParserEvidencePanel rows={filteredResults.successRows} />
                       <DataTable
                         columns={[
                           { key: "date", label: "日期" },
@@ -1032,6 +1165,7 @@ function App() {
                           运行补扫队列
                         </button>
                       </h4>
+                      <FailureReasonPanel trust={uiState.results.trust} />
                       <DataTable
                         columns={[
                           { key: "date", label: "日期" },
@@ -1182,19 +1316,50 @@ function App() {
                   <input className="w-full rounded-xl border border-stone-200 bg-white px-3.5 py-2.5 text-stone-800 outline-none transition focus-visible:ring-2 focus-visible:ring-stone-400/20 focus-visible:border-stone-300" value={alertDraft.dropAmount} onChange={(e) => setAlertDraft((c) => ({ ...c, dropAmount: e.target.value }))} />
                   <label className="block text-xs font-medium tracking-wider uppercase text-stone-400 mb-1">自动复扫(分钟)</label>
                   <input className="w-full rounded-xl border border-stone-200 bg-white px-3.5 py-2.5 text-stone-800 outline-none transition focus-visible:ring-2 focus-visible:ring-stone-400/20 focus-visible:border-stone-300" value={alertDraft.autoRefreshMinutes} onChange={(e) => setAlertDraft((c) => ({ ...c, autoRefreshMinutes: e.target.value }))} />
+                  <label className="block text-xs font-medium tracking-wider uppercase text-stone-400 mb-1">复扫模式</label>
+                  <select
+                    className="w-full rounded-xl border border-stone-200 bg-white px-3.5 py-2.5 text-stone-800 outline-none transition focus-visible:ring-2 focus-visible:ring-stone-400/20 focus-visible:border-stone-300"
+                    value={alertDraft.autoRefreshMode}
+                    onChange={(e) => setAlertDraft((c) => ({ ...c, autoRefreshMode: e.target.value === "background" ? "background" : "app" }))}
+                  >
+                    <option value="app">应用内</option>
+                    <option value="background">后台</option>
+                  </select>
                 </div>
                 <div className="mt-4 flex flex-col gap-3">
                   <Switch checked={alertDraft.notificationsEnabled} onChange={(v) => setAlertDraft((c) => ({ ...c, notificationsEnabled: v }))} label="启用桌面通知" />
                   <Switch checked={alertDraft.notifyOnRecovery} onChange={(v) => setAlertDraft((c) => ({ ...c, notifyOnRecovery: v }))} label="通知失败恢复" />
                   <Switch checked={alertDraft.notifyOnNewLow} onChange={(v) => setAlertDraft((c) => ({ ...c, notifyOnNewLow: v }))} label="通知刷新历史新低" />
                 </div>
-                <div className="drawer-actions">
-                  <button className="toolbar-button active" onClick={handleSaveAlerts} type="button">保存设置</button>
-                  <button className="toolbar-button" onClick={() => desktopApi.clear_alert_config({ form }).then(() => desktopApi.get_ui_state().then(setUiState))} type="button">清除</button>
-                </div>
-              </div>
+	                <div className="drawer-actions">
+	                  <button className="toolbar-button active" onClick={handleSaveAlerts} type="button">保存设置</button>
+	                  <button className="toolbar-button" onClick={() => desktopApi.clear_alert_config({ form }).then(() => desktopApi.get_ui_state().then(setUiState))} type="button">清除</button>
+	                </div>
+	              </div>
 
-              <div className="drawer-section">
+	              <div className="drawer-section">
+	                <h4>后台调度</h4>
+	                <p className="drawer-hint">后台模式路线会由 macOS 定时检查，到期后才执行复扫。</p>
+	                <div className="grid gap-3">
+	                  <label className="block text-xs font-medium tracking-wider uppercase text-stone-400 mb-1">调度间隔(分钟)</label>
+	                  <input
+	                    className="w-full rounded-xl border border-stone-200 bg-white px-3.5 py-2.5 text-stone-800 outline-none transition focus-visible:ring-2 focus-visible:ring-stone-400/20 focus-visible:border-stone-300"
+	                    value={backgroundScheduleDraft.intervalMinutes}
+	                    onChange={(e) => setBackgroundScheduleDraft((current) => ({ ...current, intervalMinutes: e.target.value }))}
+	                  />
+	                  <Switch
+	                    checked={backgroundScheduleDraft.onlyOnAcPower}
+	                    onChange={(value) => setBackgroundScheduleDraft((current) => ({ ...current, onlyOnAcPower: value }))}
+	                    label="仅接电时运行"
+	                  />
+	                </div>
+	                <div className="drawer-actions">
+	                  <button className="toolbar-button active" onClick={handleInstallBackgroundSchedule} type="button">安装/更新后台调度</button>
+	                  <button className="toolbar-button" onClick={handleUninstallBackgroundSchedule} type="button">卸载后台调度</button>
+	                </div>
+	              </div>
+
+	              <div className="drawer-section">
                 <h4>环境状态</h4>
                 <button className="toolbar-button" onClick={handleEnvironmentCheck} type="button">检查环境</button>
                 {uiState.environment.lines.length ? (
