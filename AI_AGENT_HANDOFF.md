@@ -101,9 +101,9 @@ python cli.py page -o 北京 -d 阿拉木图 -t 2026-05-20 --date-window 1 --sho
 ## 6. Current Next Tasks
 
 - Keep `desktop_ui_service -> cli.SimpleCLI` as explicit P1 debt; do not expand desktop reuse of `SimpleCLI`.
-- Add visible plan phase/status to the desktop WebView UI.
-- Add plan telemetry display in history/details views.
-- Surface parser trust badges, warning details, and decision context in WebView result/history views.
+- Add richer WebView warning drill-down with evidence snippets per row.
+- Build failed-market repair actions beyond queue retry.
+- Start `desktop_ui_service -> cli.SimpleCLI` extraction toward a package query service.
 - Only after explainability, batch progress, and telemetry are stable, consider conservative user-confirmed early stop in fast mode.
 
 Recently completed:
@@ -111,6 +111,9 @@ Recently completed:
 - Parser diagnostics/confidence metadata now flows through `FlightQuote` and scan/report rows.
 - CLI Markdown reports show a `扫描结论` section, confidence/source/warning columns, and warning/evidence details.
 - Parser trust metadata tests and CLI report tests cover missing legacy fields, fallback warnings, decision risk hints, and date-window reports.
+- Desktop WebView status now surfaces SearchPlan phase/batch progress.
+- Desktop WebView result rows show confidence/source/warning trust fields.
+- Desktop history details show SearchPlan telemetry, failure reasons, and parser trust summaries.
 
 The fuller execution backlog is in `docs/todo.md`.
 

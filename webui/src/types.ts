@@ -3,6 +3,14 @@ export type ProgressState = {
   total: number;
   date: string;
   regionName: string;
+  active_plan_phase?: string | null;
+  plan_phase?: string | null;
+  plan_batch_id?: number | null;
+  plan_batch_count?: number | null;
+  plan_batch_reason?: string | null;
+  plan_batch_completed?: boolean | null;
+  plan_tasks_total?: number | null;
+  plan_tasks_in_batch?: number | null;
 };
 
 export type FormState = {
@@ -57,6 +65,10 @@ export type ResultRow = Record<string, unknown> & {
   isCheapestHighlight?: boolean;
   isChangedHighlight?: boolean;
   isReuseReady?: boolean;
+  confidence?: number | null;
+  price_source?: string | null;
+  parser_warnings?: string[];
+  evidence_text?: string | null;
 };
 
 export type CalendarPayload = {
