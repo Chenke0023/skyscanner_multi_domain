@@ -216,13 +216,13 @@ Acceptance:
 
 ### 11. Desktop WebView scan phase display
 
-Status: planned.
+Status: implemented baseline.
 
-Todo:
+Current implementation:
 
-- Show active phase: core route, edge dates, nearby dates, remaining verification.
-- Show tentative lowest price.
-- Show what is being verified next.
+- Desktop service progress state carries `active_plan_phase`, `plan_batch_*`, and plan task counts.
+- WebView status bar shows the active SearchPlan phase, batch index/count, and batch reason while scanning.
+- Existing result cards continue to show the tentative lowest price as partial scan rows arrive.
 
 ### 12. Failed-market repair panel
 
@@ -237,7 +237,7 @@ Todo:
 
 ### 13. SearchPlan telemetry
 
-Status: baseline telemetry exists; expand in WebView/history after PR-A.
+Status: implemented baseline in history/details.
 
 Track:
 
@@ -248,6 +248,12 @@ Track:
 - `best_date_rank`
 - `best_route_rank`
 - `failed_tasks_by_reason`
+
+Current implementation:
+
+- Scan history stores `plan_telemetry` on each recorded query payload.
+- Desktop history details show task coverage, first valid task, best-price task, best market rank, and failure reasons.
+- Desktop history details also summarize parser trust source distribution, low-confidence result count, fallback/recovered parse count, and parser warning count.
 
 ### 14. Market reliability score
 
@@ -302,10 +308,10 @@ npm --prefix webui run build
 ## Suggested Next Five Tasks
 
 1. Keep the explicit `desktop_ui_service -> cli.SimpleCLI` debt visible.
-2. Display SearchPlan phase/status in desktop WebView.
-3. Expand plan telemetry in history/details views.
-4. Surface parser trust badges and warning details in WebView result rows.
-5. Surface decision/report trust fields in scan history details.
+2. Add richer WebView warning drill-down with evidence snippets per row.
+3. Build failed-market repair actions beyond queue retry.
+4. Start `desktop_ui_service -> cli.SimpleCLI` extraction toward a package query service.
+5. Add user-confirmed price loop after trust UI has enough real samples.
 
 ## Do Not Do Yet
 

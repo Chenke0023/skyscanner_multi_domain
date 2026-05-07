@@ -1042,7 +1042,76 @@ class DesktopUIService:
             )
         if config is not None:
             lines.append(f"提醒设置: {self._format_alert_summary(config)}")
+        telemetry = (history_records[0].query_payload or {}).get("plan_telemetry")
+        if isinstance(telemetry, dict):
+            lines.extend(self._format_plan_telemetry_lines(telemetry))
+        trust_lines = self._format_trust_history_lines(history_records[0])
+        if trust_lines:
+            lines.extend(trust_lines)
         return "\n".join(lines)
+
+    def _format_plan_telemetry_lines(self, telemetry: dict[str, Any]) -> list[str]:
+        total_tasks = telemetry.get("total_tasks")
+        priced_tasks = telemetry.get("priced_tasks")
+        first_valid = telemetry.get("first_valid_price_task_index")
+        best_task = telemetry.get("best_price_task_index")
+        best_market_rank = telemetry.get("best_market_rank")
+        failed_by_reason = telemetry.get("failed_tasks_by_reason")
+        lines = [
+            "",
+            "SearchPlan 复盘:",
+            f"- 任务: {priced_tasks or 0}/{total_tasks or 0} 个拿到价格",
+            f"- 首个有效价格任务: {first_valid or '-'}",
+            f"- 最低价任务: {best_task or '-'}；市场排名: {best_market_rank or '-'}",
+        ]
+        if isinstance(failed_by_reason, dict) and failed_by_reason:
+            reason_text = "、".join(
+                f"{reason}×{count}"
+                for reason, count in sorted(failed_by_reason.items())
+            )
+            lines.append(f"- 失败原因: {reason_text}")
+        return lines
+
+    def _format_trust_history_lines(self, record: Any) -> list[str]:
+        rows = [
+            row
+            for _trip_label, grouped_rows in getattr(record, "rows_by_date", []) or []
+            for row in grouped_rows
+            if isinstance(row, dict)
+        ]
+        if not rows:
+            return []
+        low_confidence = [
+            row
+            for row in rows
+            if isinstance(row.get("confidence"), (int, float)) and float(row["confidence"]) < 0.6
+        ]
+        warnings = [
+            warning
+            for row in rows
+            for warning in (row.get("parser_warnings") or [])
+            if str(warning).strip()
+        ]
+        fallback_rows = [
+            row
+            for row in rows
+            if row.get("price_source") in {"first_price_fallback", "recovered_best"}
+        ]
+        source_counts: dict[str, int] = {}
+        for row in rows:
+            source = str(row.get("price_source") or "unknown")
+            source_counts[source] = source_counts.get(source, 0) + 1
+        source_text = "、".join(
+            f"{source}×{count}" for source, count in sorted(source_counts.items())
+        )
+        return [
+            "",
+            "解析可信度:",
+            f"- 来源分布: {source_text or '-'}",
+            f"- 低可信度结果: {len(low_confidence)}",
+            f"- Fallback/恢复解析结果: {len(fallback_rows)}",
+            f"- Parser warnings: {len(warnings)}",
+        ]
 
     def _refresh_result_views_locked(self) -> None:
         success_rows = [deepcopy(row) for row in self._display_rows if _row_has_price(row)]

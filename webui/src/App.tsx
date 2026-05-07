@@ -43,6 +43,57 @@ function formatMoney(value: unknown): string {
   return typeof value === "number" ? `¥${value.toLocaleString("zh-CN", { maximumFractionDigits: 2 })}` : "-";
 }
 
+const priceSourceLabels: Record<string, string> = {
+  cheapest_block: "Cheapest",
+  best_block: "Best",
+  first_price_fallback: "Fallback",
+  recovered_best: "Recovered",
+  manual_confirmed: "Confirmed",
+  unpriced: "No price",
+};
+
+function confidenceLabel(value: unknown): string {
+  if (typeof value !== "number") return "未知";
+  if (value >= 0.85) return "高";
+  if (value >= 0.6) return "中";
+  if (value >= 0.3) return "低";
+  return "极低";
+}
+
+function confidenceClass(value: unknown): string {
+  if (typeof value !== "number") return "unknown";
+  if (value >= 0.85) return "high";
+  if (value >= 0.6) return "medium";
+  return "low";
+}
+
+function priceSourceLabel(value: unknown): string {
+  const key = String(value ?? "").trim();
+  if (!key || key === "unknown") return "未知";
+  return priceSourceLabels[key] ?? key;
+}
+
+function warningsSummary(value: unknown): string {
+  if (!Array.isArray(value)) return "-";
+  const cleaned = value.map((item) => String(item).trim()).filter(Boolean);
+  if (!cleaned.length) return "-";
+  if (cleaned.length === 1) return cleaned[0];
+  return `${cleaned.length} 项`;
+}
+
+function planProgressText(progress: UIState["status"]["progress"]): string {
+  const phase = String(progress.active_plan_phase ?? progress.plan_phase ?? "").trim();
+  const batchId = progress.plan_batch_id;
+  const batchCount = progress.plan_batch_count;
+  if (!phase && !batchId && !batchCount) return "";
+  const batchText =
+    typeof batchId === "number" && typeof batchCount === "number"
+      ? `批次 ${batchId}/${batchCount}`
+      : "";
+  const reason = String(progress.plan_batch_reason ?? "").trim();
+  return [phase ? `阶段 ${phase}` : "", batchText, reason].filter(Boolean).join(" · ");
+}
+
 function parseIsoDate(value: string): Date | null {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) {
     return null;
@@ -378,9 +429,21 @@ function DataTable({
               <tr key={`${String(row.date)}-${String(row.route)}-${String(row.region_code)}-${index}`} className={rowClassName}>
                 {columns.map((column) => (
                   <td key={column.key} className={column.align === "right" ? "align-right" : ""}>
-                    {column.key.includes("price")
-                      ? formatMoney(row[column.key])
-                      : String(row[column.key] ?? "-")}
+                    {column.key.includes("price") ? (
+                      formatMoney(row[column.key])
+                    ) : column.key === "confidence" ? (
+                      <span className={`trust-badge ${confidenceClass(row.confidence)}`}>
+                        {confidenceLabel(row.confidence)}
+                      </span>
+                    ) : column.key === "price_source" ? (
+                      <span className="source-badge">{priceSourceLabel(row.price_source)}</span>
+                    ) : column.key === "parser_warnings" ? (
+                      <span className={warningsSummary(row.parser_warnings) === "-" ? "muted-cell" : "warning-cell"}>
+                        {warningsSummary(row.parser_warnings)}
+                      </span>
+                    ) : (
+                      String(row[column.key] ?? "-")
+                    )}
                   </td>
                 ))}
                 <td>
@@ -671,6 +734,7 @@ function App() {
 
   const cheapestCard = uiState.results.cheapestConclusion;
   const recommendationCard = uiState.results.recommendationConclusion;
+  const progressText = planProgressText(uiState.status.progress);
   const hasAnyResults =
     uiState.results.successRows.length > 0 ||
     uiState.results.failureRows.length > 0 ||
@@ -893,6 +957,9 @@ function App() {
                         <small>{String(row.date ?? "-")} · {String(row.route ?? "-")}</small>
                       </div>
                       <em>{formatMoney(row.cheapest_cny_price)}</em>
+                      <span className={`trust-badge ${confidenceClass(row.confidence)}`}>
+                        {confidenceLabel(row.confidence)}
+                      </span>
                     </button>
                   ))}
                 </div>
@@ -944,6 +1011,9 @@ function App() {
                           { key: "source_label", label: "来源" },
                           { key: "best_cny_price", label: "最佳价", align: "right" },
                           { key: "cheapest_cny_price", label: "最低价", align: "right" },
+                          { key: "confidence", label: "可信度" },
+                          { key: "price_source", label: "价格来源" },
+                          { key: "parser_warnings", label: "警告" },
                           { key: "delta_label", label: "变化" },
                         ]}
                         rows={filteredResults.successRows}
@@ -1027,7 +1097,9 @@ function App() {
                 )}
 
                 {detailTab === "history" && (
-                  <pre className="history-detail">{uiState.history.historyDetail}</pre>
+                  <div className="history-panel">
+                    <pre className="history-detail">{uiState.history.historyDetail}</pre>
+                  </div>
                 )}
 
                 <button className="ghost-button wide-button" onClick={() => setShowDetails(false)} type="button">
@@ -1054,6 +1126,7 @@ function App() {
               {uiState.status.progress.step}/{uiState.status.progress.total}
             </span>
           ) : null}
+          {progressText ? <span className="plan-progress-chip">{progressText}</span> : null}
         </div>
         <div className="flex items-center gap-2">
           {actionMessage ? <span className="text-sm text-stone-500">{actionMessage}</span> : null}

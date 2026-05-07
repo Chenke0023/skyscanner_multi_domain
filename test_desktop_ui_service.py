@@ -112,3 +112,57 @@ def test_desktop_progress_includes_active_plan_phase(tmp_path: Path) -> None:
     assert service._progress["plan_batch_id"] == 1
     assert service._progress["plan_batch_count"] == 3
     assert service._progress["plan_batch_reason"] == "核心路线、核心日期和高优先级市场"
+
+
+def test_history_detail_includes_plan_telemetry_and_trust_summary(tmp_path: Path) -> None:
+    service = build_service(tmp_path)
+    record = type(
+        "_Record",
+        (),
+        {
+            "query_payload": {
+                "plan_telemetry": {
+                    "total_tasks": 3,
+                    "priced_tasks": 2,
+                    "first_valid_price_task_index": 1,
+                    "best_price_task_index": 2,
+                    "best_market_rank": 1,
+                    "failed_tasks_by_reason": {"parse_failed": 1},
+                }
+            },
+            "rows_by_date": [
+                (
+                    "2026-06-01",
+                    [
+                        {
+                            "region_name": "中国",
+                            "cheapest_cny_price": 1200.0,
+                            "confidence": 0.9,
+                            "price_source": "cheapest_block",
+                            "parser_warnings": [],
+                        },
+                        {
+                            "region_name": "香港",
+                            "cheapest_cny_price": 1250.0,
+                            "confidence": 0.45,
+                            "price_source": "first_price_fallback",
+                            "parser_warnings": ["只解析到一侧价格。"],
+                        },
+                    ],
+                )
+            ],
+            "quotes_by_date": [],
+            "created_at": "2026-05-07T10:00:00",
+            "id": 1,
+        },
+    )()
+
+    detail = service._format_history_detail_locked([record])
+
+    assert "SearchPlan 复盘" in detail
+    assert "2/3 个拿到价格" in detail
+    assert "parse_failed×1" in detail
+    assert "解析可信度" in detail
+    assert "first_price_fallback×1" in detail
+    assert "低可信度结果: 1" in detail
+    assert "Parser warnings: 1" in detail
