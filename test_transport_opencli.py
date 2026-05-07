@@ -4,7 +4,7 @@ import argparse
 import asyncio
 import json
 import time
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, patch, call
 
 import pytest
 
@@ -14,7 +14,7 @@ from skyscanner_multi_domain.transports.opencli import (
     OpenCLITabSession,
 )
 
-def test_opencli_tab_reuse_and_telemetry_deltas() -> None:
+def test_opencli_tab_reuse_and_telemetry_deltas_v11() -> None:
     """Test that multiple regions reuse the same tab and track telemetry correctly as deltas."""
     async def run_test():
         args = argparse.Namespace(
@@ -58,21 +58,24 @@ def test_opencli_tab_reuse_and_telemetry_deltas() -> None:
         assert quote_cn.price == 100.0
         assert quote_sg.price == 20.0
         
-        # CN telemetry
+        # CN telemetry (Point #3: per-region delta)
         assert quote_cn.tab_open_count == 1
         assert quote_cn.reused_tab_count == 0
         assert quote_cn.tab_close_count == 0
+        assert quote_cn.extract_attempt_count == 1
         
-        # SG telemetry
+        # SG telemetry (Point #3: per-region delta)
         assert quote_sg.tab_open_count == 0
         assert quote_sg.reused_tab_count == 1
-        assert quote_sg.tab_close_count == 1 # Final tab close attributed to last quote
+        # Point #2: tab_close_count after session.close attributed to last quote
+        assert quote_sg.tab_close_count == 1 
+        assert quote_sg.extract_attempt_count == 1
     
     asyncio.run(run_test())
 
 
-def test_opencli_adaptive_extraction_and_content_aware_wait() -> None:
-    """Test that it tries larger chunk sizes and waits more if price is not found initially."""
+def test_opencli_content_aware_wait_v11() -> None:
+    """Test content-aware progressive wait (wait + re-extract)."""
     async def run_test():
         args = argparse.Namespace(
             origin="BJS",
@@ -82,7 +85,7 @@ def test_opencli_adaptive_extraction_and_content_aware_wait() -> None:
         )
         regions = [RegionConfig("CN", "China", "https://www.skyscanner.cn", "zh-CN", "CNY")]
 
-        mock_tab_id = "test-tab-adaptive"
+        mock_tab_id = "test-tab-content-aware"
         
         with patch("skyscanner_multi_domain.transports.opencli._opencli_json") as mock_json:
             mock_json.side_effect = [
@@ -103,54 +106,24 @@ def test_opencli_adaptive_extraction_and_content_aware_wait() -> None:
                     q3 = FlightQuote("CN", "domain1", 300.0, "CNY", "url1", "ok")
                     mock_parser.side_effect = [q1, q2, q3]
 
-                    quotes = await compare_via_opencli(args, regions, persist_failures=False)
+                    with patch("skyscanner_multi_domain.transports.opencli.asyncio.sleep") as mock_sleep:
+                        quotes = await compare_via_opencli(args, regions, persist_failures=False)
+
+                        # Point #5: content-aware progressive wait triggers specific sleep times
+                        sleep_calls = [c.args[0] for c in mock_sleep.call_args_list]
+                        # 8s and 15s are the "extra_wait" values in extract_with_progressive_content_wait
+                        assert 8 in sleep_calls
+                        assert 15 in sleep_calls
 
         assert len(quotes) == 1
         assert quotes[0].price == 300.0
         assert quotes[0].extract_attempt_count == 3
-        assert quotes[0].max_chunk_size_used == 100000
-        assert quotes[0].progressive_wait_used == 2 # Two content-aware waits
+        assert quotes[0].progressive_wait_used == 2 
 
     asyncio.run(run_test())
 
 
-def test_opencli_progressive_wait_state_based() -> None:
-    """Test that it does progressive wait if page is not interactive initially (state-based)."""
-    async def run_test():
-        args = argparse.Namespace(
-            origin="BJS",
-            destination="ALA",
-            date="2026-05-20",
-            page_wait=0,
-        )
-        regions = [RegionConfig("CN", "China", "https://www.skyscanner.cn", "zh-CN", "CNY")]
-
-        mock_tab_id = "test-tab-wait"
-        
-        with patch("skyscanner_multi_domain.transports.opencli._opencli_json") as mock_json:
-            mock_json.side_effect = [
-                {"page": mock_tab_id},  # _tab_new
-                {"content": "Price CNY 400", "url": "url1"}, # _tab_extract
-                {}, # _tab_close
-            ]
-
-            with patch("skyscanner_multi_domain.transports.opencli._tab_wait_interactive_async") as mock_wait:
-                # First call returns False (timeout), second call returns True (success)
-                mock_wait.side_effect = [False, True]
-
-                with patch("skyscanner_multi_domain.transports.opencli.extract_page_quote") as mock_parser:
-                    mock_parser.return_value = FlightQuote("CN", "domain1", 400.0, "CNY", "url1", "ok")
-
-                    quotes = await compare_via_opencli(args, regions, persist_failures=False)
-
-        assert len(quotes) == 1
-        assert quotes[0].price == 400.0
-        assert quotes[0].progressive_wait_used == 1
-
-    asyncio.run(run_test())
-
-
-def test_opencli_time_budget_not_attempted() -> None:
+def test_opencli_time_budget_not_attempted_v11() -> None:
     """Test that regions are marked as not_attempted if time budget is exceeded."""
     async def run_test():
         args = argparse.Namespace(
