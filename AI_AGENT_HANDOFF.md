@@ -35,6 +35,10 @@ Core engine:
 - `skyscanner_multi_domain/transports/cdp.py` — CDP/browser fallback transport
 - `skyscanner_multi_domain/transports/scrapling.py` — Scrapling legacy fallback transport
 - `skyscanner_multi_domain/parsing/page_parser.py` — Best/Cheapest page parser
+- `skyscanner_multi_domain/parsing/readiness.py` — OpenCLI page readiness classifier
+- `skyscanner_multi_domain/parsing/price_candidates.py` — candidate price collection, embedded JSON recovery, ranking
+- `skyscanner_multi_domain/diagnostics/snapshots.py` — bounded OpenCLI failure snapshots
+- `tools/replay_parser_snapshots.py` — offline parser replay for OpenCLI snapshots
 - `skyscanner_multi_domain/geo/location_resolver.py` — location/country/airport resolution
 - `skyscanner_multi_domain/geo/regions.py` — market/region configuration
 - `skyscanner_multi_domain/models.py` — shared data models
@@ -68,10 +72,13 @@ User input flows through:
 3. `geo/regions.py` builds effective market candidates.
 4. `planning/search_plan.py` ranks route/date/market candidates and can render `--show-plan`.
 5. `scan/orchestrator.py` scans ordered candidates with opencli, CDP fallback, then Scrapling fallback.
-6. `parsing/page_parser.py` extracts Best/Cheapest prices.
-7. Parser trust metadata is attached to quotes and result rows: confidence, price source, evidence text, and parser warnings.
-8. CLI Markdown reports add a decision summary, trust columns, and warning/evidence details.
-9. `scan/history.py` stores rows, quote snapshots, preview cache, and plan telemetry.
+6. OpenCLI uses a serial bounded tab pool; `region_concurrency` controls retained tab lanes, not parallel region execution.
+7. `parsing/readiness.py` classifies extracted page text as `price_ready`, `still_loading`, `challenge`, `empty_shell`, `no_flights`, or `unknown_parse_surface`.
+8. `parsing/page_parser.py` and `parsing/price_candidates.py` extract Best/Cheapest prices, collect ranked `PriceCandidate` evidence, and recover safe embedded JSON/script candidates.
+9. Parser trust metadata is attached to quotes and result rows: confidence, price source, evidence text, warnings, candidate count, selected rank, and candidate sources.
+10. `diagnostics/snapshots.py` stores bounded OpenCLI snapshots for parse failures, low-confidence recoveries, and price disagreement cases.
+11. CLI Markdown reports add a decision summary, trust columns, and warning/evidence details.
+12. `scan/history.py` stores rows, quote snapshots, preview cache, plan telemetry, fetch quality telemetry, parser recovery telemetry, and snapshot summary.
 
 Current SearchPlan behavior is intentionally conservative:
 
@@ -79,6 +86,8 @@ Current SearchPlan behavior is intentionally conservative:
 - It attaches `plan_rank`, `plan_reason`, route/date/market ranks, and telemetry.
 - It emits opencli batch progress with `active_plan_phase` and `plan_batch_*` fields.
 - It does not prune or reduce the final scan set.
+- It does not early stop or skip scan tasks.
+- It does not bypass challenge/captcha pages; challenge handling is identify, record, and require manual review or later retry.
 
 ## 4. Do Not Modify By Default
 
@@ -87,6 +96,8 @@ Current SearchPlan behavior is intentionally conservative:
 - Do not add new product logic to `skyscanner_neo.py`; move new Neo-related code into package modules first.
 - Do not turn `webui/` into a standalone cloud/web product.
 - Do not introduce SearchPlan pruning until explainability, plan metadata, and telemetry are stable.
+- Do not add challenge/captcha bypass logic.
+- Do not turn OpenCLI `region_concurrency` into implicit high-concurrency scraping without explicit design work.
 
 ## 5. Common Test Commands
 
@@ -94,8 +105,11 @@ Current SearchPlan behavior is intentionally conservative:
 python -m py_compile cli.py desktop_ui_service.py skyscanner_neo.py
 python -m py_compile skyscanner_multi_domain/scan/orchestrator.py
 python -m py_compile skyscanner_multi_domain/planning/search_plan.py
+python -m py_compile skyscanner_multi_domain/parsing/readiness.py skyscanner_multi_domain/parsing/price_candidates.py
+python -m py_compile tools/replay_parser_snapshots.py
 pytest -q
 python cli.py page -o 北京 -d 阿拉木图 -t 2026-05-20 --date-window 1 --show-plan
+python tools/replay_parser_snapshots.py logs/snapshots/opencli --json
 ```
 
 ## 6. Current Next Tasks
@@ -114,6 +128,9 @@ Recently completed:
 - Desktop WebView status now surfaces SearchPlan phase/batch progress.
 - Desktop WebView result rows show confidence/source/warning trust fields.
 - Desktop history details show SearchPlan telemetry, failure reasons, and parser trust summaries.
+- OpenCLI fetch quality telemetry distinguishes final price found, OpenCLI direct hits, fallback rescued results, failure classes, tab reuse, extract attempts, and max chunk observed.
+- PriceCandidate metadata flows through quotes/history: candidate count, selected rank, and candidate sources.
+- OpenCLI failure snapshots and `tools/replay_parser_snapshots.py` provide an offline parser recovery loop.
 
 The fuller execution backlog is in `docs/todo.md`.
 

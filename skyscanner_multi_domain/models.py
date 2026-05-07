@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Any, Optional
 import uuid
 
 
@@ -43,6 +43,10 @@ class FlightQuote:
     evidence_text: Optional[str] = None
     parser_warnings: list[str] = field(default_factory=list)
     fallback_attempts: list[dict[str, Any]] = field(default_factory=list)
+    price_candidates_count: int = 0
+    selected_candidate_rank: Optional[int] = None
+    candidate_sources: list[str] = field(default_factory=list)
+    readiness: Optional[str] = None
 
     # Telemetry fields
     tab_open_count: int = 0

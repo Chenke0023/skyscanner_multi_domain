@@ -136,16 +136,19 @@ def test_build_fetch_quality_telemetry_counts_opencli_and_fallback_metrics() -> 
         ]
     )
 
-    assert telemetry["opencli_total_regions"] == 6
-    assert telemetry["opencli_price_found_count"] == 2
-    assert telemetry["opencli_price_found_rate"] == 2 / 6
-    assert telemetry["opencli_high_confidence_count"] == 1
-    assert telemetry["opencli_low_confidence_count"] == 1
-    assert telemetry["opencli_parse_failed_count"] == 1
-    assert telemetry["opencli_timeout_count"] == 1
-    assert telemetry["opencli_loading_count"] == 1
-    assert telemetry["opencli_challenge_count"] == 1
-    assert telemetry["opencli_not_attempted_count"] == 1
+    assert telemetry["fetch_total_regions"] == 6
+    assert telemetry["fetch_price_found_count"] == 2
+    assert telemetry["fetch_price_found_rate"] == 2 / 6
+    assert telemetry["opencli_direct_attempted_count"] == 3
+    assert telemetry["opencli_direct_price_found_count"] == 0
+    assert telemetry["fetch_high_confidence_count"] == 1
+    assert telemetry["fetch_medium_confidence_count"] == 0
+    assert telemetry["fetch_low_confidence_count"] == 1
+    assert telemetry["fetch_parse_failed_count"] == 1
+    assert telemetry["fetch_timeout_count"] == 1
+    assert telemetry["fetch_loading_count"] == 1
+    assert telemetry["fetch_challenge_count"] == 1
+    assert telemetry["fetch_not_attempted_count"] == 1
     assert telemetry["fallback_attempted_count"] == 1
     assert telemetry["fallback_rescued_count"] == 1
     assert telemetry["fallback_rescue_rate"] == 1.0
@@ -203,8 +206,8 @@ def test_scan_history_store_round_trip(tmp_path: Path) -> None:
     assert latest is not None
     assert preview is not None
     assert latest.rows_by_date == rows_by_date
-    assert latest.query_payload["fetch_quality_telemetry"]["opencli_total_regions"] == 1
-    assert latest.query_payload["fetch_quality_telemetry"]["opencli_price_found_count"] == 1
+    assert latest.query_payload["fetch_quality_telemetry"]["fetch_total_regions"] == 1
+    assert latest.query_payload["fetch_quality_telemetry"]["fetch_price_found_count"] == 1
     assert get_failed_region_codes(latest.quotes_by_date) == []
 
 

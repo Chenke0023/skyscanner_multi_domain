@@ -5,6 +5,13 @@ import re
 from typing import Any, Optional
 
 from skyscanner_multi_domain.models import FlightQuote, RegionConfig
+from skyscanner_multi_domain.parsing.price_candidates import (
+    PriceCandidate,
+    collect_price_candidates,
+    confidence_to_float,
+    rank_price_candidates,
+    selected_candidate_to_metadata,
+)
 
 
 PAGE_TEXT_CAPTURE_LIMIT = 80000
@@ -304,6 +311,75 @@ def attach_parser_trust_metadata(
     quote.evidence_text = " ".join(evidence_text.split())[:240] if evidence_text else None
     quote.parser_warnings = warnings
     return quote
+
+
+def attach_price_candidate_metadata(
+    quote: FlightQuote,
+    candidates: list[PriceCandidate],
+) -> FlightQuote:
+    selected, sources, rank = selected_candidate_to_metadata(candidates)
+    quote.price_candidates_count = len(candidates)
+    quote.selected_candidate_rank = rank
+    quote.candidate_sources = sources
+    if selected is None:
+        return quote
+    if not quote.evidence_text:
+        quote.evidence_text = " ".join(selected.evidence_text.split())[:240]
+    for warning in selected.warning_flags:
+        text = {
+            "currency_mismatch": "候选价格币种与市场默认币种不一致。",
+            "suspicious_low_price": "候选价格异常偏低，需人工确认。",
+            "suspicious_high_price": "候选价格异常偏高，需人工确认。",
+            "non_itinerary_context": "候选价格可能来自日历/广告/非机票上下文。",
+        }.get(warning, warning)
+        if text not in quote.parser_warnings:
+            quote.parser_warnings.append(text)
+    return quote
+
+
+def _labeled_candidate_to_price_candidate(
+    candidate: LabeledPriceCandidate,
+    source: str,
+) -> PriceCandidate:
+    return PriceCandidate(
+        amount=candidate.price,
+        currency=candidate.currency,
+        source=source,
+        confidence="unknown",
+        evidence_text=candidate.raw_block,
+        marker=candidate.label,
+        marker_distance=candidate.distance,
+    )
+
+
+def _build_candidate_list(
+    page_text: str,
+    region: RegionConfig,
+    best_search: LabeledPriceSearch,
+    cheapest_search: LabeledPriceSearch,
+    fallback_price: ParsedPrice | None,
+) -> list[PriceCandidate]:
+    candidates: list[PriceCandidate] = []
+    candidates.extend(
+        _labeled_candidate_to_price_candidate(candidate, "best_block")
+        for candidate in best_search.candidates
+    )
+    candidates.extend(
+        _labeled_candidate_to_price_candidate(candidate, "cheapest_block")
+        for candidate in cheapest_search.candidates
+    )
+    if fallback_price is not None:
+        candidates.append(
+            PriceCandidate(
+                amount=fallback_price.price,
+                currency=fallback_price.currency,
+                source="first_price_fallback",
+                confidence="low",
+                evidence_text=fallback_price.raw_text,
+            )
+        )
+    candidates.extend(collect_price_candidates(page_text, region.currency))
+    return rank_price_candidates(candidates, region.currency)
 
 
 def parse_float(value: Any) -> Optional[float]:
@@ -695,6 +771,13 @@ def extract_page_quote_with_diagnostics(
     selected_cheapest = (
         cheapest_search.candidates[0] if cheapest_search.candidates else None
     )
+    price_candidates = _build_candidate_list(
+        page_text,
+        region,
+        best_search,
+        cheapest_search,
+        fallback_price,
+    )
 
     if selected_best or selected_cheapest:
         best_price = selected_best.price if selected_best else None
@@ -789,7 +872,8 @@ def extract_page_quote_with_diagnostics(
             failure_reason=inconsistency_error,
             used_fallback=used_fallback,
         )
-        return attach_parser_trust_metadata(quote, diagnostics), diagnostics
+        quote = attach_parser_trust_metadata(quote, diagnostics)
+        return attach_price_candidate_metadata(quote, price_candidates), diagnostics
 
     if fallback_price:
         quote = FlightQuote(
@@ -816,7 +900,45 @@ def extract_page_quote_with_diagnostics(
             failure_reason=None,
             used_fallback=True,
         )
-        return attach_parser_trust_metadata(quote, diagnostics), diagnostics
+        quote = attach_parser_trust_metadata(quote, diagnostics)
+        return attach_price_candidate_metadata(quote, price_candidates), diagnostics
+
+    selected_candidate = price_candidates[0] if price_candidates else None
+    if selected_candidate is not None and selected_candidate.source in {
+        "embedded_json_price",
+        "script_state_price",
+        "visible_text_price",
+    }:
+        quote = FlightQuote(
+            region=region.code,
+            domain=region.domain,
+            price=selected_candidate.amount,
+            currency=currency,
+            source_url=source_url,
+            status="page_text_embedded_recovered",
+            price_path=f"candidate_parser -> {selected_candidate.source}",
+            cheapest_price=selected_candidate.amount,
+            cheapest_price_path=f"candidate_parser -> {selected_candidate.source}",
+        )
+        quote.confidence = min(confidence_to_float(selected_candidate.confidence), 0.72)
+        quote.price_source = selected_candidate.source
+        quote.evidence_text = " ".join(selected_candidate.evidence_text.split())[:240]
+        if selected_candidate.confidence != "high":
+            quote.parser_warnings.append("候选价格来自恢复解析，需人工确认。")
+        diagnostics = PageParseDiagnostics(
+            state=state,
+            best_candidates=best_search.candidates,
+            cheapest_candidates=cheapest_search.candidates,
+            fallback_price=fallback_price,
+            selected_best=None,
+            selected_cheapest=None,
+            final_status=quote.status,
+            validation_outcome="candidate_recovered",
+            failure_stage=None,
+            failure_reason=None,
+            used_fallback=True,
+        )
+        return attach_price_candidate_metadata(quote, price_candidates), diagnostics
 
     if state.loading_hint:
         quote = FlightQuote(
@@ -841,7 +963,8 @@ def extract_page_quote_with_diagnostics(
             failure_reason=quote.error,
             used_fallback=False,
         )
-        return attach_parser_trust_metadata(quote, diagnostics), diagnostics
+        quote = attach_parser_trust_metadata(quote, diagnostics)
+        return attach_price_candidate_metadata(quote, price_candidates), diagnostics
 
     if (
         (best_search.matched_labels or cheapest_search.matched_labels)
@@ -879,7 +1002,8 @@ def extract_page_quote_with_diagnostics(
         failure_reason=failure_reason,
         used_fallback=False,
     )
-    return attach_parser_trust_metadata(quote, diagnostics), diagnostics
+    quote = attach_parser_trust_metadata(quote, diagnostics)
+    return attach_price_candidate_metadata(quote, price_candidates), diagnostics
 
 
 def extract_page_quote(

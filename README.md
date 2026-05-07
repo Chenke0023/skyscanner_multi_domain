@@ -238,6 +238,22 @@ python3 -m pytest -q test_skyscanner_neo.py
 python3 -m pytest -q test_date_window.py
 ```
 
+OpenCLI fetch reliability diagnostics:
+
+```bash
+python3 tools/replay_parser_snapshots.py logs/snapshots/opencli
+python3 tools/replay_parser_snapshots.py logs/snapshots/opencli --json
+```
+
+Current OpenCLI behavior:
+
+- OpenCLI is the default browser automation fetch path.
+- The OpenCLI tab pool is serial and bounded: `region_concurrency` controls retained tab lanes, not parallel market execution.
+- The scanner does not prune markets, early stop, or skip tasks.
+- Challenge/captcha pages are identified and recorded; they are not bypassed.
+- Fetch history stores `fetch_quality_telemetry`, `parser_recovery_telemetry`, and `snapshot_summary`.
+- Failed or low-confidence OpenCLI parses can write bounded JSON snapshots under `logs/snapshots/opencli/` for offline parser replay.
+
 验证浏览器会话持久化：
 
 ```bash

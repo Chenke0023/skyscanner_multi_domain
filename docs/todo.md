@@ -235,7 +235,47 @@ Todo:
 
 ## P2: Telemetry And Quality
 
-### 13. SearchPlan telemetry
+### 13. OpenCLI Fetch Reliability & Parser Recovery v2
+
+Status: implemented baseline.
+
+Current implementation:
+
+- Fetch telemetry now separates final result metrics from OpenCLI direct metrics:
+  - `fetch_total_regions`
+  - `fetch_price_found_count`
+  - `fetch_price_found_rate`
+  - `opencli_direct_attempted_count`
+  - `opencli_direct_price_found_count`
+  - `opencli_direct_price_found_rate`
+  - `fallback_attempted_count`
+  - `fallback_rescued_count`
+  - `fallback_rescue_rate`
+  - failure buckets for challenge, timeout, loading, parse failed, no flights, not attempted, and other failures
+  - tab open/reuse/close totals, extract attempts, and max chunk observed
+- CLI prints a fetch summary in this form:
+  - `[fetch] final 7/10 markets found price, opencli direct 5, fallback rescued 2, challenge 1, tabs opened 3, reused 6`
+- OpenCLI page readiness is classified before deciding retry/fallback:
+  - `price_ready`
+  - `still_loading`
+  - `challenge`
+  - `empty_shell`
+  - `no_flights`
+  - `unknown_parse_surface`
+- Parser recovery now collects ranked price candidates from visible text and embedded JSON/script state.
+- FlightQuote carries candidate count, selected rank, and candidate sources.
+- OpenCLI saves bounded snapshots for parse failures, no-flight failures, low-confidence recovery, and candidate-bearing failures.
+- `tools/replay_parser_snapshots.py` replays snapshot JSON files through the parser.
+
+Policy:
+
+- No SearchPlan pruning.
+- No automatic early stop.
+- No scan task skipping.
+- No challenge/captcha bypass.
+- No legacy Tk GUI feature work.
+
+### 14. SearchPlan telemetry
 
 Status: implemented baseline in history/details.
 
@@ -255,7 +295,7 @@ Current implementation:
 - Desktop history details show task coverage, first valid task, best-price task, best market rank, and failure reasons.
 - Desktop history details also summarize parser trust source distribution, low-confidence result count, fallback/recovered parse count, and parser warning count.
 
-### 14. Market reliability score
+### 15. Market reliability score
 
 Status: planned.
 
@@ -273,7 +313,7 @@ Uses:
 - result confidence
 - UI risk hints
 
-### 15. User-confirmed price loop
+### 16. User-confirmed price loop
 
 Status: planned.
 
@@ -285,7 +325,7 @@ Todo:
 
 ## P3: Release And CI
 
-### 16. Release hygiene
+### 17. Release hygiene
 
 Todo:
 
@@ -295,7 +335,7 @@ Todo:
 - macOS app build smoke
 - simplified README install/run path
 
-### 17. CI
+### 18. CI
 
 Minimum:
 
@@ -308,10 +348,10 @@ npm --prefix webui run build
 ## Suggested Next Five Tasks
 
 1. Keep the explicit `desktop_ui_service -> cli.SimpleCLI` debt visible.
-2. Add richer WebView warning drill-down with evidence snippets per row.
-3. Build failed-market repair actions beyond queue retry.
-4. Start `desktop_ui_service -> cli.SimpleCLI` extraction toward a package query service.
-5. Add user-confirmed price loop after trust UI has enough real samples.
+2. Run a real-world benchmark comparing main vs OpenCLI v2 on the same route/date/market set.
+3. Add richer WebView warning drill-down with evidence snippets, candidate sources, and fallback chain details.
+4. Build failed-market repair actions beyond queue retry.
+5. Start `desktop_ui_service -> cli.SimpleCLI` extraction toward a package query service.
 
 ## Do Not Do Yet
 
