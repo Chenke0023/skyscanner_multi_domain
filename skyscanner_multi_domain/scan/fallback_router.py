@@ -95,9 +95,9 @@ _DECISION_TABLE: dict[str, FallbackDecision] = {
     ),
     "network": FallbackDecision(
         should_fallback=True,
-        transports=["cdp", "scrapling"],
-        reason="Network/transport error — try CDP then Scrapling",
-        max_attempts=2,
+        transports=["google_jump", "cdp", "scrapling"],
+        reason="Network/transport error — try Google jump then CDP then Scrapling",
+        max_attempts=3,
     ),
     "loading": FallbackDecision(
         should_fallback=True,

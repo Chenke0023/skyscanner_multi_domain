@@ -410,8 +410,37 @@ class MultiBackendCaptchaSolver(BaseCaptchaSolver):
 
 # ── Backward-compatible CaptchaSolverClient ──────────────────────────────────
 
-# Re-export the original client class name for backward compatibility
-CaptchaSolverClient = MultiBackendCaptchaSolver
+
+class CaptchaSolverClient:
+    """Backward-compatible wrapper accepting old constructor params.
+
+    Usage:
+        # Old style (OhMyCaptchaSolver params)
+        client = CaptchaSolverClient(base_url="http://...", client_key="key", timeout=120.0)
+
+        # New style (no args — uses MultiBackendCaptchaSolver defaults)
+        client = CaptchaSolverClient()
+    """
+
+    def __init__(
+        self,
+        base_url: str = "http://localhost:8000",
+        client_key: str | None = None,
+        timeout: float = 120.0,
+    ):
+        backends: list[BaseCaptchaSolver] = [OhMyCaptchaSolver(
+            base_url=base_url, client_key=client_key, timeout=timeout,
+        )]
+        if os.environ.get("TWOCAPTCHA_API_KEY"):
+            backends.append(TwoCaptchaSolver())
+        if os.environ.get("CAPSOLVER_API_KEY"):
+            backends.append(CapSolverSolver())
+        self._delegate = MultiBackendCaptchaSolver(backends=backends)
+
+    def __getattr__(self, name: str):
+        if name == "_delegate":
+            raise AttributeError(name)
+        return getattr(self._delegate, name)
 
 # ── Legacy sync wrappers ─────────────────────────────────────────────────────
 
