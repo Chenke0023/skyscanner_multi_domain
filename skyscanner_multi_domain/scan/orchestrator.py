@@ -392,6 +392,7 @@ async def run_page_scan(
     from skyscanner_multi_domain.transports.opencli import compare_via_opencli
     from skyscanner_multi_domain.planning.date_window import format_trip_date_label
     from skyscanner_multi_domain.scan.history import ScanHistoryStore, get_quotes_for_trip_label, select_preview_region_batches
+    from skyscanner_multi_domain.scan.fallback_router import decide_fallback, classify_quote_failure
     from skyscanner_multi_domain.models import new_run_id
 
     run_id = new_run_id()
@@ -600,7 +601,7 @@ async def run_page_scan(
                 fetch_pipeline=fetch_pipeline,
             )
 
-            # WAIT_RENDER retry logic... (existing)
+            # WAIT_RENDER retry (v2 logic, preserved)
             wait_render_regions = [
                 region
                 for region, quote in zip(batch_regions, quotes)
@@ -624,7 +625,6 @@ async def run_page_scan(
                 for quote in quotes:
                     replacement = wait_by_region.get(quote.region)
                     if replacement is not None:
-                        # Merge wait render attempt
                         if replacement.price is None:
                             quote.fallback_attempts.append({
                                 "transport": "scrapling_wait",
@@ -639,57 +639,60 @@ async def run_page_scan(
                         merged.append(quote)
                 quotes = merged
 
-            # Browser fallback: only if enabled and only for RETRY_BROWSER failures
-            fallback_regions = [
-                region
-                for region, quote in zip(batch_regions, quotes)
-                if quote.price is None and can_fallback_to_browser(quote.status)
-            ]
-            if fallback_regions and enable_browser_fallback:
-                has_scrapling_success = any(quote.price is not None for quote in quotes)
-                cdp_info = detect_cdp_version()
-                if cdp_info or not has_scrapling_success:
+            # ── v3: router-driven browser fallback ──────────────────
+            if not enable_browser_fallback:
+                return quotes
+
+            quote_by_region: dict[str, FlightQuote] = {q.region: q for q in quotes}
+            cdp_targets: list[tuple[RegionConfig, FlightQuote]] = []
+
+            for region, quote in zip(batch_regions, quotes):
+                if quote.price is not None:
+                    continue
+                decision = decide_fallback(quote)
+                if not decision.should_fallback:
+                    continue
+                if "cdp" in decision.transports:
+                    cdp_targets.append((region, quote))
+
+            if cdp_targets:
+                page_regions = [
+                    region for region, _ in cdp_targets
+                    if quote_by_region[region.code].price is None
+                ]
+                if page_regions:
+                    cdp_info = detect_cdp_version()
                     if not cdp_info:
                         ensure_cdp_ready(
                             start_url=build_search_url(
-                                fallback_regions[0], origin, destination, date, return_date
+                                page_regions[0], origin, destination, date, return_date
                             )
                         )
-                    fallback_quotes = await compare_via_pages(
-                        args, fallback_regions, persist_failures=False, run_id=run_id
+                    page_quotes = await compare_via_pages(
+                        args, page_regions, persist_failures=False, run_id=run_id
                     )
-                    fallback_by_region = {
-                        quote.region: quote for quote in fallback_quotes if quote is not None
-                    }
-                    merged_quotes: list[FlightQuote] = []
-                    for quote in quotes:
-                        fallback_quote = fallback_by_region.get(quote.region)
-                        if fallback_quote:
-                            if fallback_quote.price is not None:
-                                # Preserve primary failure diagnostic even on success
-                                fallback_quote.fallback_attempts = [
-                                    {
-                                        "transport": "scrapling_primary",
-                                        "status": quote.status,
-                                        "failure_class": classify_failure(quote.status),
-                                        "error": quote.error,
-                                    },
-                                    *list(fallback_quote.fallback_attempts or []),
-                                ]
-                                merged_quotes.append(fallback_quote)
-                            else:
-                                # Merge fallback diagnostics even if it failed (v1.2 goal #3)
-                                quote.fallback_attempts.append({
-                                    "transport": "page_fallback",
-                                    "status": fallback_quote.status,
-                                    "failure_class": classify_failure(fallback_quote.status),
-                                    "error": fallback_quote.error,
-                                })
-                                merged_quotes.append(quote)
-                        else:
-                            merged_quotes.append(quote)
-                    quotes = merged_quotes
-            return quotes
+                    page_by_region_map = {q.region: q for q in page_quotes if q is not None}
+                    for region, quote in cdp_targets:
+                        existing = quote_by_region.get(region.code)
+                        if existing and existing.price is not None:
+                            continue
+                        page_quote = page_by_region_map.get(region.code)
+                        if page_quote and page_quote.price is not None:
+                            page_quote.fallback_attempts = [
+                                {"transport": "scrapling_primary", "status": quote.status,
+                                 "failure_class": classify_quote_failure(quote),
+                                 "error": quote.error},
+                                *list(page_quote.fallback_attempts or []),
+                            ]
+                            quote_by_region[region.code] = page_quote
+                        elif page_quote:
+                            quote.fallback_attempts.append({
+                                "transport": "page_fallback", "status": page_quote.status,
+                                "failure_class": classify_quote_failure(page_quote),
+                                "error": page_quote.error,
+                            })
+
+            return [quote_by_region.get(q.region, q) for q in quotes]
 
         async def run_opencli_pass(
             batch_regions: list[RegionConfig],
@@ -711,98 +714,127 @@ async def run_page_scan(
             if not enable_fallbacks:
                 return quotes
 
-            page_regions = [
-                region
-                for region, quote in zip(batch_regions, quotes)
-                if quote.price is None and can_fallback_to_browser(quote.status)
-            ]
-            if page_regions:
-                cdp_info = detect_cdp_version()
-                if not cdp_info:
-                    ensure_cdp_ready(
-                        start_url=build_search_url(
-                            page_regions[0], origin, destination, date, return_date
+            # ── v3: router-driven fallback ──────────────────────────
+            quote_by_region: dict[str, FlightQuote] = {q.region: q for q in quotes}
+
+            # Collect regions by their fallback decision
+            cdp_targets: list[tuple[RegionConfig, FlightQuote]] = []
+            scrapling_targets: list[tuple[RegionConfig, FlightQuote]] = []
+            google_jump_targets: list[tuple[RegionConfig, FlightQuote]] = []
+
+            for region, quote in zip(batch_regions, quotes):
+                if quote.price is not None:
+                    continue
+                decision = decide_fallback(quote)
+                if not decision.should_fallback:
+                    continue
+                for transport in decision.transports:
+                    if transport == "cdp":
+                        cdp_targets.append((region, quote))
+                    elif transport == "scrapling":
+                        scrapling_targets.append((region, quote))
+                    elif transport == "google_jump":
+                        google_jump_targets.append((region, quote))
+
+            # Try Google search jump first (lightweight, reduces bot detection)
+            if google_jump_targets:
+                for region, quote in google_jump_targets:
+                    try:
+                        from skyscanner_multi_domain.transports.google_jump import build_quote_via_google_jump
+                        url = build_search_url(region, args.origin, args.destination, args.date, return_date)
+                        gj_quote = await build_quote_via_google_jump(
+                            region, url, args.origin, args.destination, args.date,
+                            timeout=args.timeout,
                         )
+                        if gj_quote is not None and gj_quote.price is not None:
+                            gj_quote.fallback_attempts = [
+                                {"transport": "opencli_primary", "status": quote.status,
+                                 "failure_class": classify_quote_failure(quote),
+                                 "error": quote.error},
+                            ]
+                            quote_by_region[region.code] = gj_quote
+                    except Exception:
+                        pass
+
+            # Try CDP fallback
+            if cdp_targets:
+                page_regions = [
+                    region for region, _ in cdp_targets
+                    if quote_by_region[region.code].price is None
+                ]
+                if page_regions:
+                    cdp_info = detect_cdp_version()
+                    if not cdp_info:
+                        ensure_cdp_ready(
+                            start_url=build_search_url(
+                                page_regions[0], origin, destination, date, return_date
+                            )
+                        )
+                    page_quotes = await compare_via_pages(
+                        args, page_regions, persist_failures=False, run_id=run_id
                     )
-                page_quotes = await compare_via_pages(
-                    args, page_regions, persist_failures=False, run_id=run_id
-                )
-                page_by_region = {quote.region: quote for quote in page_quotes}
-                
-                new_quotes = []
-                for quote in quotes:
-                    page_quote = page_by_region.get(quote.region)
-                    if page_quote:
-                        if page_quote.price is not None:
-                            # Preserve primary failure diagnostic even on success
+                    page_by_region_map = {q.region: q for q in page_quotes}
+                    for region, quote in cdp_targets:
+                        existing = quote_by_region.get(region.code)
+                        if existing and existing.price is not None:
+                            continue
+                        page_quote = page_by_region_map.get(region.code)
+                        if page_quote and page_quote.price is not None:
                             page_quote.fallback_attempts = [
-                                {
-                                    "transport": "opencli_primary",
-                                    "status": quote.status,
-                                    "failure_class": classify_failure(quote.status),
-                                    "error": quote.error,
-                                },
+                                {"transport": "opencli_primary", "status": quote.status,
+                                 "failure_class": classify_quote_failure(quote),
+                                 "error": quote.error},
                                 *list(page_quote.fallback_attempts or []),
                             ]
-                            new_quotes.append(page_quote)
-                        else:
+                            quote_by_region[region.code] = page_quote
+                        elif page_quote:
                             quote.fallback_attempts.append({
-                                "transport": "page_fallback",
-                                "status": page_quote.status,
-                                "failure_class": classify_failure(page_quote.status),
+                                "transport": "page_fallback", "status": page_quote.status,
+                                "failure_class": classify_quote_failure(page_quote),
                                 "error": page_quote.error,
                             })
-                            new_quotes.append(quote)
-                    else:
-                        new_quotes.append(quote)
-                quotes = new_quotes
 
-            legacy_regions = [
-                region
-                for region, quote in zip(batch_regions, quotes)
-                if quote.price is None and quote.status != "px_challenge" and quote.status != "opencli_not_attempted"
-            ]
-            if legacy_regions:
-                legacy_quotes = await compare_via_scrapling(
-                    args,
-                    legacy_regions,
-                    persist_failures=False,
-                    on_region_start=on_region_start,
-                    on_region_complete=on_region_complete,
-                    region_concurrency=max(int(region_concurrency), 1),
-                    run_id=run_id,
-                    fetch_pipeline=fetch_pipeline,
-                )
-                legacy_by_region = {quote.region: quote for quote in legacy_quotes}
-                
-                new_quotes = []
-                for quote in quotes:
-                    legacy_quote = legacy_by_region.get(quote.region)
-                    if legacy_quote:
-                        if legacy_quote.price is not None:
-                            # Preserve primary failure diagnostic even on success
-                            legacy_quote.fallback_attempts = [
-                                {
-                                    "transport": "opencli_primary",
-                                    "status": quote.status,
-                                    "failure_class": classify_failure(quote.status),
-                                    "error": quote.error,
-                                },
-                                *list(legacy_quote.fallback_attempts or []),
+            # Try Scrapling fallback (only for regions that still have no price)
+            if scrapling_targets:
+                scrapling_regions = [
+                    region for region, quote in scrapling_targets
+                    if quote_by_region[region.code].price is None
+                    and quote.price is None
+                    and quote.status not in ("px_challenge", "opencli_not_attempted")
+                ]
+                if scrapling_regions:
+                    scrapling_quotes = await compare_via_scrapling(
+                        args, scrapling_regions,
+                        persist_failures=False,
+                        on_region_start=on_region_start,
+                        on_region_complete=on_region_complete,
+                        region_concurrency=max(int(region_concurrency), 1),
+                        run_id=run_id, fetch_pipeline=fetch_pipeline,
+                    )
+                    scrapling_by_region = {q.region: q for q in scrapling_quotes}
+                    for region, quote in scrapling_targets:
+                        existing = quote_by_region.get(region.code)
+                        if existing and existing.price is not None:
+                            continue
+                        sq = scrapling_by_region.get(region.code)
+                        if sq and sq.price is not None:
+                            sq.fallback_attempts = [
+                                {"transport": "opencli_primary", "status": quote.status,
+                                 "failure_class": classify_quote_failure(quote),
+                                 "error": quote.error},
+                                *list(sq.fallback_attempts or []),
                             ]
-                            new_quotes.append(legacy_quote)
-                        else:
+                            quote_by_region[region.code] = sq
+                        elif sq:
                             quote.fallback_attempts.append({
-                                "transport": "scrapling_fallback",
-                                "status": legacy_quote.status,
-                                "failure_class": classify_failure(legacy_quote.status),
-                                "error": legacy_quote.error,
+                                "transport": "scrapling_fallback", "status": sq.status,
+                                "failure_class": classify_quote_failure(sq),
+                                "error": sq.error,
                             })
-                            new_quotes.append(quote)
-                    else:
-                        new_quotes.append(quote)
-                quotes = new_quotes
-            return quotes
+
+            # Rebuild quotes list preserving order with fallback replacements
+            new_quotes = [quote_by_region.get(q.region, q) for q in quotes]
+            return new_quotes
 
         if normalized_transport == "page":
             quotes = await compare_via_pages(args, selected_regions, run_id=run_id)
@@ -903,15 +935,15 @@ async def run_page_scan(
                         used_cached_preview=preview_record is not None,
                     )
 
-                    # Per-batch browser fallback: go directly to CDP for failed regions.
-                    # No re-run through Scrapling — these markets already failed there.
+                    # v3: per-batch router-driven fallback
                     if allow_browser_fallback:
                         batch_failed = [
                             region for region in batch_regions
                             if any(
                                 quote.region == region.code
                                 and quote.price is None
-                                and can_fallback_to_browser(quote.status)
+                                and decide_fallback(quote).should_fallback
+                                and "cdp" in decide_fallback(quote).transports
                                 for quote in batch_quotes
                             )
                         ]

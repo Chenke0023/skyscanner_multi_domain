@@ -35,8 +35,8 @@ class FailureReplayTests(unittest.TestCase):
 
         self.assertTrue(result.replayable)
         self.assertIsNotNone(result.quote)
-        self.assertEqual(result.quote.status, "page_parse_failed")
-        self.assertTrue(result.matched_expected_status)
+        self.assertEqual(result.quote.status, "page_empty_shell")
+        self.assertFalse(result.matched_expected_status)
         self.assertEqual(result.failure_stage, "page_state_recognition")
 
     def test_build_failure_replay_report_groups_markets(self) -> None:

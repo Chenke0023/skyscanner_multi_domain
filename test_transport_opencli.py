@@ -13,6 +13,7 @@ from skyscanner_multi_domain.transports.opencli import (
     compare_via_opencli,
     OpenCLITabSession,
     OpenCLITabPool,
+    OpenCLICommandResult,
 )
 
 def test_opencli_tab_reuse_and_telemetry_deltas_v11() -> None:
@@ -172,72 +173,89 @@ def test_opencli_time_budget_not_attempted_v11() -> None:
     asyncio.run(run_test())
 
 def test_opencli_tab_pool_domain_pinning_v12() -> None:
-    """Test that OpenCLITabPool pins domains to sessions and limits max tabs."""
+    """Test domain-aware scheduler pins sessions to domains and handles cross-domain transitions."""
     async def run_test():
-        # max_tabs = 2
-        # Regions: CN, HK (same domain), UK (different domain), SG (third domain)
         regions = [
             RegionConfig("CN", "China", "https://www.skyscanner.com.cn", "zh-CN", "CNY"),
-            RegionConfig("HK", "Hong Kong", "https://www.skyscanner.com.cn", "zh-HK", "HKD"), # Same domain
+            RegionConfig("HK", "Hong Kong", "https://www.skyscanner.com.cn", "zh-HK", "HKD"),
             RegionConfig("UK", "UK", "https://www.skyscanner.net", "en-GB", "GBP"),
             RegionConfig("SG", "Singapore", "https://www.skyscanner.sg", "en-SG", "SGD"),
         ]
-        
+
         args = argparse.Namespace(origin="BJS", destination="ALA", date="2026-05-20", page_wait=0)
-        
-        # Mock OpenCLI calls
-        with patch("skyscanner_multi_domain.transports.opencli._opencli_json") as mock_json:
-            mock_json.side_effect = [
-                {"page": "tab-1"},  # New tab for CN (CN domain)
-                {"content": "Price 100", "url": "url1"}, # Extract CN
-                {},                 # Navigate tab-1 for HK (Reuse same domain)
-                {"content": "Price 200", "url": "url2"}, # Extract HK
-                {"page": "tab-2"},  # New tab for UK (Pool size < 2)
-                {"content": "Price 300", "url": "url3"}, # Extract UK
-                {},                 # Close tab-1 (Oldest LRU session, cross-domain clean transition)
-                {"page": "tab-1-new"}, # New tab for SG
-                {"content": "Price 400", "url": "url4"}, # Extract SG
-                {}, # tab-1-new close
-                {}, # tab-2 close
-            ]
 
-            with patch("skyscanner_multi_domain.transports.opencli._tab_wait_interactive_async") as mock_wait:
-                mock_wait.return_value = True
+        def _mock_result(data: dict) -> OpenCLICommandResult:
+            return OpenCLICommandResult(returncode=0, stdout=json.dumps(data), stderr="", duration_ms=0)
 
-                with patch("skyscanner_multi_domain.transports.opencli.extract_page_quote") as mock_parser:
-                    mock_parser.side_effect = [
-                        FlightQuote("CN", "d1", 100.0, "CNY", "u1", "ok"),
-                        FlightQuote("HK", "d1", 200.0, "HKD", "u2", "ok"),
-                        FlightQuote("UK", "d2", 300.0, "GBP", "u3", "ok"),
-                        FlightQuote("SG", "d3", 400.0, "SGD", "u4", "ok"),
-                    ]
+        def _mock_run_opencli(cmd_args, *, timeout=None):
+            cmd = " ".join(cmd_args)
+            if "tab new" in cmd:
+                if "skyscanner.com.cn" in cmd:
+                    return _mock_result({"page": "tab-1"})
+                elif "skyscanner.net" in cmd:
+                    return _mock_result({"page": "tab-2"})
+                elif "skyscanner.sg" in cmd:
+                    return _mock_result({"page": "tab-3"})
+            return _mock_result({})
 
-                    # Call with concurrency 2
-                    quotes = await compare_via_opencli(args, regions, persist_failures=False, region_concurrency=2)
+        # Use tab-ID-based routing so concurrent groups don't interfere
+        _extracts_by_tab: dict[str, list[dict]] = {
+            "tab-1": [{"content": "Price 100", "url": "url1"},
+                       {"content": "Price 200", "url": "url2"}],
+            "tab-2": [{"content": "Price 300", "url": "url3"}],
+            "tab-3": [{"content": "Price 400", "url": "url4"}],
+        }
+
+        def _mock_opencli_json(cmd_args, *, timeout=None):
+            cmd = " ".join(cmd_args)
+            if "browser extract" in cmd:
+                for tab_id, extracts in _extracts_by_tab.items():
+                    if tab_id in cmd and extracts:
+                        return extracts.pop(0)
+            return {}
+
+        with patch("skyscanner_multi_domain.transports.opencli._run_opencli_async",
+                   side_effect=_mock_run_opencli), \
+             patch("skyscanner_multi_domain.transports.opencli._opencli_json",
+                   side_effect=_mock_opencli_json), \
+             patch("skyscanner_multi_domain.transports.opencli._tab_wait_interactive_async",
+                   return_value=True), \
+             patch("skyscanner_multi_domain.transports.opencli.extract_page_quote") as mock_parser:
+
+            # Use region-keyed results so concurrent extract order doesn't matter
+            _parser_results = {
+                "CN": FlightQuote("CN", "d1", 100.0, "CNY", "u1", "ok"),
+                "HK": FlightQuote("HK", "d1", 200.0, "HKD", "u2", "ok"),
+                "UK": FlightQuote("UK", "d2", 300.0, "GBP", "u3", "ok"),
+                "SG": FlightQuote("SG", "d3", 400.0, "SGD", "u4", "ok"),
+            }
+            mock_parser.side_effect = lambda region, *a, **kw: _parser_results[region.code]
+
+            quotes = await compare_via_opencli(
+                args, regions, persist_failures=False, region_concurrency=2,
+                build_search_url=lambda r, o, d, dt, rd: f"{r.domain}/flights/{o}/{d}/{dt}",
+            )
 
         assert len(quotes) == 4
-        # CN: new tab
+        # CN: new tab in its domain group session
         assert quotes[0].tab_open_count == 1
         assert quotes[0].reused_tab_count == 0
-        
-        # HK: reused CN tab (same domain)
+
+        # HK: reused CN tab (same domain group, same session)
         assert quotes[1].tab_open_count == 0
         assert quotes[1].reused_tab_count == 1
-        
-        # UK: new tab (pool size 1 -> 2)
+
+        # UK: new tab in its own domain group session
         assert quotes[2].tab_open_count == 1
         assert quotes[2].reused_tab_count == 0
-        
-        # SG: repurposed oldest tab (LRU) with clean transition (cross-domain)
-        # It was: d1 pinned to tab-1, d2 pinned to tab-2.
-        # Acquire d3: d1 and d2 are pinned. Pick oldest (d1/tab-1).
-        # Clean transition: close tab-1, open new tab for d3.
+
+        # SG: new tab in its own domain group session
         assert quotes[3].tab_open_count == 1
         assert quotes[3].reused_tab_count == 0
-        
-        # Final close count attributed to last quote
-        # Total tabs opened: tab-1, tab-2, tab-1-new. Total closed: 3.
-        assert quotes[3].tab_close_count == 3
+
+        # Three domain groups, close counts go to last region in each group.
+        # Ordered by selected_regions: CN(0), HK(1), UK(1), SG(1)
+        assert quotes[3].tab_close_count == 1
 
     asyncio.run(run_test())
 
@@ -289,15 +307,16 @@ def test_terminal_status_protection() -> None:
             currency="CNY", source_url="http://test", status="px_challenge"
         )
         
-        with patch("skyscanner_multi_domain.transports.opencli.OpenCLITabPool.acquire") as mock_acquire, \
-             patch("skyscanner_multi_domain.transports.opencli._tab_extract"):
-            session = MagicMock(spec=OpenCLITabSession)
-            session.tab_id = "t1"
-            session.wait_progressive_state = AsyncMock(return_value=(False, 1))
-            session.extract_with_progressive_content_wait = AsyncMock(return_value=(mock_quote, "text", {"extract_attempt_count": 1, "progressive_wait_used": 0, "max_chunk_size_used": 15000}))
-            
-            mock_acquire.return_value = (session, {"tab_open_count": 0, "reused_tab_count": 1})
-            
+        def _mock_result(data: dict) -> OpenCLICommandResult:
+            return OpenCLICommandResult(returncode=0, stdout=json.dumps(data), stderr="", duration_ms=0)
+
+        with patch("skyscanner_multi_domain.transports.opencli._run_opencli_async",
+                   return_value=_mock_result({"page": "t1"})), \
+             patch("skyscanner_multi_domain.transports.opencli._tab_wait_interactive_async",
+                   return_value=False), \
+             patch("skyscanner_multi_domain.transports.opencli.OpenCLITabSession.extract_with_progressive_content_wait",
+                   AsyncMock(return_value=(mock_quote, "text", {"extract_attempt_count": 1, "progressive_wait_used": 0, "max_chunk_size_used": 15000}))):
+
             quotes = await compare_via_opencli(args, regions)
             assert quotes[0].status == "px_challenge"
             assert "Page did not reach interactive state" not in (quotes[0].error or "")

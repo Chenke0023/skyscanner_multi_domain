@@ -1,13 +1,14 @@
-"""OpenCLI-based browser transport."""
+"""OpenCLI-based browser transport — v3 with async subprocess + domain-aware concurrency."""
 
 from __future__ import annotations
 
 import argparse
 import asyncio
 import json
-import subprocess
 import time
+from dataclasses import dataclass, field
 from typing import Any, Optional
+from urllib.parse import urlparse
 
 from skyscanner_multi_domain.diagnostics.attempt_trace import emit_trace
 from skyscanner_multi_domain.diagnostics.snapshots import (
@@ -21,59 +22,125 @@ from skyscanner_multi_domain.parsing.readiness import classify_opencli_page_read
 TAB_WAIT_TIMEOUT = 20
 TAB_POLL_INTERVAL = 2.0
 MAX_REGION_TIME = 45
+DEFAULT_MAX_CONCURRENT_DOMAINS = 3
+
+# ── Async subprocess infrastructure ──────────────────────────────────────────
 
 
-def _run_opencli(args: list[str], timeout: int = 60) -> subprocess.CompletedProcess:
-    """Run opencli command and return the completed process."""
-    return subprocess.run(
+@dataclass
+class OpenCLICommandResult:
+    returncode: int
+    stdout: str
+    stderr: str
+    duration_ms: int
+    timed_out: bool = False
+
+    @property
+    def ok(self) -> bool:
+        return self.returncode == 0
+
+    @property
+    def stdout_json(self) -> Any:
+        return json.loads(self.stdout)
+
+
+async def _run_opencli_async(
+    args: list[str],
+    *,
+    timeout: float | None = None,
+) -> OpenCLICommandResult:
+    """Run an opencli command via async subprocess — non-blocking."""
+    effective_timeout = timeout or 60.0
+    started = time.monotonic()
+    proc = await asyncio.create_subprocess_exec(
+        "opencli",
+        *args,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    try:
+        stdout_bytes, stderr_bytes = await asyncio.wait_for(
+            proc.communicate(), timeout=effective_timeout,
+        )
+    except asyncio.TimeoutError:
+        proc.kill()
+        stdout_bytes, stderr_bytes = await proc.communicate()
+        return OpenCLICommandResult(
+            returncode=proc.returncode or -1,
+            stdout=stdout_bytes.decode("utf-8", errors="replace") if stdout_bytes else "",
+            stderr=stderr_bytes.decode("utf-8", errors="replace") if stderr_bytes else "",
+            duration_ms=int((time.monotonic() - started) * 1000),
+            timed_out=True,
+        )
+    return OpenCLICommandResult(
+        returncode=proc.returncode or 0,
+        stdout=stdout_bytes.decode("utf-8", errors="replace") if stdout_bytes else "",
+        stderr=stderr_bytes.decode("utf-8", errors="replace") if stderr_bytes else "",
+        duration_ms=int((time.monotonic() - started) * 1000),
+    )
+
+
+# Backward-compatible sync wrapper
+def _run_opencli(args: list[str], timeout: int = 60) -> OpenCLICommandResult:
+    """Synchronous wrapper — use _run_opencli_async in async contexts."""
+    import subprocess as _sp
+    result = _sp.run(
         ["opencli"] + args,
         capture_output=True,
         text=True,
         timeout=timeout,
     )
+    return OpenCLICommandResult(
+        returncode=result.returncode,
+        stdout=result.stdout or "",
+        stderr=result.stderr or "",
+        duration_ms=0,
+    )
 
 
-def _opencli_json(args: list[str], timeout: int = 60) -> Any:
-    """Run opencli command and parse JSON output."""
-    result = _run_opencli(args, timeout=timeout)
-    if result.returncode != 0:
-        raise RuntimeError(f"opencli failed: {result.stderr}")
-    return json.loads(result.stdout)
+async def _opencli_json(args: list[str], timeout: int = 60) -> Any:
+    """Run opencli command and parse JSON output (async)."""
+    result = await _run_opencli_async(args, timeout=timeout)
+    if not result.ok:
+        raise RuntimeError(f"opencli failed (rc={result.returncode}): {result.stderr[:300]}")
+    return result.stdout_json
 
 
-def _tab_new(url: str = "") -> str:
-    """Open a new tab with the given URL, return tab ID."""
-    args = ["browser", "tab", "new"]
+# ── Async tab operations ─────────────────────────────────────────────────────
+
+
+async def _tab_new_async(url: str = "") -> str:
+    """Open a new tab, return tab ID."""
+    cmd_args = ["browser", "tab", "new"]
     if url:
-        args.append(url)
-    result = _opencli_json(args)
+        cmd_args.append(url)
+    result = await _opencli_json(cmd_args)
     return result.get("page", "")
 
 
-def _tab_navigate(tab_id: str, url: str) -> None:
-    """Navigate current tab to a new URL."""
-    _opencli_json(["browser", "open", "--tab", tab_id, url])
+async def _tab_navigate_async(tab_id: str, url: str) -> None:
+    """Navigate tab to a new URL."""
+    await _opencli_json(["browser", "open", "--tab", tab_id, url])
 
 
-def _tab_select(tab_id: str) -> None:
-    """Switch to a specific tab."""
-    _opencli_json(["browser", "tab", "select", tab_id])
-
-
-def _tab_close(tab_id: str) -> None:
+async def _tab_close_async(tab_id: str) -> None:
     """Close a specific tab."""
     try:
-        _opencli_json(["browser", "tab", "close", tab_id], timeout=5)
+        await _run_opencli_async(["browser", "tab", "close", tab_id], timeout=5)
     except Exception:
         pass
 
 
 async def _tab_wait_interactive_async(tab_id: str, timeout: float = TAB_WAIT_TIMEOUT) -> bool:
-    """Wait for tab to reach interactive state (async)."""
-    deadline = time.time() + timeout
-    while time.time() < deadline:
+    """Wait for tab to reach interactive state (fully async)."""
+    deadline = time.monotonic() + timeout
+    first = True
+    while time.monotonic() < deadline:
+        if not first:
+            await asyncio.sleep(TAB_POLL_INTERVAL)
+        first = False
         try:
-            state = _opencli_json(["browser", "state", "--tab", tab_id], timeout=5)
+            state = await _opencli_json(["browser", "state", "--tab", tab_id], timeout=5)
             page_state = state.get("page", "")
             if page_state == "interactive":
                 return True
@@ -81,56 +148,80 @@ async def _tab_wait_interactive_async(tab_id: str, timeout: float = TAB_WAIT_TIM
                 return False
         except Exception:
             pass
-        await asyncio.sleep(TAB_POLL_INTERVAL)
     return False
 
 
-def _tab_extract(tab_id: str, chunk_size: int = 15000) -> dict[str, Any]:
-    """Extract text content from a tab."""
-    return _opencli_json(
+async def _tab_extract_async(tab_id: str, chunk_size: int = 15000) -> dict[str, Any]:
+    """Extract text content from a tab (async)."""
+    return await _opencli_json(
         ["browser", "extract", "--tab", tab_id, "--chunk-size", str(chunk_size)],
         timeout=30,
     )
 
 
+# Legacy sync stubs for any callers that haven't migrated
+_tab_new = lambda url="": asyncio.get_event_loop().run_until_complete(_tab_new_async(url))  # type: ignore[arg-type]
+_tab_navigate = lambda tab_id, url: asyncio.get_event_loop().run_until_complete(_tab_navigate_async(tab_id, url))  # type: ignore[arg-type]
+_tab_close = lambda tab_id: asyncio.get_event_loop().run_until_complete(_tab_close_async(tab_id))  # type: ignore[arg-type]
+_tab_extract = lambda tab_id, chunk_size=15000: asyncio.get_event_loop().run_until_complete(_tab_extract_async(tab_id, chunk_size))  # type: ignore[arg-type]
+
+
+# ── OpenCLITabSession (v3: fully async internals) ────────────────────────────
+
+
 class OpenCLITabSession:
-    """Manages OpenCLI tab lifecycle and adaptive extraction/waiting."""
+    """Manages OpenCLI tab lifecycle with async-aware extraction/waiting."""
 
     def __init__(self, tab_id: str = ""):
         self.tab_id = tab_id
-        # Session-level counters (cumulative for the whole pass)
         self.session_tab_open_count = 0
         self.session_tab_close_count = 0
         self.session_reused_tab_count = 0
         self.session_extract_attempt_count = 0
         self.session_progressive_wait_count = 0
         self.last_used_index = 0
+        # Per-session command telemetry
+        self.command_count = 0
+        self.command_duration_ms_total = 0
+        self.command_timeout_count = 0
 
-    def ensure_tab(self, url: str, clean: bool = False) -> tuple[str, dict[str, int]]:
-        """Open a new tab if none exists, or navigate existing tab. Returns delta telemetry.
-        
-        If clean=True and tab exists, it will be closed and a new one opened to ensure
-        no cross-domain pollution.
-        """
-        delta = {"tab_open_count": 0, "reused_tab_count": 0}
+    async def ensure_tab_async(self, url: str, *, clean: bool = False) -> tuple[str, dict[str, int]]:
+        delta: dict[str, int] = {"tab_open_count": 0, "reused_tab_count": 0}
         if clean and self.tab_id:
-            _tab_close(self.tab_id)
+            await _tab_close_async(self.tab_id)
             self.tab_id = ""
             self.session_tab_close_count += 1
-            # Note: we don't return tab_close_count in delta yet as it's pool-level
 
         if not self.tab_id:
-            self.tab_id = _tab_new(url)
+            result = await _run_opencli_async(["browser", "tab", "new", url])
+            self._track_command(result)
+            self.tab_id = result.stdout_json.get("page", "") if result.ok else ""
             self.session_tab_open_count += 1
             delta["tab_open_count"] = 1
         else:
-            _tab_navigate(self.tab_id, url)
+            result = await _run_opencli_async(["browser", "open", "--tab", self.tab_id, url])
+            self._track_command(result)
             self.session_reused_tab_count += 1
             delta["reused_tab_count"] = 1
         return self.tab_id, delta
 
+    # Sync compatibility
+    def ensure_tab(self, url: str, clean: bool = False) -> tuple[str, dict[str, int]]:
+        return asyncio.get_event_loop().run_until_complete(self.ensure_tab_async(url, clean=clean))
+
+    def _track_command(self, result: OpenCLICommandResult) -> None:
+        self.command_count += 1
+        self.command_duration_ms_total += result.duration_ms
+        if result.timed_out:
+            self.command_timeout_count += 1
+
+    async def close_async(self):
+        if self.tab_id:
+            await _tab_close_async(self.tab_id)
+            self.tab_id = ""
+            self.session_tab_close_count += 1
+
     def close(self):
-        """Close the managed tab."""
         if self.tab_id:
             _tab_close(self.tab_id)
             self.tab_id = ""
@@ -143,14 +234,13 @@ class OpenCLITabSession:
         poll_interval: float = TAB_POLL_INTERVAL,
         timeout: float = TAB_WAIT_TIMEOUT,
     ) -> tuple[bool, int]:
-        """Wait for page to be interactive (state-based). Returns (success, delta_wait_count)."""
+        """Wait for page to be interactive. Returns (success, delta_wait_count)."""
         delta_wait = 0
         if initial_wait > 0:
             await asyncio.sleep(initial_wait)
-        
+
         success = await _tab_wait_interactive_async(tab_id, timeout=timeout)
         if not success:
-            # First progressive wait (state-based)
             delta_wait += 1
             self.session_progressive_wait_count += 1
             await asyncio.sleep(poll_interval * 2)
@@ -163,22 +253,16 @@ class OpenCLITabSession:
         region: RegionConfig,
         url: str,
     ) -> tuple[FlightQuote, str, dict[str, int]]:
-        """Try extraction with increasing chunk sizes and content-aware waiting.
-        
-        If price is missing, wait and try larger chunks.
-        """
         attempts = [
-            (15000, 0),  # (chunk_size, extra_wait)
+            (15000, 0),
             (50000, 8),
             (100000, 15),
         ]
-        
         delta = {
             "extract_attempt_count": 0,
             "progressive_wait_used": 0,
             "max_chunk_size_used": 0,
         }
-        
         last_quote = None
         last_text = ""
 
@@ -192,15 +276,14 @@ class OpenCLITabSession:
             self.session_extract_attempt_count += 1
             delta["max_chunk_size_used"] = max(delta["max_chunk_size_used"], chunk_size)
 
-            result = _tab_extract(tab_id, chunk_size=chunk_size)
+            result = await _tab_extract_async(tab_id, chunk_size=chunk_size)
             last_text = str(result.get("content", ""))
             quote = _quote_from_opencli_result(region, result, url)
             quote.readiness = classify_opencli_page_readiness(last_text)
 
             if quote.price is not None:
                 return quote, last_text, delta
-            
-            # Terminal content states should not burn retries.
+
             if quote.readiness == "challenge" or quote.status in ("px_challenge", "page_challenge"):
                 if quote.status not in ("px_challenge", "page_challenge"):
                     quote.status = "page_challenge"
@@ -213,7 +296,6 @@ class OpenCLITabSession:
 
             last_quote = quote
 
-        # Fallback to last attempt if no price found after all retries
         return last_quote or _quote_from_opencli_result(region, {}, url), last_text, delta
 
 
@@ -222,11 +304,8 @@ def _quote_from_opencli_result(
     result: dict[str, Any],
     fallback_url: str,
 ) -> FlightQuote:
-    """Convert opencli extract result to FlightQuote using existing parser."""
     page_url = str(result.get("url", fallback_url))
     page_text = str(result.get("content", ""))
-    page_title = str(result.get("title", ""))
-
     quote = extract_page_quote(region, page_url, page_text)
     quote.source_kind = "opencli"
 
@@ -251,68 +330,298 @@ def _quote_from_opencli_result(
     return quote
 
 
-class OpenCLITabPool:
-    """Bounded pool of OpenCLI tabs with domain-level reuse prioritization and LRU eviction."""
+# ── OpenCLIDomainScheduler ───────────────────────────────────────────────────
 
-    def __init__(self, max_tabs: int = 1):
+
+def _extract_domain(url_str: str) -> str:
+    parsed = urlparse(url_str)
+    # Normalize: strip www. prefix for grouping
+    netloc = parsed.netloc.replace("www.", "")
+    return netloc
+
+
+def _group_regions_by_domain(
+    regions: list[RegionConfig],
+    url_by_region: dict[str, str],
+) -> list[tuple[str, list[RegionConfig]]]:
+    """Group regions by their normalized domain. Preserves input order within groups."""
+    groups: dict[str, list[RegionConfig]] = {}
+    group_order: list[str] = []
+    for region in regions:
+        url = url_by_region.get(region.code, region.domain)
+        domain = _extract_domain(url)
+        if domain not in groups:
+            groups[domain] = []
+            group_order.append(domain)
+        groups[domain].append(region)
+    return [(domain, groups[domain]) for domain in group_order]
+
+
+class OpenCLITabPool:
+    """Backward-compatible tab pool with domain pinning and LRU eviction.
+
+    Deprecated: prefer OpenCLIDomainScheduler for new code.
+    This shim exists so existing tests and callers that use the old pool API
+    continue to work."""
+
+    def __init__(self, max_tabs: int = 2):
         self.max_tabs = max_tabs
         self.sessions: list[OpenCLITabSession] = []
-        # Mapping of domain to session for pinning
         self.domain_to_session: dict[str, OpenCLITabSession] = {}
-        self.pool_tab_close_count = 0
-        self._use_counter = 0
-
-    def _mark_used(self, session: OpenCLITabSession) -> None:
-        self._use_counter += 1
-        session.last_used_index = self._use_counter
+        self._tab_counter = 0
 
     def acquire(self, domain: str, url: str) -> tuple[OpenCLITabSession, dict[str, int]]:
-        """Acquire a session for the given domain. Prioritize domain pinning and use LRU for eviction."""
-        # 1. Try pinned session for this domain
+        """Acquire a session for *domain*. Returns (session, telemetry_delta).
+
+        If *domain* is already pinned, the existing session is reused.
+        Otherwise a new tab is opened; if the pool is full the least-recently-used
+        session is evicted (its old tab closed and a new one opened for the
+        incoming domain)."""
+
+        # Domain already pinned — reuse
         if domain in self.domain_to_session:
             session = self.domain_to_session[domain]
-            self._mark_used(session)
-            _, delta = session.ensure_tab(url, clean=False)
-            return session, delta
+            session.last_used_index = self._next_index()
+            _tab_navigate(session.tab_id, url)
+            session.session_reused_tab_count += 1
+            return session, {"tab_open_count": 0, "reused_tab_count": 1}
 
-        # 2. Try to create a new session if pool is not full
+        # Pool has room — create fresh session
         if len(self.sessions) < self.max_tabs:
             session = OpenCLITabSession()
             self.sessions.append(session)
+            tab_id = _tab_new(url)
+            session.tab_id = tab_id
+            session.session_tab_open_count += 1
+            session.last_used_index = self._next_index()
             self.domain_to_session[domain] = session
-            self._mark_used(session)
-            _, delta = session.ensure_tab(url, clean=False)
-            return session, delta
+            return session, {"tab_open_count": 1, "reused_tab_count": 0}
 
-        # 3. Reuse an existing session using LRU strategy
-        # Find session with the oldest deterministic use index.
-        session = min(self.sessions, key=lambda s: s.last_used_index)
-        
-        # Remove old pin if exists
-        old_domain = next((d for d, s in self.domain_to_session.items() if s == session), None)
-        if old_domain:
-            del self.domain_to_session[old_domain]
-        
-        self.domain_to_session[domain] = session
-        # Use clean=True for cross-domain repurpose to avoid pollution
-        self._mark_used(session)
-        _, delta = session.ensure_tab(url, clean=True)
-        return session, delta
+        # Pool full — evict LRU session
+        victim = min(self.sessions, key=lambda s: s.last_used_index)
+        # Find and remove the old domain mapping
+        old_domain = next(d for d, s in self.domain_to_session.items() if s is victim)
+        del self.domain_to_session[old_domain]
 
-    def close_all(self):
-        """Close all tabs in the pool."""
-        for session in self.sessions:
-            session.close()
-            self.pool_tab_close_count += session.session_tab_close_count
-        self.sessions.clear()
-        self.domain_to_session.clear()
+        # Clean transition: close old tab, open new one
+        _tab_close(victim.tab_id)
+        victim.session_tab_close_count += 1
+        victim.tab_id = _tab_new(url)
+        victim.session_tab_open_count += 1
+        victim.last_used_index = self._next_index()
+        self.domain_to_session[domain] = victim
+        return victim, {"tab_open_count": 1, "reused_tab_count": 0}
 
-    def get_total_tab_close_count(self) -> int:
-        current_active = sum(s.session_tab_close_count for s in self.sessions)
-        return self.pool_tab_close_count + current_active
+    def _next_index(self) -> int:
+        self._tab_counter += 1
+        return self._tab_counter
+
+
+class OpenCLIDomainScheduler:
+    """Domain-aware parallel scheduler: same domain serial, different domains concurrent."""
+
+    def __init__(
+        self,
+        *,
+        max_concurrent_domains: int = DEFAULT_MAX_CONCURRENT_DOMAINS,
+        page_wait: int = 10,
+        max_region_time: int = MAX_REGION_TIME,
+    ):
+        self.max_concurrent_domains = max_concurrent_domains
+        self.page_wait = max(page_wait, 3)
+        self.max_region_time = max_region_time
+
+    async def scan_all(
+        self,
+        args: argparse.Namespace,
+        selected_regions: list[RegionConfig],
+        *,
+        url_by_region: dict[str, str],
+        route_key: str,
+        on_region_start: Any = None,
+        on_region_complete: Any = None,
+        persist_failures: bool = True,
+        run_id: str = "",
+    ) -> tuple[list[FlightQuote], dict[str, Any]]:
+        """Scan all regions with domain-aware parallelism.
+
+        Returns (ordered_quotes, telemetry).
+        """
+        groups = _group_regions_by_domain(selected_regions, url_by_region)
+        sem = asyncio.Semaphore(self.max_concurrent_domains)
+        wall_start = time.monotonic()
+
+        async def run_domain_group(domain: str, regions: list[RegionConfig]) -> list[FlightQuote]:
+            async with sem:
+                return await self._scan_domain_serial(
+                    domain, regions, args, url_by_region, route_key,
+                    on_region_start, on_region_complete, persist_failures, run_id,
+                )
+
+        group_results: list[list[FlightQuote]] = await asyncio.gather(
+            *(run_domain_group(domain, regions) for domain, regions in groups),
+        )
+
+        wall_time_ms = int((time.monotonic() - wall_start) * 1000)
+
+        # Flatten while preserving selected_regions order
+        all_quotes: dict[str, FlightQuote] = {}
+        for group_quotes in group_results:
+            for quote in group_quotes:
+                all_quotes[quote.region] = quote
+
+        ordered_quotes = []
+        for region in selected_regions:
+            quote = all_quotes.get(region.code)
+            if quote is None:
+                quote = FlightQuote(
+                    region=region.code, domain=region.domain,
+                    price=None, currency=region.currency,
+                    source_url=url_by_region.get(region.code, ""),
+                    status="opencli_not_attempted",
+                    error="Scheduler did not produce a quote for this region",
+                )
+            ordered_quotes.append(quote)
+
+        telemetry = {
+            "opencli_execution_mode": "domain_aware_parallel",
+            "opencli_domain_group_count": len(groups),
+            "opencli_max_concurrent_domains": self.max_concurrent_domains,
+            "opencli_wall_time_ms": wall_time_ms,
+            "opencli_domain_lane_count": sum(1 for _, qs in groups if qs),
+        }
+        return ordered_quotes, telemetry
+
+    async def _scan_domain_serial(
+        self,
+        domain: str,
+        regions: list[RegionConfig],
+        args: argparse.Namespace,
+        url_by_region: dict[str, str],
+        route_key: str,
+        on_region_start: Any,
+        on_region_complete: Any,
+        persist_failures: bool,
+        run_id: str,
+    ) -> list[FlightQuote]:
+        session = OpenCLITabSession()
+        results: list[FlightQuote] = []
+        page_text_len_by_region: dict[str, int] = {}
+        page_url_by_region: dict[str, str] = {}
+        return_date = getattr(args, "return_date", None)
+
+        try:
+            for region in regions:
+                if on_region_start:
+                    on_region_start(region)
+
+                url = url_by_region.get(region.code, "")
+                page_text = ""
+                quote: Optional[FlightQuote] = None
+                delta_ensure = {"tab_open_count": 0, "reused_tab_count": 0}
+                delta_wait_state = 0
+                delta_extract = {
+                    "extract_attempt_count": 0,
+                    "progressive_wait_used": 0,
+                    "max_chunk_size_used": 0,
+                }
+
+                try:
+                    tab_id, delta_ensure = await session.ensure_tab_async(url)
+                    if not tab_id:
+                        raise RuntimeError("No tab ID returned")
+
+                    success, delta_wait_state = await session.wait_progressive_state(
+                        tab_id, self.page_wait,
+                    )
+                    quote, page_text, delta_extract = await session.extract_with_progressive_content_wait(
+                        tab_id, region, url,
+                    )
+
+                    quote.tab_open_count = delta_ensure["tab_open_count"]
+                    quote.reused_tab_count = delta_ensure["reused_tab_count"]
+                    quote.progressive_wait_used = delta_wait_state + delta_extract["progressive_wait_used"]
+                    quote.extract_attempt_count = delta_extract["extract_attempt_count"]
+                    quote.max_chunk_size_used = delta_extract["max_chunk_size_used"]
+
+                    if not success and quote.price is None:
+                        if quote.status not in TERMINAL_STATUSES:
+                            quote.status = "opencli_timeout"
+                            quote.error = "Page did not reach interactive state and no price extracted"
+
+                except Exception as exc:
+                    quote = FlightQuote(
+                        region=region.code, domain=region.domain,
+                        price=None, currency=region.currency, source_url=url,
+                        status="opencli_error", error=str(exc)[:200],
+                    )
+                    quote.tab_open_count = delta_ensure["tab_open_count"]
+                    quote.reused_tab_count = delta_ensure["reused_tab_count"]
+
+                if quote is None:
+                    quote = FlightQuote(
+                        region=region.code, domain=region.domain,
+                        price=None, currency=region.currency,
+                        source_url=url, status="opencli_failed",
+                        error="No price extracted",
+                    )
+
+                if should_save_opencli_snapshot(quote):
+                    try:
+                        save_opencli_snapshot(
+                            route={
+                                "origin": args.origin, "destination": args.destination,
+                                "date": args.date, "return_date": return_date,
+                            },
+                            region=region, quote=quote, page_text=page_text,
+                        )
+                    except Exception:
+                        pass
+
+                if persist_failures and quote.price is None:
+                    from skyscanner_multi_domain.scan.orchestrator import _persist_failure_log as _pfl
+                    _pfl(quote, transport="opencli", route_key=route_key, page_text=page_text)
+
+                page_text_len_by_region[region.code] = len(page_text)
+                page_url_by_region[region.code] = quote.source_url
+                results.append(quote)
+
+                if on_region_complete:
+                    on_region_complete(region, quote)
+        finally:
+            tab_close_count = session.session_tab_close_count
+            await session.close_async()
+            tab_close_count += session.session_tab_close_count
+            # Attach tab_close to last quote
+            if results:
+                results[-1].tab_close_count = tab_close_count
+
+        # Emit traces
+        for quote in results:
+            emit_trace(
+                run_id=run_id, route_key=route_key, region=quote.region,
+                transport="opencli", attempt_index=0, source_kind="opencli",
+                used_cdp_cookies=False, used_profile_dir=False,
+                wait_ms=max(args.page_wait, 3) * 1000,
+                load_dom=False, network_idle=False,
+                page_text_len=page_text_len_by_region.get(quote.region, 0),
+                page_url=page_url_by_region.get(quote.region, quote.source_url),
+                status=quote.status, failure_reason=quote.error,
+                price=quote.price, currency=quote.currency,
+                tab_open_count=quote.tab_open_count,
+                tab_close_count=quote.tab_close_count,
+                reused_tab_count=quote.reused_tab_count,
+                extract_attempt_count=quote.extract_attempt_count,
+                max_chunk_size_used=quote.max_chunk_size_used,
+                progressive_wait_used=quote.progressive_wait_used,
+            )
+        return results
 
 
 TERMINAL_STATUSES = {"px_challenge", "page_challenge", "opencli_no_flights", "page_no_flights"}
+
+
+# ── compare_via_opencli (v3 entry point) ────────────────────────────────────
 
 
 async def compare_via_opencli(
@@ -326,19 +635,14 @@ async def compare_via_opencli(
     region_concurrency: int = 1,
     run_id: str = "",
 ) -> list[FlightQuote]:
-    """Fetch flight quotes using opencli browser automation with a bounded tab pool.
-
-    OpenCLI runs regions serially. region_concurrency controls the maximum retained
-    tab lanes for reuse, capped at three; it does not parallelize region execution.
-    """
+    """Fetch flight quotes using opencli with domain-aware parallel scheduling."""
     if build_search_url is None:
         from skyscanner_multi_domain.scan.orchestrator import build_search_url as _bsu
         build_search_url = _bsu
 
     return_date = getattr(args, "return_date", None)
     page_wait = max(args.page_wait, 3)
-    # Linked to region_concurrency but capped for safety (v1.2 goal #1)
-    max_tabs = min(max(int(region_concurrency), 1), 3)
+    max_concurrent = min(max(int(region_concurrency), 1), DEFAULT_MAX_CONCURRENT_DOMAINS)
 
     requested_urls: dict[str, str] = {}
     for region in selected_regions:
@@ -349,174 +653,18 @@ async def compare_via_opencli(
     if return_date:
         route_key = f"{route_key}_rt{return_date.replace('-', '')}"
 
-    latest_quotes: dict[str, FlightQuote] = {}
-    page_text_len_by_region: dict[str, int] = {}
-    page_url_by_region: dict[str, str] = {}
-    start_time = time.time()
-    
-    pool = OpenCLITabPool(max_tabs=max_tabs)
-
-    try:
-        for region in selected_regions:
-            # Check time budget
-            elapsed = time.time() - start_time
-            if elapsed > MAX_REGION_TIME * len(selected_regions):
-                latest_quotes[region.code] = FlightQuote(
-                    region=region.code,
-                    domain=region.domain,
-                    price=None,
-                    currency=region.currency,
-                    source_url=requested_urls[region.code],
-                    status="opencli_not_attempted",
-                    error="Time budget exceeded before attempt",
-                )
-                continue
-
-            if on_region_start:
-                on_region_start(region)
-
-            url = requested_urls[region.code]
-            page_text = ""
-            quote: Optional[FlightQuote] = None
-            delta_ensure = {"tab_open_count": 0, "reused_tab_count": 0}
-            delta_wait_state = 0
-            delta_extract = {
-                "extract_attempt_count": 0,
-                "progressive_wait_used": 0,
-                "max_chunk_size_used": 0,
-            }
-
-            try:
-                session, delta_ensure = pool.acquire(region.domain, url)
-                tab_id = session.tab_id
-
-                if not tab_id:
-                    raise RuntimeError("No tab ID returned from pool")
-
-                # State-based progressive wait
-                success, delta_wait_state = await session.wait_progressive_state(tab_id, page_wait)
-                
-                # Content-aware adaptive extraction (v1.2 goal: wait + re-extract loop is now in extract_with_progressive_content_wait)
-                quote, page_text, delta_extract = await session.extract_with_progressive_content_wait(tab_id, region, url)
-                
-                # Apply telemetry to quote (per-region deltas)
-                quote.tab_open_count = delta_ensure["tab_open_count"]
-                quote.reused_tab_count = delta_ensure["reused_tab_count"]
-                quote.progressive_wait_used = delta_wait_state + delta_extract["progressive_wait_used"]
-                quote.extract_attempt_count = delta_extract["extract_attempt_count"]
-                quote.max_chunk_size_used = delta_extract["max_chunk_size_used"]
-                
-                if not success and quote.price is None:
-                    # Point 2: Do not overwrite challenge statuses with opencli_timeout
-                    if quote.status not in TERMINAL_STATUSES:
-                        quote.status = "opencli_timeout"
-                        quote.error = "Page did not reach interactive state and no price extracted"
-
-            except Exception as exc:
-                quote = FlightQuote(
-                    region=region.code,
-                    domain=region.domain,
-                    price=None,
-                    currency=region.currency,
-                    source_url=url,
-                    status="opencli_error",
-                    error=str(exc)[:200],
-                )
-                quote.tab_open_count = delta_ensure["tab_open_count"]
-                quote.reused_tab_count = delta_ensure["reused_tab_count"]
-
-            if quote is None:
-                quote = FlightQuote(
-                    region=region.code,
-                    domain=region.domain,
-                    price=None,
-                    currency=region.currency,
-                    source_url=url,
-                    status="opencli_failed",
-                    error="No price extracted",
-                )
-
-            if should_save_opencli_snapshot(quote):
-                try:
-                    save_opencli_snapshot(
-                        route={
-                            "origin": args.origin,
-                            "destination": args.destination,
-                            "date": args.date,
-                            "return_date": return_date,
-                        },
-                        region=region,
-                        quote=quote,
-                        page_text=page_text,
-                    )
-                except Exception:
-                    pass
-
-            if persist_failures and quote.price is None:
-                from skyscanner_multi_domain.scan.orchestrator import _persist_failure_log as _pfl
-                _pfl(
-                    quote,
-                    transport="opencli",
-                    route_key=route_key,
-                    page_text=page_text,
-                )
-
-            page_text_len_by_region[region.code] = len(page_text)
-            page_url_by_region[region.code] = quote.source_url
-            latest_quotes[region.code] = quote
-
-            if on_region_complete:
-                on_region_complete(region, quote)
-    finally:
-        # Final update of tab_close_count to the LAST quote in the pass
-        total_closes_before = pool.get_total_tab_close_count()
-        pool.close_all()
-        total_closes_after = pool.get_total_tab_close_count()
-        total_closes = max(total_closes_before, total_closes_after)
-
-        if selected_regions:
-            # We assign it to the last region that was actually ATTEMPTED
-            last_attempted_code = None
-            for r in reversed(selected_regions):
-                if r.code in latest_quotes and latest_quotes[r.code].status != "opencli_not_attempted":
-                    last_attempted_code = r.code
-                    break
-            
-            if last_attempted_code and last_attempted_code in latest_quotes:
-                latest_quotes[last_attempted_code].tab_close_count = total_closes
-
-    # Final return
-    final_quotes = []
-    for region in selected_regions:
-        q = latest_quotes.get(region.code)
-        if q is not None:
-            final_quotes.append(q)
-
-    for quote in final_quotes:
-        emit_trace(
-            run_id=run_id,
-            route_key=route_key,
-            region=quote.region,
-            transport="opencli",
-            attempt_index=0,
-            source_kind="opencli",
-            used_cdp_cookies=False,
-            used_profile_dir=False,
-            wait_ms=max(args.page_wait, 3) * 1000,
-            load_dom=False,
-            network_idle=False,
-            page_text_len=page_text_len_by_region.get(quote.region, 0),
-            page_url=page_url_by_region.get(quote.region, quote.source_url),
-            status=quote.status,
-            failure_reason=quote.error,
-            price=quote.price,
-            currency=quote.currency,
-            tab_open_count=quote.tab_open_count,
-            tab_close_count=quote.tab_close_count,
-            reused_tab_count=quote.reused_tab_count,
-            extract_attempt_count=quote.extract_attempt_count,
-            max_chunk_size_used=quote.max_chunk_size_used,
-            progressive_wait_used=quote.progressive_wait_used,
-        )
-
-    return final_quotes
+    scheduler = OpenCLIDomainScheduler(
+        max_concurrent_domains=max_concurrent,
+        page_wait=page_wait,
+    )
+    quotes, _telemetry = await scheduler.scan_all(
+        args=args,
+        selected_regions=selected_regions,
+        url_by_region=requested_urls,
+        route_key=route_key,
+        on_region_start=on_region_start,
+        on_region_complete=on_region_complete,
+        persist_failures=persist_failures,
+        run_id=run_id,
+    )
+    return quotes
