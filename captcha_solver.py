@@ -427,15 +427,19 @@ class CaptchaSolverClient:
         base_url: str = "http://localhost:8000",
         client_key: str | None = None,
         timeout: float = 120.0,
+        backends: list[BaseCaptchaSolver] | None = None,
     ):
-        backends: list[BaseCaptchaSolver] = [OhMyCaptchaSolver(
-            base_url=base_url, client_key=client_key, timeout=timeout,
-        )]
-        if os.environ.get("TWOCAPTCHA_API_KEY"):
-            backends.append(TwoCaptchaSolver())
-        if os.environ.get("CAPSOLVER_API_KEY"):
-            backends.append(CapSolverSolver())
-        self._delegate = MultiBackendCaptchaSolver(backends=backends)
+        if backends is not None:
+            self._delegate = MultiBackendCaptchaSolver(backends=backends)
+        else:
+            built: list[BaseCaptchaSolver] = [OhMyCaptchaSolver(
+                base_url=base_url, client_key=client_key, timeout=timeout,
+            )]
+            if os.environ.get("TWOCAPTCHA_API_KEY"):
+                built.append(TwoCaptchaSolver())
+            if os.environ.get("CAPSOLVER_API_KEY"):
+                built.append(CapSolverSolver())
+            self._delegate = MultiBackendCaptchaSolver(backends=built)
 
     def __getattr__(self, name: str):
         if name == "_delegate":

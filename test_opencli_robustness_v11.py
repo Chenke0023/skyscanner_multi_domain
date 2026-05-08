@@ -403,3 +403,245 @@ def test_captcha_solver_client_backward_compatible() -> None:
         await client2.close()
 
     _asyncio.run(run_test())
+
+def test_orchestrator_loading_after_cdp_does_not_scrapling() -> None:
+    """When OpenCLI returns loading and CDP also returns loading,
+    Scrapling must NOT be attempted because loading's router transports
+    are ["cdp"] only."""
+    async def run_test():
+        regions = ["CN"]
+        origin = "BJS"
+        destination = "ALA"
+        date = "2026-05-20"
+
+        opencli_quote = FlightQuote("CN", "domain1", None, "CNY", "url1", "opencli_timeout")
+        cdp_quote = FlightQuote("CN", "domain1", None, "CNY", "url1", "page_loading")
+
+        with patch("skyscanner_multi_domain.transports.opencli.compare_via_opencli", return_value=[opencli_quote]):
+            with patch("skyscanner_multi_domain.transports.cdp.detect_cdp_version", return_value={"Browser": "Edge"}):
+                with patch("skyscanner_multi_domain.transports.cdp.compare_via_pages", return_value=[cdp_quote]):
+                    with patch("skyscanner_multi_domain.transports.scrapling.compare_via_scrapling") as mock_scrapling:
+                        mock_scrapling.return_value = [opencli_quote]
+                        with patch("skyscanner_multi_domain.scan.orchestrator.build_scan_batches") as mock_batches:
+                            from skyscanner_multi_domain.planning.search_plan import ScanBatch, ScanTask, RouteCandidate, DateCandidate, MarketCandidate
+                            route = RouteCandidate("BJS", "ALA", "BJS", "ALA", 1, "reason", 1.0, 1.0, {})
+                            date_cand = DateCandidate(date, None, 0, "anchor", "reason", 1.0, {})
+                            market_cn = MarketCandidate("CN", 1, "reason", 1.0, 0.5, 1.0, {})
+
+                            batch = ScanBatch(1, "probe", [
+                                ScanTask(route, date_cand, market_cn, 1.0, "probe", "reason")
+                            ], "reason")
+                            mock_batches.return_value = [batch]
+
+                            quotes = await run_page_scan(
+                                origin, destination, date, regions,
+                                transport="opencli",
+                                allow_browser_fallback=True
+                            )
+
+        assert mock_scrapling.call_count == 0
+        assert len(quotes) == 1
+        assert quotes[0].status == "page_loading"
+        # Should have both opencli_primary and cdp in fallback attempts
+        transports = [a["transport"] for a in quotes[0].fallback_attempts]
+        assert "opencli_primary" in transports
+        assert "cdp" in transports
+
+    asyncio.run(run_test())
+
+def test_scrapling_success_preserves_cdp_failure_trace() -> None:
+    """When Scrapling succeeds after CDP failed, the final quote must preserve
+    the CDP failure diagnostics in fallback_attempts."""
+    async def run_test():
+        regions = ["SG"]
+        origin = "BJS"
+        destination = "ALA"
+        date = "2026-05-20"
+
+        opencli_quote = FlightQuote("SG", "domain2", None, "SGD", "url2", "opencli_failed")
+        cdp_quote = FlightQuote("SG", "domain2", None, "SGD", "url2", "page_parse_failed")
+        cdp_quote.error = "CDP could not parse"
+        scrapling_quote = FlightQuote("SG", "domain2", 300.0, "SGD", "url2", "ok")
+
+        with patch("skyscanner_multi_domain.transports.opencli.compare_via_opencli", return_value=[opencli_quote]):
+            with patch("skyscanner_multi_domain.transports.cdp.detect_cdp_version", return_value={"Browser": "Edge"}):
+                with patch("skyscanner_multi_domain.transports.cdp.compare_via_pages", return_value=[cdp_quote]):
+                    with patch("skyscanner_multi_domain.transports.scrapling.compare_via_scrapling", return_value=[scrapling_quote]):
+                        with patch("skyscanner_multi_domain.scan.orchestrator.build_scan_batches") as mock_batches:
+                            from skyscanner_multi_domain.planning.search_plan import ScanBatch, ScanTask, RouteCandidate, DateCandidate, MarketCandidate
+                            route = RouteCandidate("BJS", "ALA", "BJS", "ALA", 1, "reason", 1.0, 1.0, {})
+                            date_cand = DateCandidate(date, None, 0, "anchor", "reason", 1.0, {})
+                            market_sg = MarketCandidate("SG", 1, "reason", 1.0, 0.5, 1.0, {})
+
+                            batch = ScanBatch(1, "probe", [
+                                ScanTask(route, date_cand, market_sg, 1.0, "probe", "reason")
+                            ], "reason")
+                            mock_batches.return_value = [batch]
+
+                            quotes = await run_page_scan(
+                                origin, destination, date, regions,
+                                transport="opencli",
+                                allow_browser_fallback=True
+                            )
+
+        assert len(quotes) == 1
+        assert quotes[0].price == 300.0
+        transports = [a["transport"] for a in quotes[0].fallback_attempts]
+        assert "opencli_primary" in transports
+        assert "cdp" in transports
+        assert "scrapling_fallback" in transports
+
+    asyncio.run(run_test())
+
+def test_scheduler_uses_wait_policy_extract_wait_steps() -> None:
+    """OpenCLIDomainScheduler must pass per-domain WaitPolicy extract_wait_steps
+    to extract_with_progressive_content_wait."""
+    async def run_test():
+        from skyscanner_multi_domain.transports.opencli import (
+            OpenCLIDomainScheduler, OpenCLITabSession,
+        )
+        import argparse
+
+        args = argparse.Namespace(
+            origin="BJS", destination="ALA", date="2026-05-20",
+            return_date=None, page_wait=10, timeout=30,
+        )
+
+        region = RegionConfig("CN", "China", "www.skyscanner.com.sg", "zh-CN", "CNY")
+
+        from skyscanner_multi_domain.scan.wait_policy import WaitPolicy
+        custom_policy = WaitPolicy(
+            initial_wait=10,
+            max_region_time=45,
+            extract_wait_steps=[0, 2, 4],
+            reason="test",
+        )
+
+        scheduler = OpenCLIDomainScheduler(
+            max_concurrent_domains=1,
+            page_wait=10,
+            wait_policies={"skyscanner.com.sg": custom_policy},
+        )
+
+        captured_steps: list[int] | None = None
+
+        async def capture_extract(self, tab_id, region, url, wait_steps=None):
+            nonlocal captured_steps
+            captured_steps = wait_steps
+            return (
+                FlightQuote(region.code, region.domain, 100.0, "CNY", "url", "ok"),
+                "page text",
+                {"extract_attempt_count": 1, "progressive_wait_used": 0, "max_chunk_size_used": 0},
+            )
+
+        with patch.object(OpenCLITabSession, "ensure_tab_async", return_value=("tab-1", {"tab_open_count": 1, "reused_tab_count": 0})):
+            with patch.object(OpenCLITabSession, "wait_progressive_state", return_value=(True, 0)):
+                with patch.object(OpenCLITabSession, "extract_with_progressive_content_wait", capture_extract):
+                    with patch.object(OpenCLITabSession, "close_async", return_value=None):
+                        quotes, _tel = await scheduler.scan_all(
+                            args=args,
+                            selected_regions=[region],
+                            url_by_region={"CN": "https://www.skyscanner.com.sg/transport/flights/"},
+                            route_key="BJS_ALA_20260520",
+                            persist_failures=False,
+                            run_id="test",
+                        )
+
+        assert len(quotes) == 1
+        assert quotes[0].region == "CN"
+        assert quotes[0].status == "ok"
+        assert captured_steps == [0, 2, 4]
+
+    asyncio.run(run_test())
+
+def test_scheduler_uses_wait_policy_max_region_time() -> None:
+    """OpenCLIDomainScheduler must use per-domain WaitPolicy max_region_time
+    for budget enforcement."""
+    async def run_test():
+        from skyscanner_multi_domain.transports.opencli import (
+            OpenCLIDomainScheduler, OpenCLITabSession,
+        )
+        import argparse
+
+        args = argparse.Namespace(
+            origin="BJS", destination="ALA", date="2026-05-20",
+            return_date=None, page_wait=5, timeout=30,
+        )
+
+        region1 = RegionConfig("CN", "China", "www.skyscanner.com.sg", "zh-CN", "CNY")
+        region2 = RegionConfig("SG", "Singapore", "www.skyscanner.com.sg", "en-SG", "SGD")
+
+        from skyscanner_multi_domain.scan.wait_policy import WaitPolicy
+        custom_policy = WaitPolicy(
+            initial_wait=5,
+            max_region_time=1,
+            extract_wait_steps=[0, 8, 15],
+            reason="test",
+        )
+
+        scheduler = OpenCLIDomainScheduler(
+            max_concurrent_domains=1,
+            page_wait=5,
+            max_region_time=60,
+            wait_policies={"skyscanner.com.sg": custom_policy},
+        )
+
+        call_count = 0
+
+        async def slow_extract(self, tab_id, region, url, wait_steps=None):
+            nonlocal call_count
+            call_count += 1
+            return (
+                FlightQuote(region.code, region.domain, 100.0, "CNY", "url", "ok"),
+                "page text",
+                {"extract_attempt_count": 1, "progressive_wait_used": 0, "max_chunk_size_used": 0},
+            )
+
+        with patch.object(OpenCLITabSession, "ensure_tab_async", return_value=("tab-1", {"tab_open_count": 1, "reused_tab_count": 0})):
+            with patch.object(OpenCLITabSession, "wait_progressive_state", return_value=(True, 0)):
+                with patch.object(OpenCLITabSession, "extract_with_progressive_content_wait", slow_extract):
+                    with patch.object(OpenCLITabSession, "close_async", return_value=None):
+                        with patch("skyscanner_multi_domain.transports.opencli.time") as mock_time:
+                            # Calls: wall_start, domain_start, budget check for SG, wall_time_ms
+                            mock_time.monotonic.side_effect = [0, 0, 2, 2]
+                            quotes, _tel = await scheduler.scan_all(
+                                args=args,
+                                selected_regions=[region1, region2],
+                                url_by_region={
+                                    "CN": "https://www.skyscanner.com.sg/transport/flights/",
+                                    "SG": "https://www.skyscanner.com.sg/transport/flights/",
+                                },
+                                route_key="BJS_ALA_20260520",
+                                persist_failures=False,
+                                run_id="test",
+                            )
+
+        assert len(quotes) == 2
+        assert quotes[0].region == "CN"
+        assert quotes[0].status == "ok"
+        assert quotes[1].region == "SG"
+        assert quotes[1].status == "opencli_not_attempted"
+        assert "1s" in quotes[1].error
+
+    asyncio.run(run_test())
+
+def test_captcha_solver_client_accepts_backends_kwarg() -> None:
+    """CaptchaSolverClient must accept backends= kwarg for callers who adopted
+    the MultiBackendCaptchaSolver style."""
+    import asyncio as _asyncio
+
+    async def run_test():
+        from captcha_solver import CaptchaSolverClient, BaseCaptchaSolver
+
+        class FakeSolver(BaseCaptchaSolver):
+            async def health_check(self):
+                return {"status": "healthy", "provider": "fake"}
+
+        fake = FakeSolver()
+        client = CaptchaSolverClient(backends=[fake])
+        assert isinstance(client, CaptchaSolverClient)
+        hc = await client.health_check()
+        assert hc["status"] == "healthy"
+        assert "FakeSolver" in hc["backends"]
+
+    _asyncio.run(run_test())
