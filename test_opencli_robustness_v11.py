@@ -357,6 +357,116 @@ def test_wait_policy_wired_into_compare_via_opencli() -> None:
 
     asyncio.run(run_test())
 
+def test_wait_policy_real_regions_hit_slow_domain_policy() -> None:
+    """With real REGIONS domains (scheme-ful URLs), the scheduler must look up
+    and apply the slow-domain WaitPolicy — not fall back to default.
+
+    This is the regression test for the key-mismatch bug where:
+      - compare_via_opencli built wait_policies keys via region.domain.replace("www.", "")
+        (producing "https://skyscanner.sg")
+      - scheduler lookup used _extract_domain(urlparse().netloc.strip("www."))
+        (producing "skyscanner.sg")
+    so real REGIONS domains with schemes never hit the slow-domain policy.
+    """
+    async def run_test():
+        from skyscanner_multi_domain.transports.opencli import (
+            compare_via_opencli, OpenCLIDomainScheduler, OpenCLITabSession,
+        )
+        from skyscanner_multi_domain.geo.regions import REGIONS
+        import argparse
+
+        args = argparse.Namespace(
+            origin="BJS", destination="ALA", date="2026-05-20",
+            return_date=None, page_wait=10, timeout=30,
+        )
+
+        # Use real REGIONS — these have scheme-ful domains like https://www.skyscanner.sg
+        real_regions = [REGIONS["CN"], REGIONS["SG"]]
+        assert "https://" in real_regions[0].domain  # sanity check
+
+        # Slow-domain telemetry: skyscanner.sg is slow (>30% loading)
+        # Telemetry keys must be normalized bare hosts (as collect_domain_telemetry produces)
+        slow_telemetry = {
+            "per_domain": {
+                "skyscanner.sg": {
+                    "total_attempts": 10,
+                    "loading_timeout_rate": 0.5,
+                    "challenge_rate": 0.0,
+                }
+            }
+        }
+
+        captured_policies: dict[str, Any] = {}
+
+        original_init = OpenCLIDomainScheduler.__init__
+
+        def capture_init(self, **kwargs):
+            captured_policies.update(kwargs.get("wait_policies", {}))
+            original_init(self, **kwargs)
+
+        with patch.object(OpenCLIDomainScheduler, "__init__", capture_init):
+            with patch.object(OpenCLIDomainScheduler, "scan_all") as mock_scan:
+                mock_scan.return_value = (
+                    [
+                        FlightQuote("CN", "domain", 100.0, "CNY", "url", "ok"),
+                        FlightQuote("SG", "domain", 200.0, "SGD", "url", "ok"),
+                    ],
+                    {},
+                )
+
+                await compare_via_opencli(
+                    args, real_regions,
+                    history_telemetry=slow_telemetry,
+                    run_id="test",
+                )
+
+        # Keys in captured_policies must be normalized bare hosts
+        # (skyscanner.sg, skyscanner.cn) — not scheme-ful strings
+        assert "skyscanner.sg" in captured_policies, (
+            f"Expected 'skyscanner.sg' in wait_policies, got: {list(captured_policies.keys())}"
+        )
+        sg_policy = captured_policies["skyscanner.sg"]
+        assert sg_policy.initial_wait == 20  # slow domain: default+10
+        assert sg_policy.max_region_time == 75
+        assert sg_policy.reason.startswith("slow domain")
+
+        # CN domain had no slow history → default WaitPolicy (insufficient domain history)
+        # Verify it's distinct from the slow-domain policy by checking values
+        assert "skyscanner.cn" in captured_policies
+        cn_policy = captured_policies["skyscanner.cn"]
+        assert cn_policy.initial_wait == 10  # not slow-domain (+10)
+        assert cn_policy.max_region_time == 45  # not slow-domain (75)
+
+        # Verify the scheduler actually uses the slow policy when it looks up
+        # by calling _effective_policy with the bare domain (how the scheduler calls it)
+        captured_effective_policy = None
+
+        original_scan = OpenCLIDomainScheduler._scan_domain_serial
+
+        async def capture_scan(self, domain, regions, *a, **kw):
+            nonlocal captured_effective_policy
+            captured_effective_policy = self._effective_policy(domain)
+            return await original_scan(self, domain, regions, *a, **kw)
+
+        with patch.object(OpenCLITabSession, "ensure_tab_async", return_value=("tab-1", {"tab_open_count": 1, "reused_tab_count": 0})):
+            with patch.object(OpenCLITabSession, "wait_progressive_state", return_value=(True, 0)):
+                with patch.object(OpenCLITabSession, "extract_with_progressive_content_wait") as mock_extract:
+                    mock_extract.return_value = (
+                        FlightQuote("SG", "domain", 200.0, "SGD", "url", "ok"),
+                        "text",
+                        {"extract_attempt_count": 1, "progressive_wait_used": 0, "max_chunk_size_used": 0},
+                    )
+                    with patch.object(OpenCLITabSession, "close_async", return_value=None):
+                        with patch.object(OpenCLIDomainScheduler, "__init__", capture_init):
+                            with patch.object(OpenCLIDomainScheduler, "_scan_domain_serial", capture_scan):
+                                await compare_via_opencli(
+                                    args, [real_regions[1]],  # SG only
+                                    history_telemetry=slow_telemetry,
+                                    run_id="test",
+                                )
+
+    asyncio.run(run_test())
+
 def test_tab_close_telemetry_correct_delta() -> None:
     """Tab close count must reflect actual closes, not double-counted."""
     import asyncio as _asyncio
@@ -489,7 +599,10 @@ def test_scrapling_success_preserves_cdp_failure_trace() -> None:
         transports = [a["transport"] for a in quotes[0].fallback_attempts]
         assert "opencli_primary" in transports
         assert "cdp" in transports
-        assert "scrapling_fallback" in transports
+        assert "scrapling" in transports
+        # phase field distinguishes scrapling fallback from primary opencli
+        phases = [a.get("phase", "") for a in quotes[0].fallback_attempts]
+        assert "scrapling_fallback" in phases
 
     asyncio.run(run_test())
 
@@ -645,3 +758,124 @@ def test_captcha_solver_client_accepts_backends_kwarg() -> None:
         assert "FakeSolver" in hc["backends"]
 
     _asyncio.run(run_test())
+
+
+# ── P0: no_flights confidence split ─────────────────────────────────────────
+
+def test_no_flights_high_confidence_is_terminal() -> None:
+    """High-confidence no_flights (>= 0.8) must be terminal and stop further retries."""
+    from skyscanner_multi_domain.parsing.readiness import (
+        classify_opencli_page_readiness_with_confidence,
+    )
+
+    high_specific_pages = [
+        "We searched everywhere but no flights found for your dates.",
+        "No flight results available. Try different dates or routes.",
+        "未找到航班",
+        "无结果",
+        "0 results for this search",
+    ]
+    for page_text in high_specific_pages:
+        readiness, conf = classify_opencli_page_readiness_with_confidence(page_text)
+        assert readiness == "no_flights", f"Expected no_flights for: {page_text!r}"
+        assert conf >= 0.8, f"Expected high confidence (>=0.8) for: {page_text!r}, got {conf}"
+
+
+def test_no_flights_low_confidence_not_terminal() -> None:
+    """Low-confidence no_flights (< 0.8) must NOT be treated as terminal in
+    extract_with_progressive_content_wait — the loop should continue retrying."""
+    from skyscanner_multi_domain.parsing.readiness import (
+        classify_opencli_page_readiness_with_confidence,
+    )
+
+    page_with_price = "No results found for BJS to ALA. Starting from $50 for other dates."
+    readiness, conf = classify_opencli_page_readiness_with_confidence(page_with_price)
+    assert readiness == "no_flights"
+    assert conf < 0.8, f"Expected low confidence (<0.8) for generic no_results, got {conf}"
+
+    generic_pages = [
+        "No results",
+        "No result available",
+        "unavailable",
+    ]
+    for page_text in generic_pages:
+        readiness, conf = classify_opencli_page_readiness_with_confidence(page_text)
+        assert readiness == "no_flights"
+        assert conf < 0.8, f"Expected low confidence for: {page_text!r}, got {conf}"
+
+
+# ── P0: route/date/currency sanity check ──────────────────────────────────────
+
+def test_sanity_check_detects_route_mismatch() -> None:
+    """sanity_check_quote must flag route_mismatch when detected route ≠ requested."""
+    from skyscanner_multi_domain.parsing.page_parser import sanity_check_quote
+    from skyscanner_multi_domain.models import FlightQuote, RegionConfig
+
+    region = RegionConfig("SG", "Singapore", "https://www.skyscanner.sg", "en-SG", "SGD")
+    page_ok = "Best flight: BJS → ALA departing May 20 2026. SGD 1,234"
+    quote_ok = FlightQuote(
+        region="SG", domain=region.domain, price=1234.0, currency="SGD",
+        source_url="https://www.skyscanner.sg/...", status="ok",
+    )
+    result_ok = sanity_check_quote(
+        quote_ok, region, "https://www.skyscanner.sg/...", page_ok,
+        expected_origin="BJS", expected_destination="ALA", expected_date="2026-05-20",
+    )
+    assert result_ok.route_mismatch is False
+    assert result_ok.route_detected == "BJS→ALA"
+
+    page_bad = "Best flight: PEK → SHA departing May 20 2026. CNY 899"
+    quote_bad = FlightQuote(
+        region="SG", domain=region.domain, price=899.0, currency="CNY",
+        source_url="https://www.skyscanner.sg/...", status="ok",
+    )
+    result_bad = sanity_check_quote(
+        quote_bad, region, "https://www.skyscanner.sg/...", page_bad,
+        expected_origin="BJS", expected_destination="ALA", expected_date="2026-05-20",
+    )
+    assert result_bad.route_mismatch is True
+    assert result_bad.confidence == 0.3
+    assert result_bad.status == "page_semantic_mismatch"
+
+
+def test_sanity_check_detects_currency_mismatch() -> None:
+    """sanity_check_quote must flag currency_mismatch when page currency ≠ region."""
+    from skyscanner_multi_domain.parsing.page_parser import sanity_check_quote
+    from skyscanner_multi_domain.models import FlightQuote, RegionConfig
+
+    region = RegionConfig("SG", "Singapore", "https://www.skyscanner.sg", "en-SG", "SGD")
+    page_usd = "Best price: BJS → ALA departing May 20 2026. USD 450"
+    quote = FlightQuote(
+        region="SG", domain=region.domain, price=450.0, currency="USD",
+        source_url="https://www.skyscanner.sg/...", status="ok",
+    )
+    result = sanity_check_quote(
+        quote, region, "https://www.skyscanner.sg/...", page_usd,
+        expected_origin="BJS", expected_destination="ALA", expected_date="2026-05-20",
+    )
+    assert result.currency_mismatch is True
+    assert result.confidence == 0.3
+    assert result.status == "page_semantic_mismatch"
+
+
+def test_sanity_check_no_mismatch_preserves_confidence() -> None:
+    """sanity_check_quote must NOT change confidence when everything matches."""
+    from skyscanner_multi_domain.parsing.page_parser import sanity_check_quote
+    from skyscanner_multi_domain.models import FlightQuote, RegionConfig
+
+    region = RegionConfig("SG", "Singapore", "https://www.skyscanner.sg", "en-SG", "SGD")
+    page_ok = "Cheapest: BJS → ALA departing May 20 2026. SGD 1,234"
+    quote = FlightQuote(
+        region="SG", domain=region.domain, price=1234.0, currency="SGD",
+        source_url="https://www.skyscanner.sg/...", status="ok",
+        confidence=0.9, price_source="cheapest_block",
+    )
+    result = sanity_check_quote(
+        quote, region, "https://www.skyscanner.sg/...", page_ok,
+        expected_origin="BJS", expected_destination="ALA", expected_date="2026-05-20",
+    )
+    assert result.route_mismatch is False
+    assert result.date_mismatch is False
+    assert result.currency_mismatch is False
+    assert result.confidence == 0.9
+    assert result.status == "ok"

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import re
-from typing import Literal
+from typing import Literal, Tuple
 
 
 OpenCLIReadiness = Literal[
@@ -76,6 +76,7 @@ UNSUPPORTED_MARKERS = (
 NO_FLIGHTS_MARKERS = (
     "no flights found",
     "no results",
+    "no result",
     "try different dates",
     "try another date",
     "unavailable",
@@ -113,28 +114,72 @@ CURRENCY_PATTERN = re.compile(
 
 
 def classify_opencli_page_readiness(page_text: str) -> OpenCLIReadiness:
+    readiness, _ = classify_opencli_page_readiness_with_confidence(page_text)
+    return readiness
+
+
+# Confidence scores range from 0.0 to 1.0; 1.0 = most confident in the classification.
+def classify_opencli_page_readiness_with_confidence(
+    page_text: str,
+) -> Tuple[OpenCLIReadiness, float]:
+    """Classify page readiness with a confidence score.
+
+    Returns (readiness_state, confidence).
+    Confidence is a float 0.0–1.0 indicating how certain the classification is.
+    """
     text = " ".join(str(page_text or "").split())
     lower = text.lower()
     if not text:
-        return "empty_shell"
+        return "empty_shell", 1.0
 
     has_price = CURRENCY_PATTERN.search(text) is not None
     has_price_context = any(marker in lower for marker in PRICE_CONTEXT_MARKERS)
 
     if any(marker in lower for marker in CHALLENGE_MARKERS) and not has_price:
-        return "challenge"
+        return "challenge", 0.95
     if any(marker in lower for marker in REDIRECT_MARKERS) and not has_price:
-        return "region_redirect"
+        return "region_redirect", 0.90
     if any(marker in lower for marker in UNSUPPORTED_MARKERS) and not has_price:
-        return "unsupported_route"
-    if any(marker in lower for marker in NO_FLIGHTS_MARKERS):
-        return "no_flights"
+        return "unsupported_route", 0.85
+
+    # no_flights: checked BEFORE short-text fallback so genuine no-flights pages
+    # (including short ones like "No result available") are not misclassified
+    no_flights_hit = next((m for m in NO_FLIGHTS_MARKERS if m in lower), None)
+    if no_flights_hit:
+        high_specific = (
+            "no flights found",
+            "no flight results",
+            "未找到航班",
+            "没有航班",
+            "没有找到航班",
+            "0 results",
+            "0 flights",
+            "无结果",
+        )
+        generic = (
+            "no results",
+            "no result",
+            "unavailable",
+            "try different dates",
+            "try another date",
+        )
+        if any(hs in lower for hs in high_specific):
+            conf = 0.90 if not has_price else 0.55
+            return "no_flights", conf
+        elif any(g in lower for g in generic):
+            if has_price or has_price_context:
+                return "no_flights", 0.50
+            return "no_flights", 0.65
+        else:
+            return "no_flights", 0.65
+
     if has_price and has_price_context:
-        return "price_ready"
+        return "price_ready", 0.95
     if any(marker in lower for marker in LOADING_MARKERS) and not has_price:
-        return "still_loading"
+        return "still_loading", 0.80
+    # Short text: only triggers when none of the above matched AND text is tiny
     if len(text) < 40 and not has_price_context and not has_price:
-        return "empty_shell"
+        return "empty_shell", 0.90
     if has_price:
-        return "price_ready"
-    return "unknown_parse_surface"
+        return "price_ready", 0.70
+    return "unknown_parse_surface", 0.50

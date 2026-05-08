@@ -16,8 +16,15 @@ from skyscanner_multi_domain.diagnostics.snapshots import (
     should_save_opencli_snapshot,
 )
 from skyscanner_multi_domain.models import FlightQuote, RegionConfig
-from skyscanner_multi_domain.parsing.page_parser import extract_page_quote
-from skyscanner_multi_domain.parsing.readiness import classify_opencli_page_readiness
+from skyscanner_multi_domain.parsing.page_parser import (
+    extract_page_quote,
+    sanity_check_quote,
+)
+from skyscanner_multi_domain.parsing.readiness import (
+    classify_opencli_page_readiness,
+    classify_opencli_page_readiness_with_confidence,
+)
+from skyscanner_multi_domain.scan.wait_policy import normalize_domain
 
 TAB_WAIT_TIMEOUT = 20
 TAB_POLL_INTERVAL = 2.0
@@ -282,7 +289,8 @@ class OpenCLITabSession:
             result = await _tab_extract_async(tab_id, chunk_size=chunk_size)
             last_text = str(result.get("content", ""))
             quote = _quote_from_opencli_result(region, result, url)
-            quote.readiness = classify_opencli_page_readiness(last_text)
+            readiness, no_flights_conf = classify_opencli_page_readiness_with_confidence(last_text)
+            quote.readiness = readiness
 
             if quote.price is not None:
                 return quote, last_text, delta
@@ -293,9 +301,15 @@ class OpenCLITabSession:
                     quote.error = "OpenCLI page readiness classified the page as a challenge"
                 return quote, last_text, delta
             if quote.readiness == "no_flights":
-                quote.status = "opencli_no_flights"
-                quote.error = "OpenCLI page readiness classified the page as no flights"
-                return quote, last_text, delta
+                # High-confidence no-flights (>= 0.8) is terminal; low-confidence falls
+                # through to allow further retry/extract attempts within the same pass
+                if no_flights_conf >= 0.8:
+                    quote.status = "opencli_no_flights"
+                    quote.error = (
+                        f"OpenCLI page readiness classified the page as no flights "
+                        f"(confidence {no_flights_conf:.2f}, terminal)"
+                    )
+                    return quote, last_text, delta
 
             last_quote = quote
 
@@ -338,9 +352,17 @@ def _quote_from_opencli_result(
 
 def _extract_domain(url_str: str) -> str:
     parsed = urlparse(url_str)
-    # Normalize: strip www. prefix for grouping
     netloc = parsed.netloc.replace("www.", "")
     return netloc
+
+
+def _normalize_for_lookup(value: str) -> str:
+    """Normalize a domain/URL for wait_policy lookup.
+
+    Uses the shared normalize_domain for consistent key matching
+    between wait policy construction and scheduler lookup.
+    """
+    return normalize_domain(value)
 
 
 def _group_regions_by_domain(
@@ -438,7 +460,7 @@ class OpenCLIDomainScheduler:
 
     def _effective_page_wait(self, domain: str) -> int:
         """Return the page_wait for a domain, respecting WaitPolicy if configured."""
-        policy = self._wait_policies.get(domain)
+        policy = self._wait_policies.get(_normalize_for_lookup(domain))
         if policy is not None:
             return max(policy.initial_wait, 3)
         return self.page_wait
@@ -447,11 +469,10 @@ class OpenCLIDomainScheduler:
         """Return the WaitPolicy for a domain, or a default."""
         from skyscanner_multi_domain.scan.wait_policy import (
             WaitPolicy,
-            DEFAULT_MAX_REGION_TIME,
             DEFAULT_EXTRACT_WAIT_STEPS,
         )
 
-        policy = self._wait_policies.get(domain)
+        policy = self._wait_policies.get(_normalize_for_lookup(domain))
         if policy is not None:
             return policy
         return WaitPolicy(
@@ -591,6 +612,18 @@ class OpenCLIDomainScheduler:
                     quote.extract_attempt_count = delta_extract["extract_attempt_count"]
                     quote.max_chunk_size_used = delta_extract["max_chunk_size_used"]
 
+                    # P0: sanity check — validate route/date/currency match the request
+                    if quote.price is not None:
+                        sanity_check_quote(
+                            quote=quote,
+                            region=region,
+                            source_url=url,
+                            page_text=page_text,
+                            expected_origin=args.origin,
+                            expected_destination=args.destination,
+                            expected_date=args.date,
+                        )
+
                     if not success and quote.price is None:
                         if quote.status not in TERMINAL_STATUSES:
                             quote.status = "opencli_timeout"
@@ -700,11 +733,11 @@ async def compare_via_opencli(
     from skyscanner_multi_domain.scan.wait_policy import build_wait_policy
     wait_policies: dict[str, Any] = {}
     for region in selected_regions:
-        domain_key = region.domain.replace("www.", "")
+        domain_key = normalize_domain(requested_urls[region.code])
         if domain_key not in wait_policies:
             wait_policies[domain_key] = build_wait_policy(
                 region_code=region.code,
-                domain=region.domain,
+                domain=domain_key,
                 history_telemetry=history_telemetry,
                 default_page_wait=page_wait,
             )

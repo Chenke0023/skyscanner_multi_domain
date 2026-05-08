@@ -47,6 +47,12 @@ class FlightQuote:
     selected_candidate_rank: Optional[int] = None
     candidate_sources: list[str] = field(default_factory=list)
     readiness: Optional[str] = None
+    route_detected: Optional[str] = None
+    date_detected: Optional[str] = None
+    currency_detected: Optional[str] = None
+    route_mismatch: bool = False
+    date_mismatch: bool = False
+    currency_mismatch: bool = False
 
     # Telemetry fields
     tab_open_count: int = 0

@@ -302,6 +302,173 @@ class PageParseDiagnostics:
     used_fallback: bool
 
 
+# ── Route/date extraction ──────────────────────────────────────────────────────
+
+_ROUTE_CODE_PATTERN = re.compile(
+    r"\b([A-Z]{2,3})\s*(?:→|->|to|→|ー>?)\s*([A-Z]{2,3})\b",
+    re.IGNORECASE,
+)
+_DATE_PATTERNS = (
+    re.compile(r"\b(\d{1,2})\s+(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a]*\.?\s+(\d{4})\b", re.IGNORECASE),
+    re.compile(r"\b(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a]*\.?\s+(\d{1,2}),?\s+(\d{4})\b", re.IGNORECASE),
+    re.compile(r"\b(\d{4})-(\d{2})-(\d{2})\b"),
+    re.compile(r"\b(\d{1,2})/(\d{1,2})/(\d{4})\b"),
+    re.compile(r"\b(\d{1,2})\s+(?:月|日)\s+(\d{4})\b"),
+)
+_ROUTE_CODE_IN_TEXT = re.compile(r"\b([A-Z]{2,3})\b")
+
+
+def _normalize_route_code(code: str) -> str:
+    return code.strip().upper()
+
+
+def _extract_route_from_text(text: str) -> tuple[Optional[str], Optional[str]]:
+    """Extract origin→destination from page text. Returns (origin, destination) or (None, None)."""
+    text_lower = text.lower()
+    # Look for explicit route patterns
+    for match in _ROUTE_CODE_PATTERN.finditer(text):
+        o, d = _normalize_route_code(match.group(1)), _normalize_route_code(match.group(2))
+        # Validate they look like airport codes (2-3 letters)
+        if len(o) >= 2 and len(d) >= 2 and o != d:
+            return o, d
+    return None, None
+
+
+def _extract_date_from_text(text: str, expected_year: str = "") -> Optional[str]:
+    """Extract the most prominent date from page text. Returns ISO date string or None."""
+    # Collect all date matches with their position
+    candidates: list[tuple[int, str]] = []
+    for pattern in _DATE_PATTERNS:
+        for m in pattern.finditer(text):
+            parts = m.groups()
+            try:
+                if len(parts) == 3:
+                    if pattern.pattern.startswith(r"\b(\d{4})"):
+                        # YYYY-MM-DD
+                        y, mo, d = parts
+                        date_str = f"{y}-{mo:0>2}-{d:0>2}"
+                    elif "Jan" in pattern.pattern or "Feb" in pattern.pattern or "Mar" in pattern.pattern:
+                        # DD Mon YYYY or Mon DD, YYYY
+                        # parts[0] is digit → DD Mon YYYY (e.g. "20 May 2026")
+                        # parts[0] is alpha → Mon DD YYYY (e.g. "May 20 2026")
+                        if parts[0].isdigit():
+                            d, mon, y = parts
+                        else:
+                            mon, d, y = parts
+                        mo_num = {"jan":1,"feb":2,"mar":3,"apr":4,"may":5,"jun":6,
+                                  "jul":7,"aug":8,"sep":9,"oct":10,"nov":11,"dec":12}.get(mon[:3].lower(), 1)
+                        date_str = f"{y}-{mo_num:0>2}-{d:0>2}"
+                    elif "月" in pattern.pattern or "日" in pattern.pattern:
+                        d, y = parts
+                        date_str = f"{y}-01-{d:0>2}"
+                    else:
+                        continue
+                    candidates.append((m.start(), date_str))
+            except (ValueError, KeyError):
+                continue
+    if not candidates:
+        return None
+    # Return the date closest to the start of the text (most likely the main trip date)
+    candidates.sort(key=lambda x: x[0])
+    return candidates[0][1]
+
+
+# ── Sanity check ───────────────────────────────────────────────────────────────
+
+SEMANTIC_MISMATCH_STATUS = "page_semantic_mismatch"
+
+
+def sanity_check_quote(
+    quote: FlightQuote,
+    region: "RegionConfig",
+    source_url: str,
+    page_text: str,
+    expected_origin: str,
+    expected_destination: str,
+    expected_date: str,
+) -> FlightQuote:
+    """Validate that a successfully-parsed quote actually matches the requested route/date/currency.
+
+    Sets route_mismatch / date_mismatch / currency_mismatch flags on the quote.
+    If any mismatch is found, downgrades confidence to <= 0.3 and sets status to
+    page_semantic_mismatch so the result is not silently accepted as valid.
+    """
+    # Extract what we can from page text and URL
+    route_origin, route_dest = _extract_route_from_text(page_text)
+    detected_date = _extract_date_from_text(page_text, expected_year=expected_date[:4] if expected_date else "")
+
+    # Extract currency from page text
+    import re as _re
+    currency_match = _re.search(
+        r"\b(AUD|GBP|CAD|CNY|EUR|HKD|INR|JPY|KRW|KZT|MYR|PHP|SGD|THB|USD|VND|RUB|CHF|SEK|NOK|DKK|PLN|CZK|HUF|RON|BGN|HRK|AED|QAR|SAR|KWD|BHD|OMR|RSD|TRY|ZAR|MXN|BRL|CLP|COP|PEN|PYG|UYU)\b",
+        page_text,
+    )
+    currency_detected = currency_match.group(1) if currency_match else None
+
+    # Normalize
+    expected_origin_n = expected_origin.strip().upper()
+    expected_dest_n = expected_destination.strip().upper()
+    route_origin_n = route_origin.strip().upper() if route_origin else None
+    route_dest_n = route_dest.strip().upper() if route_dest else None
+
+    # Check mismatches
+    route_ok = (
+        route_origin_n == expected_origin_n and route_dest_n == expected_dest_n
+    ) if route_origin_n and route_dest_n else None  # None = couldn't detect
+
+    date_ok: Optional[bool] = None
+    if detected_date and expected_date:
+        date_ok = _normalize_date(detected_date) == _normalize_date(expected_date)
+
+    currency_ok: Optional[bool] = None
+    if currency_detected and region.currency:
+        currency_ok = currency_detected.upper() == region.currency.upper()
+
+    quote.route_detected = f"{route_origin}→{route_dest}" if route_origin and route_dest else None
+    quote.date_detected = detected_date
+    quote.currency_detected = currency_detected
+
+    mismatches: list[str] = []
+    if route_ok is False:
+        quote.route_mismatch = True
+        mismatches.append(
+            f"route mismatch: expected {expected_origin_n}→{expected_dest_n}, "
+            f"detected {quote.route_detected}"
+        )
+    if date_ok is False:
+        quote.date_mismatch = True
+        mismatches.append(
+            f"date mismatch: expected {expected_date}, detected {detected_date}"
+        )
+    if currency_ok is False:
+        quote.currency_mismatch = True
+        mismatches.append(
+            f"currency mismatch: expected {region.currency}, detected {currency_detected}"
+        )
+
+    if mismatches:
+        quote.status = SEMANTIC_MISMATCH_STATUS
+        quote.error = "; ".join(mismatches)
+        quote.confidence = 0.3
+        if not quote.parser_warnings:
+            quote.parser_warnings = []
+        mismatch_warning = f"语义校验失败: {quote.error}"
+        if mismatch_warning not in quote.parser_warnings:
+            quote.parser_warnings.append(mismatch_warning)
+
+    return quote
+
+
+def _normalize_date(date_str: str) -> str:
+    """Normalize a date string to YYYY-MM-DD."""
+    from datetime import datetime
+    for fmt in ("%Y-%m-%d", "%d/%m/%Y", "%m/%d/%Y", "%Y/%m/%d"):
+        for try_fmt in (fmt, fmt.replace("/", "-")):
+            try:
+                return datetime.strptime(date_str.strip(), try_fmt).strftime("%Y-%m-%d")
+            except ValueError:
+                pass
+    return date_str.strip()
 def attach_parser_trust_metadata(
     quote: FlightQuote,
     diagnostics: PageParseDiagnostics,
