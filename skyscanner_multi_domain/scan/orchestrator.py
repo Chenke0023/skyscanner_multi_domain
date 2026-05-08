@@ -788,19 +788,23 @@ async def run_page_scan(
                             ]
                             quote_by_region[region.code] = page_quote
                         elif page_quote:
-                            quote.fallback_attempts.append({
-                                "transport": "page_fallback", "status": page_quote.status,
-                                "failure_class": classify_quote_failure(page_quote),
-                                "error": page_quote.error,
-                            })
+                            # Update quote_by_region with CDP result so scrapling
+                            # re-evaluates decide_fallback on the correct base quote
+                            page_quote.fallback_attempts = [
+                                {"transport": "opencli_primary", "status": quote.status,
+                                 "failure_class": classify_quote_failure(quote),
+                                 "error": quote.error},
+                                *list(page_quote.fallback_attempts or []),
+                            ]
+                            quote_by_region[region.code] = page_quote
 
-            # Try Scrapling fallback (only for regions that still have no price)
+            # Try Scrapling fallback — re-evaluate router for each region
+            # (CDP may have updated quote_by_region with terminal results)
             if scrapling_targets:
                 scrapling_regions = [
-                    region for region, quote in scrapling_targets
+                    region for region, _ in scrapling_targets
                     if quote_by_region[region.code].price is None
-                    and quote.price is None
-                    and quote.status not in ("px_challenge", "opencli_not_attempted")
+                    and decide_fallback(quote_by_region[region.code]).should_fallback
                 ]
                 if scrapling_regions:
                     scrapling_quotes = await compare_via_scrapling(
@@ -826,11 +830,14 @@ async def run_page_scan(
                             ]
                             quote_by_region[region.code] = sq
                         elif sq:
-                            quote.fallback_attempts.append({
+                            # Merge scrapling failure into quote_by_region
+                            current = quote_by_region.get(region.code, quote)
+                            current.fallback_attempts.append({
                                 "transport": "scrapling_fallback", "status": sq.status,
                                 "failure_class": classify_quote_failure(sq),
                                 "error": sq.error,
                             })
+                            quote_by_region[region.code] = current
 
             # Rebuild quotes list preserving order with fallback replacements
             new_quotes = [quote_by_region.get(q.region, q) for q in quotes]

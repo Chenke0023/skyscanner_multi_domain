@@ -426,10 +426,19 @@ class OpenCLIDomainScheduler:
         max_concurrent_domains: int = DEFAULT_MAX_CONCURRENT_DOMAINS,
         page_wait: int = 10,
         max_region_time: int = MAX_REGION_TIME,
+        wait_policies: dict[str, Any] | None = None,
     ):
         self.max_concurrent_domains = max_concurrent_domains
         self.page_wait = max(page_wait, 3)
         self.max_region_time = max_region_time
+        self._wait_policies = wait_policies or {}
+
+    def _effective_page_wait(self, domain: str) -> int:
+        """Return the page_wait for a domain, respecting WaitPolicy if configured."""
+        policy = self._wait_policies.get(domain)
+        if policy is not None:
+            return max(policy.initial_wait, 3)
+        return self.page_wait
 
     async def scan_all(
         self,
@@ -509,9 +518,25 @@ class OpenCLIDomainScheduler:
         page_text_len_by_region: dict[str, int] = {}
         page_url_by_region: dict[str, str] = {}
         return_date = getattr(args, "return_date", None)
+        domain_start = time.monotonic()
 
         try:
-            for region in regions:
+            for i, region in enumerate(regions):
+                # Time budget enforcement: skip subsequent regions if budget exhausted
+                if i > 0:
+                    elapsed = time.monotonic() - domain_start
+                    if elapsed > self.max_region_time:
+                        budget_quote = FlightQuote(
+                            region=region.code, domain=region.domain,
+                            price=None, currency=region.currency,
+                            source_url=url_by_region.get(region.code, ""),
+                            status="opencli_not_attempted",
+                            error=f"Time budget exceeded ({elapsed:.0f}s > {self.max_region_time}s max)",
+                        )
+                        if on_region_complete:
+                            on_region_complete(region, budget_quote)
+                        results.append(budget_quote)
+                        continue
                 if on_region_start:
                     on_region_start(region)
 
@@ -532,7 +557,7 @@ class OpenCLIDomainScheduler:
                         raise RuntimeError("No tab ID returned")
 
                     success, delta_wait_state = await session.wait_progressive_state(
-                        tab_id, self.page_wait,
+                        tab_id, self._effective_page_wait(domain),
                     )
                     quote, page_text, delta_extract = await session.extract_with_progressive_content_wait(
                         tab_id, region, url,
@@ -589,9 +614,8 @@ class OpenCLIDomainScheduler:
                 if on_region_complete:
                     on_region_complete(region, quote)
         finally:
-            tab_close_count = session.session_tab_close_count
             await session.close_async()
-            tab_close_count += session.session_tab_close_count
+            tab_close_count = session.session_tab_close_count
             # Attach tab_close to last quote
             if results:
                 results[-1].tab_close_count = tab_close_count
@@ -634,6 +658,7 @@ async def compare_via_opencli(
     on_region_complete: Any = None,
     region_concurrency: int = 1,
     run_id: str = "",
+    history_telemetry: dict[str, Any] | None = None,
 ) -> list[FlightQuote]:
     """Fetch flight quotes using opencli with domain-aware parallel scheduling."""
     if build_search_url is None:
@@ -649,6 +674,19 @@ async def compare_via_opencli(
         url = build_search_url(region, args.origin, args.destination, args.date, return_date)
         requested_urls[region.code] = url
 
+    # Build per-domain WaitPolicies from history telemetry
+    from skyscanner_multi_domain.scan.wait_policy import build_wait_policy
+    wait_policies: dict[str, Any] = {}
+    for region in selected_regions:
+        domain_key = region.domain.replace("www.", "")
+        if domain_key not in wait_policies:
+            wait_policies[domain_key] = build_wait_policy(
+                region_code=region.code,
+                domain=region.domain,
+                history_telemetry=history_telemetry,
+                default_page_wait=page_wait,
+            )
+
     route_key = f"{args.origin}_{args.destination}_{args.date.replace('-', '')}"
     if return_date:
         route_key = f"{route_key}_rt{return_date.replace('-', '')}"
@@ -656,6 +694,7 @@ async def compare_via_opencli(
     scheduler = OpenCLIDomainScheduler(
         max_concurrent_domains=max_concurrent,
         page_wait=page_wait,
+        wait_policies=wait_policies,
     )
     quotes, _telemetry = await scheduler.scan_all(
         args=args,
