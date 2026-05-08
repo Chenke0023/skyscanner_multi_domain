@@ -987,11 +987,11 @@ class RunPageScanFallbackTests(unittest.TestCase):
             self.assertEqual(len(quotes), 2)
             # CN and HK are in separate batches (region_concurrency=1).
             # HK's page_loading triggers WAIT_RENDER retry within its batch.
-            # can_fallback_to_browser(page_loading)=False, so no CDP fallback.
-            # Total: CN call + HK call + HK retry = 3 calls.
+            # After WAIT_RENDER also returns page_loading, the router falls back to CDP.
+            # Total: CN call + HK call + HK retry = 3 scrapling calls.
             self.assertEqual(scrapling_mock.call_count, 3)
-            # can_fallback_to_browser(page_loading)=False, so no CDP fallback
-            page_mock.assert_not_awaited()
+            # Router-driven fallback: page_loading → CDP try
+            page_mock.assert_awaited_once()
             ensure_cdp_ready_mock.assert_not_called()
             self.assertIn("quick_live", [event["stage"] for event in progress_events])
 

@@ -943,7 +943,7 @@ async def compare_via_scrapling(
 
             if (
                 state_overrides
-                and latest_quote.status == "page_parse_failed"
+                and latest_quote.status in ("page_parse_failed", "page_empty_shell")
                 and _looks_like_shell_page(page_text)
             ):
                 try:
@@ -995,6 +995,7 @@ async def compare_via_scrapling(
                 "page_challenge",
                 "page_loading",
                 "page_parse_failed",
+                "page_empty_shell",
             }:
                 _emit_scrapling_trace(source_kind, attempt_index, used_cdp=used_cdp, used_profile=used_profile, final_quote=latest_quote, final_page_text=page_text)
                 break
