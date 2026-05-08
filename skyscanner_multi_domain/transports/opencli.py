@@ -252,12 +252,15 @@ class OpenCLITabSession:
         tab_id: str,
         region: RegionConfig,
         url: str,
+        wait_steps: list[int] | None = None,
     ) -> tuple[FlightQuote, str, dict[str, int]]:
-        attempts = [
-            (15000, 0),
-            (50000, 8),
-            (100000, 15),
-        ]
+        if wait_steps is None:
+            wait_steps = [0, 8, 15]
+        chunk_sizes = [15000, 50000, 100000]
+        attempts: list[tuple[int, int]] = []
+        for idx, extra_wait in enumerate(wait_steps):
+            chunk_size = chunk_sizes[idx] if idx < len(chunk_sizes) else chunk_sizes[-1]
+            attempts.append((chunk_size, extra_wait))
         delta = {
             "extract_attempt_count": 0,
             "progressive_wait_used": 0,
@@ -440,6 +443,24 @@ class OpenCLIDomainScheduler:
             return max(policy.initial_wait, 3)
         return self.page_wait
 
+    def _effective_policy(self, domain: str) -> Any:
+        """Return the WaitPolicy for a domain, or a default."""
+        from skyscanner_multi_domain.scan.wait_policy import (
+            WaitPolicy,
+            DEFAULT_MAX_REGION_TIME,
+            DEFAULT_EXTRACT_WAIT_STEPS,
+        )
+
+        policy = self._wait_policies.get(domain)
+        if policy is not None:
+            return policy
+        return WaitPolicy(
+            initial_wait=self.page_wait,
+            max_region_time=self.max_region_time,
+            extract_wait_steps=list(DEFAULT_EXTRACT_WAIT_STEPS),
+            reason="default",
+        )
+
     async def scan_all(
         self,
         args: argparse.Namespace,
@@ -522,16 +543,17 @@ class OpenCLIDomainScheduler:
 
         try:
             for i, region in enumerate(regions):
+                policy = self._effective_policy(domain)
                 # Time budget enforcement: skip subsequent regions if budget exhausted
                 if i > 0:
                     elapsed = time.monotonic() - domain_start
-                    if elapsed > self.max_region_time:
+                    if elapsed > policy.max_region_time:
                         budget_quote = FlightQuote(
                             region=region.code, domain=region.domain,
                             price=None, currency=region.currency,
                             source_url=url_by_region.get(region.code, ""),
                             status="opencli_not_attempted",
-                            error=f"Time budget exceeded ({elapsed:.0f}s > {self.max_region_time}s max)",
+                            error=f"Time budget exceeded ({elapsed:.0f}s > {policy.max_region_time}s max)",
                         )
                         if on_region_complete:
                             on_region_complete(region, budget_quote)
@@ -560,7 +582,7 @@ class OpenCLIDomainScheduler:
                         tab_id, self._effective_page_wait(domain),
                     )
                     quote, page_text, delta_extract = await session.extract_with_progressive_content_wait(
-                        tab_id, region, url,
+                        tab_id, region, url, wait_steps=policy.extract_wait_steps,
                     )
 
                     quote.tab_open_count = delta_ensure["tab_open_count"]

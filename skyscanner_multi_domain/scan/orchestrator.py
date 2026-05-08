@@ -700,6 +700,14 @@ async def run_page_scan(
             enable_fallbacks: bool,
             on_region_complete: Callable[[RegionConfig, FlightQuote], None] | None = None,
         ) -> list[FlightQuote]:
+            from skyscanner_multi_domain.scan.wait_policy import collect_domain_telemetry_from_rows
+
+            history_telemetry = None
+            if latest_record_for_plan is not None:
+                history_telemetry = collect_domain_telemetry_from_rows(
+                    latest_record_for_plan.rows_by_date
+                )
+
             quotes = await compare_via_opencli(
                 args,
                 batch_regions,
@@ -709,6 +717,7 @@ async def run_page_scan(
                 on_region_complete=on_region_complete,
                 region_concurrency=max(int(region_concurrency), 1),
                 run_id=run_id,
+                history_telemetry=history_telemetry,
             )
 
             if not enable_fallbacks:
@@ -794,6 +803,9 @@ async def run_page_scan(
                                 {"transport": "opencli_primary", "status": quote.status,
                                  "failure_class": classify_quote_failure(quote),
                                  "error": quote.error},
+                                {"transport": "cdp", "status": page_quote.status,
+                                 "failure_class": classify_quote_failure(page_quote),
+                                 "error": page_quote.error},
                                 *list(page_quote.fallback_attempts or []),
                             ]
                             quote_by_region[region.code] = page_quote
@@ -801,11 +813,13 @@ async def run_page_scan(
             # Try Scrapling fallback — re-evaluate router for each region
             # (CDP may have updated quote_by_region with terminal results)
             if scrapling_targets:
-                scrapling_regions = [
-                    region for region, _ in scrapling_targets
-                    if quote_by_region[region.code].price is None
-                    and decide_fallback(quote_by_region[region.code]).should_fallback
-                ]
+                scrapling_regions = []
+                for region, _ in scrapling_targets:
+                    if quote_by_region[region.code].price is not None:
+                        continue
+                    decision = decide_fallback(quote_by_region[region.code])
+                    if "scrapling" in decision.transports:
+                        scrapling_regions.append(region)
                 if scrapling_regions:
                     scrapling_quotes = await compare_via_scrapling(
                         args, scrapling_regions,
@@ -822,10 +836,12 @@ async def run_page_scan(
                             continue
                         sq = scrapling_by_region.get(region.code)
                         if sq and sq.price is not None:
+                            current = quote_by_region.get(region.code, quote)
                             sq.fallback_attempts = [
-                                {"transport": "opencli_primary", "status": quote.status,
-                                 "failure_class": classify_quote_failure(quote),
-                                 "error": quote.error},
+                                *list(current.fallback_attempts or []),
+                                {"transport": "scrapling_fallback", "status": sq.status,
+                                 "failure_class": classify_quote_failure(sq),
+                                 "error": sq.error},
                                 *list(sq.fallback_attempts or []),
                             ]
                             quote_by_region[region.code] = sq
