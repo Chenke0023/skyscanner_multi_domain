@@ -108,13 +108,35 @@ def build_wait_policy(
     )
 
 
+def normalize_domain(value: str) -> str:
+    """Normalize a domain string to bare host without scheme or www. prefix.
+
+    Handles inputs like:
+      - "https://www.skyscanner.sg/path"
+      - "www.skyscanner.sg"
+      - "skyscanner.sg"
+      - "www.skyscanner.com.sg/transport/flights/bjs/ala/260520/"
+        (no scheme — path is stripped, host is extracted)
+    """
+    from urllib.parse import urlparse
+
+    if "://" not in value:
+        # No scheme — could be "www.example.com" or "www.example.com/path"
+        # Strip leading www. and any path component
+        host = value.split("/")[0]
+        return host.removeprefix("www.")
+
+    parsed = urlparse(value)
+    host = parsed.netloc or parsed.path.split("/")[0]
+    return host.removeprefix("www.")
+
+
 def _get_domain_stats(telemetry: dict[str, Any], domain: str) -> dict[str, Any] | None:
     """Extract per-domain statistics from telemetry."""
     per_domain = telemetry.get("per_domain")
     if not isinstance(per_domain, dict):
         return None
-    # Normalize domain key (strip www.)
-    normalized = domain.replace("www.", "")
+    normalized = normalize_domain(domain)
     stats = per_domain.get(normalized)
     if not isinstance(stats, dict):
         # Try fuzzy match

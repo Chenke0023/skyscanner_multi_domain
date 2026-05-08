@@ -354,6 +354,12 @@ def quotes_to_dicts(quotes: list[FlightQuote]) -> list[dict[str, Any]]:
             "selected_candidate_rank": quote.selected_candidate_rank,
             "candidate_sources": list(quote.candidate_sources or []),
             "readiness": quote.readiness,
+            "route_detected": quote.route_detected,
+            "date_detected": quote.date_detected,
+            "currency_detected": quote.currency_detected,
+            "route_mismatch": quote.route_mismatch,
+            "date_mismatch": quote.date_mismatch,
+            "currency_mismatch": quote.currency_mismatch,
             "tab_open_count": quote.tab_open_count,
             "tab_close_count": quote.tab_close_count,
             "reused_tab_count": quote.reused_tab_count,
@@ -687,7 +693,8 @@ async def run_page_scan(
                             quote_by_region[region.code] = page_quote
                         elif page_quote:
                             quote.fallback_attempts.append({
-                                "transport": "page_fallback", "status": page_quote.status,
+                                "transport": "cdp", "phase": "page_fallback",
+                                "status": page_quote.status,
                                 "failure_class": classify_quote_failure(page_quote),
                                 "error": page_quote.error,
                             })
@@ -839,7 +846,8 @@ async def run_page_scan(
                             current = quote_by_region.get(region.code, quote)
                             sq.fallback_attempts = [
                                 *list(current.fallback_attempts or []),
-                                {"transport": "scrapling_fallback", "status": sq.status,
+                                {"transport": "scrapling", "phase": "scrapling_fallback",
+                                 "status": sq.status,
                                  "failure_class": classify_quote_failure(sq),
                                  "error": sq.error},
                                 *list(sq.fallback_attempts or []),
@@ -849,7 +857,8 @@ async def run_page_scan(
                             # Merge scrapling failure into quote_by_region
                             current = quote_by_region.get(region.code, quote)
                             current.fallback_attempts.append({
-                                "transport": "scrapling_fallback", "status": sq.status,
+                                "transport": "scrapling", "phase": "scrapling_fallback",
+                                "status": sq.status,
                                 "failure_class": classify_quote_failure(sq),
                                 "error": sq.error,
                             })
