@@ -82,24 +82,6 @@ async def _run_opencli_async(
     )
 
 
-# Backward-compatible sync wrapper
-def _run_opencli(args: list[str], timeout: int = 60) -> OpenCLICommandResult:
-    """Synchronous wrapper — use _run_opencli_async in async contexts."""
-    import subprocess as _sp
-    result = _sp.run(
-        ["opencli"] + args,
-        capture_output=True,
-        text=True,
-        timeout=timeout,
-    )
-    return OpenCLICommandResult(
-        returncode=result.returncode,
-        stdout=result.stdout or "",
-        stderr=result.stderr or "",
-        duration_ms=0,
-    )
-
-
 async def _opencli_json(args: list[str], timeout: int = 60) -> Any:
     """Run opencli command and parse JSON output (async)."""
     result = await _run_opencli_async(args, timeout=timeout)
@@ -161,13 +143,6 @@ async def _tab_extract_async(tab_id: str, chunk_size: int = 15000) -> dict[str, 
     )
 
 
-# Legacy sync stubs for any callers that haven't migrated
-_tab_new = lambda url="": asyncio.get_event_loop().run_until_complete(_tab_new_async(url))  # type: ignore[arg-type]
-_tab_navigate = lambda tab_id, url: asyncio.get_event_loop().run_until_complete(_tab_navigate_async(tab_id, url))  # type: ignore[arg-type]
-_tab_close = lambda tab_id: asyncio.get_event_loop().run_until_complete(_tab_close_async(tab_id))  # type: ignore[arg-type]
-_tab_extract = lambda tab_id, chunk_size=15000: asyncio.get_event_loop().run_until_complete(_tab_extract_async(tab_id, chunk_size))  # type: ignore[arg-type]
-
-
 # ── OpenCLITabSession (v3: fully async internals) ────────────────────────────
 
 
@@ -207,10 +182,6 @@ class OpenCLITabSession:
             delta["reused_tab_count"] = 1
         return self.tab_id, delta
 
-    # Sync compatibility
-    def ensure_tab(self, url: str, clean: bool = False) -> tuple[str, dict[str, int]]:
-        return asyncio.get_event_loop().run_until_complete(self.ensure_tab_async(url, clean=clean))
-
     def _track_command(self, result: OpenCLICommandResult) -> None:
         self.command_count += 1
         self.command_duration_ms_total += result.duration_ms
@@ -220,12 +191,6 @@ class OpenCLITabSession:
     async def close_async(self):
         if self.tab_id:
             await _tab_close_async(self.tab_id)
-            self.tab_id = ""
-            self.session_tab_close_count += 1
-
-    def close(self):
-        if self.tab_id:
-            _tab_close(self.tab_id)
             self.tab_id = ""
             self.session_tab_close_count += 1
 
@@ -346,66 +311,6 @@ def _group_regions_by_domain(
             group_order.append(domain)
         groups[domain].append(region)
     return [(domain, groups[domain]) for domain in group_order]
-
-
-class OpenCLITabPool:
-    """Backward-compatible tab pool with domain pinning and LRU eviction.
-
-    Deprecated: prefer OpenCLIDomainScheduler for new code.
-    This shim exists so existing tests and callers that use the old pool API
-    continue to work."""
-
-    def __init__(self, max_tabs: int = 2):
-        self.max_tabs = max_tabs
-        self.sessions: list[OpenCLITabSession] = []
-        self.domain_to_session: dict[str, OpenCLITabSession] = {}
-        self._tab_counter = 0
-
-    def acquire(self, domain: str, url: str) -> tuple[OpenCLITabSession, dict[str, int]]:
-        """Acquire a session for *domain*. Returns (session, telemetry_delta).
-
-        If *domain* is already pinned, the existing session is reused.
-        Otherwise a new tab is opened; if the pool is full the least-recently-used
-        session is evicted (its old tab closed and a new one opened for the
-        incoming domain)."""
-
-        # Domain already pinned — reuse
-        if domain in self.domain_to_session:
-            session = self.domain_to_session[domain]
-            session.last_used_index = self._next_index()
-            _tab_navigate(session.tab_id, url)
-            session.session_reused_tab_count += 1
-            return session, {"tab_open_count": 0, "reused_tab_count": 1}
-
-        # Pool has room — create fresh session
-        if len(self.sessions) < self.max_tabs:
-            session = OpenCLITabSession()
-            self.sessions.append(session)
-            tab_id = _tab_new(url)
-            session.tab_id = tab_id
-            session.session_tab_open_count += 1
-            session.last_used_index = self._next_index()
-            self.domain_to_session[domain] = session
-            return session, {"tab_open_count": 1, "reused_tab_count": 0}
-
-        # Pool full — evict LRU session
-        victim = min(self.sessions, key=lambda s: s.last_used_index)
-        # Find and remove the old domain mapping
-        old_domain = next(d for d, s in self.domain_to_session.items() if s is victim)
-        del self.domain_to_session[old_domain]
-
-        # Clean transition: close old tab, open new one
-        _tab_close(victim.tab_id)
-        victim.session_tab_close_count += 1
-        victim.tab_id = _tab_new(url)
-        victim.session_tab_open_count += 1
-        victim.last_used_index = self._next_index()
-        self.domain_to_session[domain] = victim
-        return victim, {"tab_open_count": 1, "reused_tab_count": 0}
-
-    def _next_index(self) -> int:
-        self._tab_counter += 1
-        return self._tab_counter
 
 
 class OpenCLIDomainScheduler:
