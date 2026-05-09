@@ -66,6 +66,12 @@ _DECISION_TABLE: dict[str, FallbackDecision] = {
         should_fallback=False,
         reason="Price already found",
     ),
+    "semantic_mismatch": FallbackDecision(
+        should_fallback=True,
+        transports=["cdp", "scrapling"],
+        reason="Parsed price failed route/date/currency sanity check — try CDP and Scrapling",
+        max_attempts=2,
+    ),
     "no_flights": FallbackDecision(
         should_fallback=False,
         reason="Search completed with no itinerary results — terminal",
@@ -143,6 +149,8 @@ _DEFAULT_DECISION = FallbackDecision(
 
 def classify_quote_failure(quote: FlightQuote) -> FailureClass:
     """Map a FlightQuote's status to a failure class."""
+    if quote.status == "page_semantic_mismatch":
+        return "semantic_mismatch"
     if quote.price is not None:
         return "success"
     return FAILURE_CLASS_MAP.get(quote.status, "other")
