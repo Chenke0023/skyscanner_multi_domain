@@ -205,26 +205,29 @@ def test_orchestrator_network_failure_routes_to_google_jump() -> None:
         opencli_quote = FlightQuote("CN", "domain1", None, "CNY", "url1", "opencli_error")
         opencli_quote.error = "Connection reset"
 
-        with patch("skyscanner_multi_domain.transports.opencli.compare_via_opencli", return_value=[opencli_quote]):
-            with patch("skyscanner_multi_domain.scan.orchestrator.build_scan_batches") as mock_batches:
-                from skyscanner_multi_domain.planning.search_plan import ScanBatch, ScanTask, RouteCandidate, DateCandidate, MarketCandidate
-                route = RouteCandidate("BJS", "ALA", "BJS", "ALA", 1, "reason", 1.0, 1.0, {})
-                date_cand = DateCandidate(date, None, 0, "anchor", "reason", 1.0, {})
-                market_cn = MarketCandidate("CN", 1, "reason", 1.0, 0.5, 1.0, {})
+        from unittest.mock import AsyncMock
+        with patch("skyscanner_multi_domain.transports.opencli.compare_via_opencli", return_value=[opencli_quote]), \
+             patch("skyscanner_multi_domain.scan.orchestrator.build_scan_batches") as mock_batches, \
+             patch("skyscanner_multi_domain.transports.cdp.compare_via_pages", new_callable=AsyncMock, return_value=[]), \
+             patch("skyscanner_multi_domain.transports.scrapling.compare_via_scrapling", new_callable=AsyncMock, return_value=[]):
+            from skyscanner_multi_domain.planning.search_plan import ScanBatch, ScanTask, RouteCandidate, DateCandidate, MarketCandidate
+            route = RouteCandidate("BJS", "ALA", "BJS", "ALA", 1, "reason", 1.0, 1.0, {})
+            date_cand = DateCandidate(date, None, 0, "anchor", "reason", 1.0, {})
+            market_cn = MarketCandidate("CN", 1, "reason", 1.0, 0.5, 1.0, {})
 
-                batch = ScanBatch(1, "probe", [
-                    ScanTask(route, date_cand, market_cn, 1.0, "probe", "reason")
-                ], "reason")
-                mock_batches.return_value = [batch]
+            batch = ScanBatch(1, "probe", [
+                ScanTask(route, date_cand, market_cn, 1.0, "probe", "reason")
+            ], "reason")
+            mock_batches.return_value = [batch]
 
-                # Patch google_jump to succeed (imported inline in orchestrator)
-                gj_quote = FlightQuote("CN", "domain1", 150.0, "CNY", "url1", "ok")
-                with patch("skyscanner_multi_domain.transports.google_jump.build_quote_via_google_jump", return_value=gj_quote):
-                    quotes = await run_page_scan(
-                        origin, destination, date, regions,
-                        transport="opencli",
-                        allow_browser_fallback=True
-                    )
+            # Patch google_jump to succeed (imported inline in orchestrator)
+            gj_quote = FlightQuote("CN", "domain1", 150.0, "CNY", "url1", "ok", confidence=0.9)
+            with patch("skyscanner_multi_domain.transports.google_jump.build_quote_via_google_jump", return_value=gj_quote):
+                quotes = await run_page_scan(
+                    origin, destination, date, regions,
+                    transport="opencli",
+                    allow_browser_fallback=True
+                )
 
         assert len(quotes) == 1
         assert quotes[0].price == 150.0
@@ -1224,5 +1227,392 @@ def test_orchestrator_semantic_mismatch_triggers_cdp_not_scrapling() -> None:
             assert quotes[0].price == 450.0
             assert quotes[0].currency == "SGD"
             assert quotes[0].status == "ok"
+
+    asyncio.run(run_test())
+
+
+# ── P5: orchestrator fallback chain integration tests ──────────────────────
+
+def test_orchestrator_opencli_cdp_scrapling_full_fallback_chain() -> None:
+    """opencli network error → CDP parse failed → Scrapling succeeds.
+
+    Validates the complete 3-tier fallback chain within run_opencli_pass:
+    opencli_primary fails → CDP fails → Scrapling succeeds.
+    """
+    import asyncio
+    from unittest.mock import AsyncMock, patch
+    from skyscanner_multi_domain.scan.orchestrator import run_page_scan
+    from skyscanner_multi_domain.models import RegionConfig, FlightQuote
+
+    async def run_test():
+        opencli_quote = FlightQuote(
+            region="SG", domain="https://www.skyscanner.sg",
+            price=None, currency="SGD",
+            source_url="https://www.skyscanner.sg/...",
+            status="opencli_error", error="Connection reset",
+        )
+        cdp_quote = FlightQuote(
+            region="SG", domain="https://www.skyscanner.sg",
+            price=None, currency="SGD",
+            source_url="https://www.skyscanner.sg/...",
+            status="page_parse_failed", error="no price element",
+        )
+        scrapling_quote = FlightQuote(
+            region="SG", domain="https://www.skyscanner.sg",
+            price=450.0, currency="SGD",
+            source_url="https://www.skyscanner.sg/...",
+            status="page_text", confidence=0.85,
+        )
+
+        with patch("skyscanner_multi_domain.transports.opencli.compare_via_opencli",
+                   new_callable=AsyncMock) as mock_opencli, \
+             patch("skyscanner_multi_domain.transports.cdp.compare_via_pages",
+                   new_callable=AsyncMock) as mock_cdp, \
+             patch("skyscanner_multi_domain.transports.scrapling.compare_via_scrapling",
+                   new_callable=AsyncMock) as mock_scrapling, \
+             patch("skyscanner_multi_domain.transports.cdp.detect_cdp_version",
+                   return_value={"Browser": "Edge"}), \
+             patch("skyscanner_multi_domain.transports.cdp.ensure_cdp_ready"), \
+             patch("skyscanner_multi_domain.transports.google_jump.build_quote_via_google_jump",
+                   new_callable=AsyncMock, return_value=None):
+            mock_opencli.return_value = [opencli_quote]
+            mock_cdp.return_value = [cdp_quote]
+            mock_scrapling.return_value = [scrapling_quote]
+
+            quotes = await run_page_scan(
+                origin="BJS", destination="ALA", date="2026-05-20",
+                region_codes=["SG"],
+                transport="opencli",
+                allow_browser_fallback=True,
+            )
+
+            assert mock_opencli.called
+            assert mock_cdp.called, "CDP must be called as second fallback"
+            assert mock_scrapling.called, (
+                "Scrapling must be called as third fallback when CDP fails"
+            )
+            assert len(quotes) == 1
+            assert quotes[0].price == 450.0
+            assert quotes[0].status == "page_text"
+            attempts = quotes[0].fallback_attempts
+            assert len(attempts) >= 2
+            assert attempts[0]["transport"] == "opencli_primary"
+            assert "cdp" in [a.get("transport") for a in attempts]
+
+    asyncio.run(run_test())
+
+
+def test_orchestrator_confidence_gating_triggers_cdp_fallback() -> None:
+    """Low confidence (< 0.5) from opencli must trigger CDP fallback.
+
+    When opencli returns a price with confidence below MIN_PARSER_CONFIDENCE,
+    classify_quote_failure returns low_confidence → planner routes to CDP.
+    """
+    import asyncio
+    from unittest.mock import AsyncMock, patch
+    from skyscanner_multi_domain.scan.orchestrator import run_page_scan
+    from skyscanner_multi_domain.models import RegionConfig, FlightQuote
+
+    async def run_test():
+        opencli_quote = FlightQuote(
+            region="SG", domain="https://www.skyscanner.sg",
+            price=899.0, currency="SGD",
+            source_url="https://www.skyscanner.sg/...",
+            status="page_text", confidence=0.35,
+        )
+        cdp_quote = FlightQuote(
+            region="SG", domain="https://www.skyscanner.sg",
+            price=450.0, currency="SGD",
+            source_url="https://www.skyscanner.sg/...",
+            status="page_text", confidence=0.88,
+        )
+
+        with patch("skyscanner_multi_domain.transports.opencli.compare_via_opencli",
+                   new_callable=AsyncMock) as mock_opencli, \
+             patch("skyscanner_multi_domain.transports.cdp.compare_via_pages",
+                   new_callable=AsyncMock) as mock_cdp, \
+             patch("skyscanner_multi_domain.transports.scrapling.compare_via_scrapling",
+                   new_callable=AsyncMock) as mock_scrapling, \
+             patch("skyscanner_multi_domain.transports.cdp.detect_cdp_version",
+                   return_value={"Browser": "Edge"}):
+            mock_opencli.return_value = [opencli_quote]
+            mock_cdp.return_value = [cdp_quote]
+            mock_scrapling.return_value = []
+
+            quotes = await run_page_scan(
+                origin="BJS", destination="ALA", date="2026-05-20",
+                region_codes=["SG"],
+                transport="opencli",
+                allow_browser_fallback=True,
+            )
+
+            assert mock_opencli.called
+            assert mock_cdp.called, (
+                "CDP must be called when opencli result has low confidence"
+            )
+            assert not mock_scrapling.called, (
+                "Scrapling must NOT be called when CDP succeeds with high confidence"
+            )
+            assert len(quotes) == 1
+            assert quotes[0].price == 450.0, "CDP result (450.0) must replace opencli (899.0)"
+            assert quotes[0].confidence == 0.88
+            assert len(quotes[0].fallback_attempts) >= 1
+            assert quotes[0].fallback_attempts[0]["transport"] == "opencli_primary"
+
+    asyncio.run(run_test())
+
+
+def test_orchestrator_confidence_gating_accepts_when_sufficient() -> None:
+    """High confidence (>= 0.5) from opencli must NOT trigger any fallback."""
+    import asyncio
+    from unittest.mock import AsyncMock, patch
+    from skyscanner_multi_domain.scan.orchestrator import run_page_scan
+    from skyscanner_multi_domain.models import RegionConfig, FlightQuote
+
+    async def run_test():
+        opencli_quote = FlightQuote(
+            region="SG", domain="https://www.skyscanner.sg",
+            price=899.0, currency="SGD",
+            source_url="https://www.skyscanner.sg/...",
+            status="page_text", confidence=0.75,
+        )
+
+        with patch("skyscanner_multi_domain.transports.opencli.compare_via_opencli",
+                   new_callable=AsyncMock) as mock_opencli, \
+             patch("skyscanner_multi_domain.transports.cdp.compare_via_pages",
+                   new_callable=AsyncMock) as mock_cdp, \
+             patch("skyscanner_multi_domain.transports.scrapling.compare_via_scrapling",
+                   new_callable=AsyncMock) as mock_scrapling:
+            mock_opencli.return_value = [opencli_quote]
+            mock_cdp.return_value = []
+            mock_scrapling.return_value = []
+
+            quotes = await run_page_scan(
+                origin="BJS", destination="ALA", date="2026-05-20",
+                region_codes=["SG"],
+                transport="opencli",
+                allow_browser_fallback=True,
+            )
+
+            assert mock_opencli.called
+            assert not mock_cdp.called, (
+                "CDP must NOT be called when confidence is sufficient"
+            )
+            assert not mock_scrapling.called
+            assert len(quotes) == 1
+            assert quotes[0].price == 899.0
+            assert quotes[0].confidence == 0.75
+
+    asyncio.run(run_test())
+
+
+def test_orchestrator_semantic_mismatch_cdp_fails_scrapling_succeeds() -> None:
+    """opencli semantic_mismatch → CDP parse fails → Scrapling succeeds.
+
+    The semantic_mismatch route includes both cdp and scrapling in
+    transports_remaining. When CDP fails with parse error, scrapling
+    is tried next.
+    """
+    import asyncio
+    from unittest.mock import AsyncMock, patch
+    from skyscanner_multi_domain.scan.orchestrator import run_page_scan
+    from skyscanner_multi_domain.models import RegionConfig, FlightQuote
+
+    async def run_test():
+        opencli_quote = FlightQuote(
+            region="SG", domain="https://www.skyscanner.sg",
+            price=899.0, currency="CNY",
+            source_url="https://www.skyscanner.sg/...",
+            status="page_semantic_mismatch", confidence=0.3,
+            route_mismatch=True,
+        )
+        cdp_quote = FlightQuote(
+            region="SG", domain="https://www.skyscanner.sg",
+            price=None, currency="SGD",
+            source_url="https://www.skyscanner.sg/...",
+            status="page_parse_failed", error="no results visible",
+        )
+        scrapling_quote = FlightQuote(
+            region="SG", domain="https://www.skyscanner.sg",
+            price=450.0, currency="SGD",
+            source_url="https://www.skyscanner.sg/...",
+            status="page_text", confidence=0.82,
+        )
+
+        with patch("skyscanner_multi_domain.transports.opencli.compare_via_opencli",
+                   new_callable=AsyncMock) as mock_opencli, \
+             patch("skyscanner_multi_domain.transports.cdp.compare_via_pages",
+                   new_callable=AsyncMock) as mock_cdp, \
+             patch("skyscanner_multi_domain.transports.scrapling.compare_via_scrapling",
+                   new_callable=AsyncMock) as mock_scrapling, \
+             patch("skyscanner_multi_domain.transports.cdp.detect_cdp_version",
+                   return_value={"Browser": "Edge"}):
+            mock_opencli.return_value = [opencli_quote]
+            mock_cdp.return_value = [cdp_quote]
+            mock_scrapling.return_value = [scrapling_quote]
+
+            quotes = await run_page_scan(
+                origin="BJS", destination="ALA", date="2026-05-20",
+                region_codes=["SG"],
+                transport="opencli",
+                allow_browser_fallback=True,
+            )
+
+            assert mock_opencli.called
+            assert mock_cdp.called, "CDP must be called for semantic_mismatch"
+            assert mock_scrapling.called, (
+                "Scrapling must be called when CDP fails"
+            )
+            assert len(quotes) == 1
+            assert quotes[0].price == 450.0
+            assert quotes[0].currency == "SGD"
+            assert quotes[0].status == "page_text"
+
+    asyncio.run(run_test())
+
+
+def test_orchestrator_no_flights_terminates_chain() -> None:
+    """page_no_flights from CDP must terminate the chain — no scrapling call."""
+    import asyncio
+    from unittest.mock import AsyncMock, patch
+    from skyscanner_multi_domain.scan.orchestrator import run_page_scan
+    from skyscanner_multi_domain.models import RegionConfig, FlightQuote
+
+    async def run_test():
+        opencli_quote = FlightQuote(
+            region="SG", domain="https://www.skyscanner.sg",
+            price=None, currency="SGD",
+            source_url="https://www.skyscanner.sg/...",
+            status="opencli_error", error="Connection refused",
+        )
+        cdp_quote = FlightQuote(
+            region="SG", domain="https://www.skyscanner.sg",
+            price=None, currency="SGD",
+            source_url="https://www.skyscanner.sg/...",
+            status="page_no_flights",
+        )
+
+        with patch("skyscanner_multi_domain.transports.opencli.compare_via_opencli",
+                   new_callable=AsyncMock) as mock_opencli, \
+             patch("skyscanner_multi_domain.transports.cdp.compare_via_pages",
+                   new_callable=AsyncMock) as mock_cdp, \
+             patch("skyscanner_multi_domain.transports.scrapling.compare_via_scrapling",
+                   new_callable=AsyncMock) as mock_scrapling, \
+             patch("skyscanner_multi_domain.transports.cdp.detect_cdp_version",
+                   return_value={"Browser": "Edge"}), \
+             patch("skyscanner_multi_domain.transports.cdp.ensure_cdp_ready"), \
+             patch("skyscanner_multi_domain.transports.google_jump.build_quote_via_google_jump",
+                   new_callable=AsyncMock, return_value=None):
+            mock_opencli.return_value = [opencli_quote]
+            mock_cdp.return_value = [cdp_quote]
+            mock_scrapling.return_value = []
+
+            quotes = await run_page_scan(
+                origin="BJS", destination="ALA", date="2026-05-20",
+                region_codes=["SG"],
+                transport="opencli",
+                allow_browser_fallback=True,
+            )
+
+            assert mock_opencli.called
+            assert mock_cdp.called, "CDP must be called for network failure"
+            assert not mock_scrapling.called, (
+                "Scrapling must NOT be called — no_flights is terminal"
+            )
+            assert len(quotes) == 1
+            assert quotes[0].price is None
+            assert quotes[0].status == "page_no_flights"
+
+    asyncio.run(run_test())
+
+
+def test_orchestrator_dual_region_different_fallback_outcomes() -> None:
+    """CN succeeds with opencli; SG fails → CDP fails → Scrapling succeeds.
+
+    Ensures the orchestrator handles per-region fallback independently
+    without disrupting already-succeeded regions.
+    """
+    import asyncio
+    from unittest.mock import AsyncMock, patch
+    from skyscanner_multi_domain.scan.orchestrator import run_page_scan
+    from skyscanner_multi_domain.models import RegionConfig, FlightQuote
+
+    async def run_test():
+        opencli_quotes = [
+            FlightQuote(
+                region="CN", domain="https://www.skyscanner.cn",
+                price=2187.0, currency="CNY",
+                source_url="https://www.skyscanner.cn/...",
+                status="page_text", confidence=0.85,
+            ),
+            FlightQuote(
+                region="SG", domain="https://www.skyscanner.sg",
+                price=None, currency="SGD",
+                source_url="https://www.skyscanner.sg/...",
+                status="opencli_error", error="timeout",
+            ),
+        ]
+        cdp_quote = FlightQuote(
+            region="SG", domain="https://www.skyscanner.sg",
+            price=None, currency="SGD",
+            source_url="https://www.skyscanner.sg/...",
+            status="page_parse_failed",
+        )
+        scrapling_quote = FlightQuote(
+            region="SG", domain="https://www.skyscanner.sg",
+            price=350.0, currency="SGD",
+            source_url="https://www.skyscanner.sg/...",
+            status="page_text", confidence=0.80,
+        )
+
+        with patch("skyscanner_multi_domain.transports.opencli.compare_via_opencli",
+                   new_callable=AsyncMock) as mock_opencli, \
+             patch("skyscanner_multi_domain.transports.cdp.compare_via_pages",
+                   new_callable=AsyncMock) as mock_cdp, \
+             patch("skyscanner_multi_domain.transports.scrapling.compare_via_scrapling",
+                   new_callable=AsyncMock) as mock_scrapling, \
+             patch("skyscanner_multi_domain.transports.cdp.detect_cdp_version",
+                   return_value={"Browser": "Edge"}), \
+             patch("skyscanner_multi_domain.transports.cdp.ensure_cdp_ready"), \
+             patch("skyscanner_multi_domain.transports.google_jump.build_quote_via_google_jump",
+                   new_callable=AsyncMock, return_value=None), \
+             patch("skyscanner_multi_domain.scan.orchestrator.build_scan_batches") as mock_batches:
+            from skyscanner_multi_domain.planning.search_plan import (
+                ScanBatch, ScanTask, RouteCandidate, DateCandidate, MarketCandidate,
+            )
+            route = RouteCandidate("BJS", "ALA", "BJS", "ALA", 1, "r", 1.0, 1.0, {})
+            date_c = DateCandidate("2026-05-20", None, 0, "anchor", "r", 1.0, {})
+            m_cn = MarketCandidate("CN", 1, "r", 1.0, 0.5, 1.0, {})
+            m_sg = MarketCandidate("SG", 2, "r", 0.9, 0.4, 0.8, {})
+            batch = ScanBatch(1, "probe", [
+                ScanTask(route, date_c, m_cn, 1.0, "probe", "r"),
+                ScanTask(route, date_c, m_sg, 0.9, "probe", "r"),
+            ], "r")
+            mock_batches.return_value = [batch]
+
+            mock_opencli.return_value = opencli_quotes
+            mock_cdp.return_value = [cdp_quote]
+            mock_scrapling.return_value = [scrapling_quote]
+
+            quotes = await run_page_scan(
+                origin="BJS", destination="ALA", date="2026-05-20",
+                region_codes=["CN", "SG"],
+                transport="opencli",
+                allow_browser_fallback=True,
+            )
+
+            assert len(quotes) == 2
+            cn_quote = next(q for q in quotes if q.region == "CN")
+            sg_quote = next(q for q in quotes if q.region == "SG")
+            assert cn_quote.price == 2187.0
+            assert cn_quote.status == "page_text"
+            assert len(cn_quote.fallback_attempts) == 0, (
+                "CN succeeded — no fallback attempts expected"
+            )
+            assert sg_quote.price == 350.0
+            assert sg_quote.status == "page_text"
+            assert len(sg_quote.fallback_attempts) >= 2, (
+                "SG should have opencli_primary + cdp fallback attempts"
+            )
 
     asyncio.run(run_test())
