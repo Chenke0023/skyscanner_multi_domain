@@ -405,6 +405,7 @@ async def run_page_scan(
     decide_fallback,
     classify_quote_failure,
 )
+    from skyscanner_multi_domain.scan.fetch_types import AttemptPlanner
     from skyscanner_multi_domain.models import new_run_id
 
     run_id = new_run_id()
@@ -655,20 +656,20 @@ async def run_page_scan(
             if not enable_browser_fallback:
                 return quotes
 
+            planner = AttemptPlanner()
             quote_by_region: dict[str, FlightQuote] = {q.region: q for q in quotes}
             cdp_targets: list[tuple[RegionConfig, FlightQuote]] = []
 
             for region, quote in zip(batch_regions, quotes):
-                decision = decide_fallback(quote)
-                if not decision.should_fallback:
+                plan = planner.plan(quote)
+                if plan.action.value not in ("fallback_cdp",):
                     continue
-                if "cdp" in decision.transports:
-                    cdp_targets.append((region, quote))
+                cdp_targets.append((region, quote))
 
             if cdp_targets:
                 page_regions = [
                     region for region, _ in cdp_targets
-                    if quote_by_region[region.code].price is None
+                    if planner.plan(quote_by_region[region.code]).action.value != "accept"
                 ]
                 if page_regions:
                     cdp_info = detect_cdp_version()
@@ -684,7 +685,7 @@ async def run_page_scan(
                     page_by_region_map = {q.region: q for q in page_quotes if q is not None}
                     for region, quote in cdp_targets:
                         existing = quote_by_region.get(region.code)
-                        if existing and existing.price is not None:
+                        if existing and planner.plan(existing).action.value == "accept":
                             continue
                         page_quote = page_by_region_map.get(region.code)
                         if page_quote and page_quote.price is not None:
@@ -735,6 +736,7 @@ async def run_page_scan(
                 return quotes
 
             # ── v3: router-driven fallback ──────────────────────────
+            planner = AttemptPlanner()
             quote_by_region: dict[str, FlightQuote] = {q.region: q for q in quotes}
 
             # Collect regions by their fallback decision
@@ -743,16 +745,15 @@ async def run_page_scan(
             google_jump_targets: list[tuple[RegionConfig, FlightQuote]] = []
 
             for region, quote in zip(batch_regions, quotes):
-                decision = decide_fallback(quote)
-                if not decision.should_fallback:
-                    continue
-                for transport in decision.transports:
-                    if transport == "cdp":
-                        cdp_targets.append((region, quote))
-                    elif transport == "scrapling":
-                        scrapling_targets.append((region, quote))
-                    elif transport == "google_jump":
-                        google_jump_targets.append((region, quote))
+                plan = planner.plan(quote)
+                # Route by transports_remaining, not just primary action,
+                # because a single plan may include both CDP and Scrapling
+                if "google_jump" in plan.transports_remaining:
+                    google_jump_targets.append((region, quote))
+                if "cdp" in plan.transports_remaining:
+                    cdp_targets.append((region, quote))
+                if "scrapling" in plan.transports_remaining:
+                    scrapling_targets.append((region, quote))
 
             # Try Google search jump first (lightweight, reduces bot detection)
             if google_jump_targets:
@@ -778,7 +779,7 @@ async def run_page_scan(
             if cdp_targets:
                 page_regions = [
                     region for region, _ in cdp_targets
-                    if quote_by_region[region.code].price is None
+                    if planner.plan(quote_by_region[region.code]).action.value != "accept"
                 ]
                 if page_regions:
                     cdp_info = detect_cdp_version()
@@ -794,7 +795,7 @@ async def run_page_scan(
                     page_by_region_map = {q.region: q for q in page_quotes}
                     for region, quote in cdp_targets:
                         existing = quote_by_region.get(region.code)
-                        if existing and existing.price is not None:
+                        if existing and planner.plan(existing).action.value == "accept":
                             continue
                         page_quote = page_by_region_map.get(region.code)
                         if page_quote and page_quote.price is not None:
@@ -819,15 +820,16 @@ async def run_page_scan(
                             ]
                             quote_by_region[region.code] = page_quote
 
-            # Try Scrapling fallback — re-evaluate router for each region
+            # Try Scrapling fallback — re-evaluate planner for each region
             # (CDP may have updated quote_by_region with terminal results)
             if scrapling_targets:
                 scrapling_regions = []
                 for region, _ in scrapling_targets:
-                    if quote_by_region[region.code].price is not None:
+                    current = quote_by_region[region.code]
+                    current_plan = planner.plan(current)
+                    if current_plan.action.value == "accept":
                         continue
-                    decision = decide_fallback(quote_by_region[region.code])
-                    if "scrapling" in decision.transports:
+                    if "scrapling" in current_plan.transports_remaining:
                         scrapling_regions.append(region)
                 if scrapling_regions:
                     scrapling_quotes = await compare_via_scrapling(
@@ -841,7 +843,7 @@ async def run_page_scan(
                     scrapling_by_region = {q.region: q for q in scrapling_quotes}
                     for region, quote in scrapling_targets:
                         existing = quote_by_region.get(region.code)
-                        if existing and existing.price is not None:
+                        if existing and planner.plan(existing).action.value == "accept":
                             continue
                         sq = scrapling_by_region.get(region.code)
                         if sq and sq.price is not None:

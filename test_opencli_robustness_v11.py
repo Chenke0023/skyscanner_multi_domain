@@ -943,3 +943,118 @@ def test_normal_price_with_ok_status_is_success() -> None:
 
     decision = decide_fallback(quote)
     assert decision.should_fallback is False
+
+
+# ── FetchAttempt + AttemptPlanner tests ──────────────────────────────────────
+
+
+def test_attempt_planner_accepts_valid_price() -> None:
+    """AttemptPlanner must ACCEPT a quote with price and ok status."""
+    from skyscanner_multi_domain.scan.fetch_types import AttemptPlanner, AttemptAction
+
+    planner = AttemptPlanner()
+    quote = FlightQuote(
+        region="SG", domain="https://www.skyscanner.sg",
+        price=1234.0, currency="SGD",
+        source_url="https://www.skyscanner.sg/...",
+        status="ok", confidence=0.9,
+        route_mismatch=False, date_mismatch=False, currency_mismatch=False,
+    )
+    plan = planner.plan(quote)
+    assert plan.action == AttemptAction.ACCEPT
+
+
+def test_attempt_planner_routes_semantic_mismatch_to_cdp() -> None:
+    """AttemptPlanner must route semantic_mismatch to FALLBACK_CDP."""
+    from skyscanner_multi_domain.scan.fetch_types import AttemptPlanner, AttemptAction
+
+    planner = AttemptPlanner()
+    quote = FlightQuote(
+        region="SG", domain="https://www.skyscanner.sg",
+        price=899.0, currency="CNY",
+        source_url="https://www.skyscanner.sg/...",
+        status="page_semantic_mismatch", confidence=0.3,
+        route_mismatch=True, date_mismatch=False, currency_mismatch=False,
+    )
+    plan = planner.plan(quote)
+    assert plan.action == AttemptAction.FALLBACK_CDP
+    assert "scrapling" in plan.transports_remaining
+
+
+def test_attempt_planner_routes_timeout_to_cdp() -> None:
+    """AttemptPlanner must route opencli_timeout to FALLBACK_CDP."""
+    from skyscanner_multi_domain.scan.fetch_types import AttemptPlanner, AttemptAction
+
+    planner = AttemptPlanner()
+    quote = FlightQuote(
+        region="SG", domain="https://www.skyscanner.sg",
+        price=None, currency="SGD",
+        source_url="https://www.skyscanner.sg/...",
+        status="opencli_timeout",
+    )
+    plan = planner.plan(quote)
+    assert plan.action == AttemptAction.FALLBACK_CDP
+
+
+def test_attempt_planner_terminal_for_challenge() -> None:
+    """AttemptPlanner must mark challenge as TERMINAL (no automatic retry)."""
+    from skyscanner_multi_domain.scan.fetch_types import AttemptPlanner, AttemptAction
+
+    planner = AttemptPlanner()
+    quote = FlightQuote(
+        region="SG", domain="https://www.skyscanner.sg",
+        price=None, currency="SGD",
+        source_url="https://www.skyscanner.sg/...",
+        status="px_challenge",
+    )
+    plan = planner.plan(quote)
+    assert plan.action == AttemptAction.TERMINAL
+
+
+def test_attempt_planner_terminal_for_no_flights() -> None:
+    """AttemptPlanner must mark high-confidence no_flights as TERMINAL."""
+    from skyscanner_multi_domain.scan.fetch_types import AttemptPlanner, AttemptAction
+
+    planner = AttemptPlanner()
+    quote = FlightQuote(
+        region="SG", domain="https://www.skyscanner.sg",
+        price=None, currency="SGD",
+        source_url="https://www.skyscanner.sg/...",
+        status="opencli_no_flights",
+    )
+    plan = planner.plan(quote)
+    assert plan.action == AttemptAction.TERMINAL
+
+
+def test_fetch_attempt_to_quote_basic() -> None:
+    """fetch_attempt_to_quote must parse page text into a FlightQuote."""
+    from skyscanner_multi_domain.scan.fetch_types import FetchAttempt, fetch_attempt_to_quote
+
+    attempt = FetchAttempt(
+        transport="opencli",
+        region_code="SG",
+        url="https://www.skyscanner.sg/transport/flights/bjs/ala/260520/",
+        page_text="Cheapest: BJS → ALA departing May 20 2026. SGD 1,234",
+    )
+    region = RegionConfig("SG", "Singapore", "https://www.skyscanner.sg", "en-SG", "SGD")
+    quote = fetch_attempt_to_quote(attempt, region)
+    assert quote.price == 1234.0
+    assert quote.currency == "SGD"
+    assert quote.source_kind == "opencli"
+
+
+def test_fetch_attempt_to_quote_with_error() -> None:
+    """fetch_attempt_to_quote must set source_kind from transport."""
+    from skyscanner_multi_domain.scan.fetch_types import FetchAttempt, fetch_attempt_to_quote
+
+    attempt = FetchAttempt(
+        transport="opencli",
+        region_code="SG",
+        url="https://www.skyscanner.sg/transport/flights/bjs/ala/260520/",
+        page_text="Loading flights...",
+        error="Page did not reach interactive state",
+    )
+    region = RegionConfig("SG", "Singapore", "https://www.skyscanner.sg", "en-SG", "SGD")
+    quote = fetch_attempt_to_quote(attempt, region)
+    assert quote.price is None
+    assert quote.source_kind == "opencli"
