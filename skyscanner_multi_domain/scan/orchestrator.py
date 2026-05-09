@@ -82,6 +82,8 @@ _STATUS_TO_CLASS: dict[str, FailureClass] = {
     "page_missing":          "browser_missing",
     "page_missing_ws":       "browser_missing",
     "page_eval_error":       "transport_error",
+    # semantic
+    "page_semantic_mismatch": "semantic_mismatch",
 }
 
 
@@ -103,6 +105,7 @@ def failure_action(failure_class: FailureClass) -> FailureAction:
         "unsupported":     FailureAction.NONE,
         "browser_missing": FailureAction.NONE,
         "transport_error": FailureAction.RETRY_BROWSER,
+        "semantic_mismatch": FailureAction.RETRY_BROWSER,
         "other":           FailureAction.NONE,
     }.get(failure_class, FailureAction.NONE)
 
@@ -398,7 +401,10 @@ async def run_page_scan(
     from skyscanner_multi_domain.transports.opencli import compare_via_opencli
     from skyscanner_multi_domain.planning.date_window import format_trip_date_label
     from skyscanner_multi_domain.scan.history import ScanHistoryStore, get_quotes_for_trip_label, select_preview_region_batches
-    from skyscanner_multi_domain.scan.fallback_router import decide_fallback, classify_quote_failure
+    from skyscanner_multi_domain.scan.fallback_router import (
+    decide_fallback,
+    classify_quote_failure,
+)
     from skyscanner_multi_domain.models import new_run_id
 
     run_id = new_run_id()
@@ -653,8 +659,6 @@ async def run_page_scan(
             cdp_targets: list[tuple[RegionConfig, FlightQuote]] = []
 
             for region, quote in zip(batch_regions, quotes):
-                if quote.price is not None:
-                    continue
                 decision = decide_fallback(quote)
                 if not decision.should_fallback:
                     continue
@@ -739,8 +743,6 @@ async def run_page_scan(
             google_jump_targets: list[tuple[RegionConfig, FlightQuote]] = []
 
             for region, quote in zip(batch_regions, quotes):
-                if quote.price is not None:
-                    continue
                 decision = decide_fallback(quote)
                 if not decision.should_fallback:
                     continue
