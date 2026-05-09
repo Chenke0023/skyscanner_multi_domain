@@ -330,14 +330,14 @@ def _quote_from_opencli_result(
         return quote
 
     from types import SimpleNamespace
-    from skyscanner_multi_domain.transports.scrapling import _build_captcha_quote, _check_captcha_in_page
+    from skyscanner_multi_domain.parsing.challenge import build_captcha_quote, check_captcha_in_page
 
-    has_captcha, captcha_type = _check_captcha_in_page(
+    has_captcha, captcha_type = check_captcha_in_page(
         page_text,
         SimpleNamespace(url=page_url),
     )
     if has_captcha:
-        quote = _build_captcha_quote(
+        quote = build_captcha_quote(
             region,
             page_url,
             captcha_type,

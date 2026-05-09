@@ -20,6 +20,11 @@ from skyscanner_multi_domain.runtime.paths import get_browser_profile_dir
 from skyscanner_multi_domain.diagnostics.attempt_trace import emit_trace
 from skyscanner_multi_domain.models import FlightQuote, RegionConfig
 from skyscanner_multi_domain.parsing.page_parser import extract_page_quote
+from skyscanner_multi_domain.parsing.challenge import (
+    check_captcha_in_page,
+    build_captcha_quote,
+    coerce_page_snippet,
+)
 from skyscanner_multi_domain.geo.regions import REGION_HOST_ALIASES
 
 
@@ -307,10 +312,10 @@ async def _probe_existing_cdp_page(
         if quote.price is not None:
             return ProbeOutcome(quote=quote, page_text=page_text)
 
-        has_captcha, captcha_type = _check_captcha_in_page(page_text)
+        has_captcha, captcha_type = check_captcha_in_page(page_text)
         if has_captcha:
             return ProbeOutcome(
-                quote=_build_captcha_quote(
+                quote=build_captcha_quote(
                     region,
                     page_url,
                     captcha_type,
@@ -435,19 +440,6 @@ def _extract_scrapling_page_text(page: Any) -> str:
     return ""
 
 
-def _coerce_page_snippet(value: Any) -> str:
-    if callable(value):
-        try:
-            value = value()
-        except Exception:
-            value = None
-    if isinstance(value, (bytes, bytearray)):
-        value = value.decode("utf-8", errors="ignore")
-    if isinstance(value, str):
-        return value
-    return ""
-
-
 def _looks_like_shell_page(page_text: str) -> bool:
     normalized_lines = [line.strip() for line in page_text.splitlines() if line.strip()]
     if not normalized_lines:
@@ -461,77 +453,6 @@ def _state_usage(state_overrides: dict[str, Any] | None) -> tuple[bool, bool]:
     """Return (used_cdp_cookies, used_profile_dir) from state_overrides."""
     state_overrides = state_overrides or {}
     return "cookies" in state_overrides, "user_data_dir" in state_overrides
-
-
-def _check_captcha_in_page(page_text: str, page: Any | None = None) -> tuple[bool, str]:
-    """Check if page contains captcha indicators.
-
-    Returns:
-        (has_captcha, captcha_type)
-    """
-    captcha_indicators = {
-        "px": [
-            "captcha-v2",
-            "/sttc/px/",
-            "perimeterx",
-            "px-captcha",
-            "press and hold",
-        ],
-        "cloudflare": ["cf-turnstile", "cloudflare", "turnstile", "cf.challenge"],
-        "recaptcha": ["g-recaptcha", "recaptcha", "google recaptcha"],
-        "hcaptcha": ["h-captcha", "hcaptcha"],
-        "generic": ["captcha", "verify you are human", "human verification"],
-    }
-
-    text_parts = [page_text]
-    if page is not None:
-        for attr_name in ("url", "current_url", "html", "content", "body", "text"):
-            text_parts.append(_coerce_page_snippet(getattr(page, attr_name, None)))
-    text_lower = "\n".join(part for part in text_parts if part).lower()
-    for captcha_type, indicators in captcha_indicators.items():
-        for indicator in indicators:
-            if indicator in text_lower:
-                return True, captcha_type
-    return False, ""
-
-
-def _build_captcha_quote(
-    region: RegionConfig,
-    source_url: str,
-    captcha_type: str,
-    *,
-    source_label: str,
-) -> FlightQuote:
-    normalized_type = (captcha_type or "").strip().lower()
-    if normalized_type == "px":
-        return FlightQuote(
-            region=region.code,
-            domain=region.domain,
-            price=None,
-            currency=region.currency,
-            source_url=source_url,
-            status="px_challenge",
-            error=(
-                f"{source_label} 命中 PX captcha-v2 验证页。"
-                "当前不会自动解此类验证；如已打开浏览器结果页，请在页面中手动完成验证后等待页面模式继续轮询。"
-            ),
-        )
-
-    challenge_label = {
-        "cloudflare": "Cloudflare",
-        "recaptcha": "reCAPTCHA",
-        "hcaptcha": "hCaptcha",
-        "generic": "通用验证码",
-    }.get(normalized_type, normalized_type.upper() or "验证码")
-    return FlightQuote(
-        region=region.code,
-        domain=region.domain,
-        price=None,
-        currency=region.currency,
-        source_url=source_url,
-        status="page_challenge",
-        error=f"{source_label} 命中 {challenge_label} 验证页",
-    )
 
 
 async def _probe_page_with_playwright(
@@ -578,10 +499,10 @@ async def _probe_page_with_playwright(
         if quote.price is not None:
             return ProbeOutcome(quote=quote, page_text=page_text)
 
-        has_captcha, captcha_type = _check_captcha_in_page(page_text)
+        has_captcha, captcha_type = check_captcha_in_page(page_text)
         if has_captcha:
             return ProbeOutcome(
-                quote=_build_captcha_quote(
+                quote=build_captcha_quote(
                     region,
                     final_url,
                     captcha_type,
@@ -909,10 +830,10 @@ async def compare_via_scrapling(
                 continue
 
             page_text = _extract_scrapling_page_text(page)
-            has_captcha, detected_captcha_type = _check_captcha_in_page(page_text, page)
-            page_url = _coerce_page_snippet(getattr(page, "url", None)) or url
+            has_captcha, detected_captcha_type = check_captcha_in_page(page_text, page)
+            page_url = coerce_page_snippet(getattr(page, "url", None)) or url
             if has_captcha and detected_captcha_type == "px":
-                latest_quote = _build_captcha_quote(
+                latest_quote = build_captcha_quote(
                     region,
                     page_url,
                     detected_captcha_type,
@@ -956,7 +877,7 @@ async def compare_via_scrapling(
                     )
                     dom_page_text = _extract_scrapling_page_text(dom_page)
                     dom_page_url = (
-                        _coerce_page_snippet(getattr(dom_page, "url", None)) or page_url
+                        coerce_page_snippet(getattr(dom_page, "url", None)) or page_url
                     )
                     if dom_page_text:
                         page_text = dom_page_text
@@ -981,7 +902,7 @@ async def compare_via_scrapling(
                     pass
 
             if has_captcha and detected_captcha_type != "cloudflare":
-                latest_quote = _build_captcha_quote(
+                latest_quote = build_captcha_quote(
                     region,
                     page_url,
                     detected_captcha_type,
@@ -1007,7 +928,7 @@ async def compare_via_scrapling(
                 return latest_quote
 
         # Check if page contains captcha and try to solve it
-        has_captcha, captcha_type = _check_captcha_in_page(page_text)
+        has_captcha, captcha_type = check_captcha_in_page(page_text)
         if (
             has_captcha
             and captcha_type in {"cloudflare", "recaptcha", "hcaptcha"}
@@ -1088,14 +1009,14 @@ async def compare_via_scrapling(
                         **state_overrides,
                     )
                 page_text = _extract_scrapling_page_text(page)
-                page_url = _coerce_page_snippet(getattr(page, "url", None)) or url
+                page_url = coerce_page_snippet(getattr(page, "url", None)) or url
                 if page_text:
-                    has_captcha, detected_captcha_type = _check_captcha_in_page(
+                    has_captcha, detected_captcha_type = check_captcha_in_page(
                         page_text,
                         page,
                     )
                     if has_captcha:
-                        latest_quote = _build_captcha_quote(
+                        latest_quote = build_captcha_quote(
                             region,
                             page_url,
                             detected_captcha_type,

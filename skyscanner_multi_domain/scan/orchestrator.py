@@ -662,9 +662,8 @@ async def run_page_scan(
 
             for region, quote in zip(batch_regions, quotes):
                 plan = planner.plan(quote)
-                if plan.action.value not in ("fallback_cdp",):
-                    continue
-                cdp_targets.append((region, quote))
+                if "cdp" in plan.transports_remaining:
+                    cdp_targets.append((region, quote))
 
             if cdp_targets:
                 page_regions = [
