@@ -7,6 +7,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from skyscanner_multi_domain.models import RegionConfig, FlightQuote
+from skyscanner_multi_domain.scan.fetch_types import FetchAttempt
 from skyscanner_multi_domain.scan.orchestrator import run_page_scan
 
 def test_orchestrator_retries_unattempted_opencli_regions() -> None:
@@ -275,14 +276,20 @@ def test_opencli_time_budget_enforcement() -> None:
                 mock_wait.return_value = (True, 0)
                 with patch.object(OpenCLITabSession, "extract_with_progressive_content_wait") as mock_extract:
                     mock_extract.return_value = (
-                        FlightQuote("CN", "skyscanner.com", 100.0, "CNY", "url", "ok"),
-                        "page text content here",
+                        FetchAttempt(
+                            transport="opencli",
+                            region_code="CN",
+                            url="url",
+                            page_text="page text content here",
+                        ),
                         {"extract_attempt_count": 1, "progressive_wait_used": 0, "max_chunk_size_used": 0},
                     )
-                    with patch.object(OpenCLITabSession, "close_async") as mock_close:
-                        mock_close.return_value = None
+                    with patch("skyscanner_multi_domain.transports.opencli.fetch_attempt_to_quote") as mock_f2q:
+                        mock_f2q.return_value = FlightQuote("CN", "skyscanner.com", 100.0, "CNY", "url", "ok")
+                        with patch.object(OpenCLITabSession, "close_async") as mock_close:
+                            mock_close.return_value = None
 
-                        quotes, _tel = await scheduler.scan_all(
+                            quotes, _tel = await scheduler.scan_all(
                             args=args,
                             selected_regions=[region1, region2],
                             url_by_region={"CN": "url1", "SG": "url2"},
@@ -452,14 +459,19 @@ def test_wait_policy_real_regions_hit_slow_domain_policy() -> None:
             with patch.object(OpenCLITabSession, "wait_progressive_state", return_value=(True, 0)):
                 with patch.object(OpenCLITabSession, "extract_with_progressive_content_wait") as mock_extract:
                     mock_extract.return_value = (
-                        FlightQuote("SG", "domain", 200.0, "SGD", "url", "ok"),
-                        "text",
+                        FetchAttempt(
+                            transport="opencli",
+                            region_code="SG",
+                            url="url",
+                            page_text="text",
+                        ),
                         {"extract_attempt_count": 1, "progressive_wait_used": 0, "max_chunk_size_used": 0},
                     )
-                    with patch.object(OpenCLITabSession, "close_async", return_value=None):
-                        with patch.object(OpenCLIDomainScheduler, "__init__", capture_init):
-                            with patch.object(OpenCLIDomainScheduler, "_scan_domain_serial", capture_scan):
-                                await compare_via_opencli(
+                    with patch("skyscanner_multi_domain.transports.opencli.fetch_attempt_to_quote", return_value=FlightQuote("SG", "domain", 200.0, "SGD", "url", "ok")):
+                        with patch.object(OpenCLITabSession, "close_async", return_value=None):
+                            with patch.object(OpenCLIDomainScheduler, "__init__", capture_init):
+                                with patch.object(OpenCLIDomainScheduler, "_scan_domain_serial", capture_scan):
+                                    await compare_via_opencli(
                                     args, [real_regions[1]],  # SG only
                                     history_telemetry=slow_telemetry,
                                     run_id="test",
@@ -642,16 +654,21 @@ def test_scheduler_uses_wait_policy_extract_wait_steps() -> None:
             nonlocal captured_steps
             captured_steps = wait_steps
             return (
-                FlightQuote(region.code, region.domain, 100.0, "CNY", "url", "ok"),
-                "page text",
+                FetchAttempt(
+                    transport="opencli",
+                    region_code=region.code,
+                    url=url,
+                    page_text="page text",
+                ),
                 {"extract_attempt_count": 1, "progressive_wait_used": 0, "max_chunk_size_used": 0},
             )
 
         with patch.object(OpenCLITabSession, "ensure_tab_async", return_value=("tab-1", {"tab_open_count": 1, "reused_tab_count": 0})):
             with patch.object(OpenCLITabSession, "wait_progressive_state", return_value=(True, 0)):
                 with patch.object(OpenCLITabSession, "extract_with_progressive_content_wait", capture_extract):
-                    with patch.object(OpenCLITabSession, "close_async", return_value=None):
-                        quotes, _tel = await scheduler.scan_all(
+                    with patch("skyscanner_multi_domain.transports.opencli.fetch_attempt_to_quote", return_value=FlightQuote("CN", "domain", 100.0, "CNY", "url", "ok")):
+                        with patch.object(OpenCLITabSession, "close_async", return_value=None):
+                            quotes, _tel = await scheduler.scan_all(
                             args=args,
                             selected_regions=[region],
                             url_by_region={"CN": "https://www.skyscanner.com.sg/transport/flights/"},
@@ -705,19 +722,24 @@ def test_scheduler_uses_wait_policy_max_region_time() -> None:
             nonlocal call_count
             call_count += 1
             return (
-                FlightQuote(region.code, region.domain, 100.0, "CNY", "url", "ok"),
-                "page text",
+                FetchAttempt(
+                    transport="opencli",
+                    region_code=region.code,
+                    url=url,
+                    page_text="page text",
+                ),
                 {"extract_attempt_count": 1, "progressive_wait_used": 0, "max_chunk_size_used": 0},
             )
 
         with patch.object(OpenCLITabSession, "ensure_tab_async", return_value=("tab-1", {"tab_open_count": 1, "reused_tab_count": 0})):
             with patch.object(OpenCLITabSession, "wait_progressive_state", return_value=(True, 0)):
                 with patch.object(OpenCLITabSession, "extract_with_progressive_content_wait", slow_extract):
-                    with patch.object(OpenCLITabSession, "close_async", return_value=None):
-                        with patch("skyscanner_multi_domain.transports.opencli.time") as mock_time:
-                            # Calls: wall_start, domain_start, budget check for SG, wall_time_ms
-                            mock_time.monotonic.side_effect = [0, 0, 2, 2]
-                            quotes, _tel = await scheduler.scan_all(
+                    with patch("skyscanner_multi_domain.transports.opencli.fetch_attempt_to_quote", return_value=FlightQuote("CN", "domain", 100.0, "CNY", "url", "ok")):
+                        with patch.object(OpenCLITabSession, "close_async", return_value=None):
+                            with patch("skyscanner_multi_domain.transports.opencli.time") as mock_time:
+                                # Calls: wall_start, domain_start, budget check for SG, wall_time_ms
+                                mock_time.monotonic.side_effect = [0, 0, 2, 2]
+                                quotes, _tel = await scheduler.scan_all(
                                 args=args,
                                 selected_regions=[region1, region2],
                                 url_by_region={

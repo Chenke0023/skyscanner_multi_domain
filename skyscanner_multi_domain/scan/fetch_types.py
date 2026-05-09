@@ -184,6 +184,19 @@ def fetch_attempt_to_quote(
         )
         quote.source_kind = attempt.transport
 
+    # Apply readiness evidence from transport (opencli-specific classification)
+    readiness = attempt.evidence.get("readiness")
+    no_flights_conf = attempt.evidence.get("no_flights_confidence", 0.0)
+    if readiness == "challenge" and quote.status not in ("px_challenge", "page_challenge"):
+        quote.status = "page_challenge"
+        quote.error = "OpenCLI page readiness classified the page as a challenge"
+    elif readiness == "no_flights" and no_flights_conf >= 0.8:
+        quote.status = "opencli_no_flights"
+        quote.error = (
+            f"OpenCLI page readiness classified the page as no flights "
+            f"(confidence {no_flights_conf:.2f}, terminal)"
+        )
+
     # Propagate transport error if no price
     if quote.price is None and attempt.error and not quote.error:
         quote.error = attempt.error[:200]
