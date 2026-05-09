@@ -879,3 +879,67 @@ def test_sanity_check_no_mismatch_preserves_confidence() -> None:
     assert result.currency_mismatch is False
     assert result.confidence == 0.9
     assert result.status == "ok"
+
+
+def test_semantic_mismatch_triggers_fallback_not_success() -> None:
+    """page_semantic_mismatch with price set must NOT be classified as success.
+
+    Regression: sanity_check_quote sets status=page_semantic_mismatch on mismatch,
+    but router must route this to fallback rather than treating it as success
+    just because price is not None.
+    """
+    from skyscanner_multi_domain.scan.fallback_router import (
+        classify_quote_failure,
+        decide_fallback,
+    )
+    from skyscanner_multi_domain.models import FlightQuote
+
+    # quote has price but also semantic mismatch flag
+    quote = FlightQuote(
+        region="SG",
+        domain="https://www.skyscanner.sg",
+        price=899.0,
+        currency="CNY",
+        source_url="https://www.skyscanner.sg/transport/flights/bjs/ala/260520/",
+        status="page_semantic_mismatch",
+        confidence=0.3,
+        route_mismatch=True,
+        date_mismatch=False,
+        currency_mismatch=False,
+    )
+
+    fc = classify_quote_failure(quote)
+    assert fc == "semantic_mismatch", f"Expected semantic_mismatch, got {fc}"
+
+    decision = decide_fallback(quote)
+    assert decision.should_fallback is True
+    assert "cdp" in decision.transports
+    assert "scrapling" in decision.transports
+
+
+def test_normal_price_with_ok_status_is_success() -> None:
+    """A normal price with ok status must be classified as success."""
+    from skyscanner_multi_domain.models import FlightQuote
+    from skyscanner_multi_domain.scan.fallback_router import (
+        classify_quote_failure,
+        decide_fallback,
+    )
+
+    quote = FlightQuote(
+        region="SG",
+        domain="https://www.skyscanner.sg",
+        price=1234.0,
+        currency="SGD",
+        source_url="https://www.skyscanner.sg/...",
+        status="ok",
+        confidence=0.9,
+        route_mismatch=False,
+        date_mismatch=False,
+        currency_mismatch=False,
+    )
+
+    fc = classify_quote_failure(quote)
+    assert fc == "success"
+
+    decision = decide_fallback(quote)
+    assert decision.should_fallback is False
