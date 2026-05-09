@@ -193,3 +193,354 @@ class OpenCliBatchProgressTests(unittest.IsolatedAsyncioTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# ── P6: Integration trace tests ───────────────────────────────────────────────
+
+class TraceFallbackChainTests(unittest.IsolatedAsyncioTestCase):
+    """Verify JSONL trace output for full fallback chains."""
+
+    async def test_full_fallback_chain_produces_three_trace_lines(self) -> None:
+        """OpenCLI network error → CDP parse failed → Scrapling success."""
+        trace_events: list[dict] = []
+
+        async def fake_opencli(args, regions, **kwargs):
+            return [
+                FlightQuote(
+                    region=region.code, domain=region.domain,
+                    price=None, currency=region.currency,
+                    source_url=f"https://example.test/{region.code}",
+                    status="opencli_error",
+                    fetch_metadata={"elapsed_ms": 5000, "phase": "wait_interactive", "retryable": True},
+                )
+                for region in regions
+            ]
+
+        async def fake_cdp(args, regions, **kwargs):
+            return [
+                FlightQuote(
+                    region=region.code, domain=region.domain,
+                    price=None, currency=region.currency,
+                    source_url=f"https://example.test/{region.code}",
+                    status="page_parse_failed",
+                    fetch_metadata={"elapsed_ms": 8000, "phase": "extract", "retryable": False},
+                )
+                for region in regions
+            ]
+
+        async def fake_scrapling(args, regions, **kwargs):
+            return [
+                FlightQuote(
+                    region=region.code, domain=region.domain,
+                    price=410.0, currency=region.currency,
+                    source_url=f"https://example.test/{region.code}",
+                    status="ok", confidence=0.88,
+                    fetch_metadata={"elapsed_ms": 3000, "phase": "extract"},
+                )
+                for region in regions
+            ]
+
+        with patch(
+            "skyscanner_multi_domain.transports.opencli.compare_via_opencli",
+            side_effect=fake_opencli,
+        ), patch(
+            "skyscanner_multi_domain.transports.cdp.compare_via_pages",
+            side_effect=fake_cdp,
+        ), patch(
+            "skyscanner_multi_domain.transports.scrapling.compare_via_scrapling",
+            side_effect=fake_scrapling,
+        ), patch(
+            "skyscanner_multi_domain.scan.trace.ScanTraceWriter.write",
+            side_effect=lambda event: trace_events.append(event.to_json_dict()),
+        ):
+            quotes = await run_page_scan(
+                origin="BJS", destination="ALA", date="2026-06-10",
+                region_codes=["SG"], transport="opencli",
+                allow_browser_fallback=True,
+            )
+
+        # Should have 3 trace events: opencli, cdp, scrapling
+        assert len(trace_events) == 3, f"Expected 3 trace events, got {len(trace_events)}"
+
+        e1 = trace_events[0]
+        assert e1["transport"] == "opencli"
+        assert e1["attempt_index"] == 1
+        # network failures route to google_jump first, then CDP, then scrapling
+        assert e1["action"] in ("fallback_google_jump", "fallback_cdp")
+        assert e1["failure_class"] == "network"
+
+        e2 = trace_events[1]
+        assert e2["transport"] == "cdp"
+        assert e2["attempt_index"] == 2
+        assert e2["action"] == "fallback_scrapling"
+        assert e2["failure_class"] == "parse"
+
+        e3 = trace_events[2]
+        assert e3["transport"] == "scrapling"
+        assert e3["attempt_index"] == 3
+        assert e3["action"] == "accept"
+        assert e3["price"] == 410.0
+
+        # All share the same scan_id and route_id
+        scan_ids = {e["scan_id"] for e in trace_events}
+        assert len(scan_ids) == 1
+        route_ids = {e["route_id"] for e in trace_events}
+        assert len(route_ids) == 1
+
+        # Final quote has attempt_history with 3 entries
+        sg_quote = next(q for q in quotes if q.region == "SG")
+        assert len(sg_quote.attempt_history) == 3
+        assert sg_quote.attempt_history[0]["transport"] == "opencli"
+        assert sg_quote.attempt_history[1]["transport"] == "cdp"
+        assert sg_quote.attempt_history[2]["transport"] == "scrapling"
+
+    async def test_no_flights_produces_terminal_trace(self) -> None:
+        """CDP returns page_no_flights — terminal, no further fallback."""
+        trace_events: list[dict] = []
+
+        async def fake_cdp(args, regions, **kwargs):
+            return [
+                FlightQuote(
+                    region=region.code, domain=region.domain,
+                    price=None, currency=region.currency,
+                    source_url=f"https://example.test/{region.code}",
+                    status="page_no_flights",
+                    fetch_metadata={"elapsed_ms": 2000},
+                )
+                for region in regions
+            ]
+
+        with patch(
+            "skyscanner_multi_domain.transports.cdp.compare_via_pages",
+            side_effect=fake_cdp,
+        ), patch(
+            "skyscanner_multi_domain.scan.trace.ScanTraceWriter.write",
+            side_effect=lambda event: trace_events.append(event.to_json_dict()),
+        ):
+            await run_page_scan(
+                origin="BJS", destination="ALA", date="2026-06-10",
+                region_codes=["KR"], transport="page",
+            )
+
+        assert len(trace_events) == 1
+        e = trace_events[0]
+        assert e["transport"] == "cdp"
+        assert e["action"] == "terminal"
+        assert e["failure_class"] == "no_flights"
+        assert e["attempt_index"] == 1
+
+    async def test_low_confidence_triggers_fallback_trace(self) -> None:
+        """OpenCLI returns low confidence price — fallback to CDP."""
+        trace_events: list[dict] = []
+
+        async def fake_opencli(args, regions, **kwargs):
+            return [
+                FlightQuote(
+                    region=region.code, domain=region.domain,
+                    price=312.0, currency=region.currency,
+                    source_url=f"https://example.test/{region.code}",
+                    status="ok", confidence=0.45,
+                    price_source="first_price_fallback",
+                    fetch_metadata={"elapsed_ms": 3000},
+                )
+                for region in regions
+            ]
+
+        async def fake_cdp(args, regions, **kwargs):
+            return [
+                FlightQuote(
+                    region=region.code, domain=region.domain,
+                    price=305.0, currency=region.currency,
+                    source_url=f"https://example.test/{region.code}",
+                    status="ok", confidence=0.91,
+                    fetch_metadata={"elapsed_ms": 6000},
+                )
+                for region in regions
+            ]
+
+        with patch(
+            "skyscanner_multi_domain.transports.opencli.compare_via_opencli",
+            side_effect=fake_opencli,
+        ), patch(
+            "skyscanner_multi_domain.transports.cdp.compare_via_pages",
+            side_effect=fake_cdp,
+        ), patch(
+            "skyscanner_multi_domain.scan.trace.ScanTraceWriter.write",
+            side_effect=lambda event: trace_events.append(event.to_json_dict()),
+        ):
+            await run_page_scan(
+                origin="BJS", destination="ALA", date="2026-06-10",
+                region_codes=["CN"], transport="opencli",
+                allow_browser_fallback=True,
+            )
+
+        assert len(trace_events) == 2
+        e1 = trace_events[0]
+        assert e1["transport"] == "opencli"
+        assert e1["confidence"] == 0.45
+        assert e1["action"] == "fallback_cdp"
+        assert "confidence" in (e1.get("reason") or "").lower()
+
+        e2 = trace_events[1]
+        assert e2["transport"] == "cdp"
+        assert e2["confidence"] == 0.91
+        assert e2["action"] == "accept"
+
+    async def test_dual_region_attempt_indices_independent(self) -> None:
+        """CN opencli success, SG opencli fail → CDP fail → scrapling success."""
+        trace_events: list[dict] = []
+
+        async def fake_opencli(args, regions, **kwargs):
+            results = []
+            for region in regions:
+                if region.code == "CN":
+                    results.append(FlightQuote(
+                        region="CN", domain=region.domain,
+                        price=2200.0, currency="CNY",
+                        source_url=f"https://example.test/CN",
+                        status="ok", confidence=0.91,
+                        fetch_metadata={"elapsed_ms": 2000},
+                    ))
+                else:
+                    results.append(FlightQuote(
+                        region=region.code, domain=region.domain,
+                        price=None, currency=region.currency,
+                        source_url=f"https://example.test/{region.code}",
+                        status="opencli_error",
+                        fetch_metadata={"elapsed_ms": 5000, "phase": "wait_interactive"},
+                    ))
+            return results
+
+        async def fake_cdp(args, regions, **kwargs):
+            return [
+                FlightQuote(
+                    region=region.code, domain=region.domain,
+                    price=None, currency=region.currency,
+                    source_url=f"https://example.test/{region.code}",
+                    status="page_parse_failed",
+                    fetch_metadata={"elapsed_ms": 4000},
+                )
+                for region in regions
+            ]
+
+        async def fake_scrapling(args, regions, **kwargs):
+            return [
+                FlightQuote(
+                    region=region.code, domain=region.domain,
+                    price=410.0, currency=region.currency,
+                    source_url=f"https://example.test/{region.code}",
+                    status="ok", confidence=0.88,
+                    fetch_metadata={"elapsed_ms": 3000},
+                )
+                for region in regions
+            ]
+
+        with patch(
+            "skyscanner_multi_domain.transports.opencli.compare_via_opencli",
+            side_effect=fake_opencli,
+        ), patch(
+            "skyscanner_multi_domain.transports.cdp.compare_via_pages",
+            side_effect=fake_cdp,
+        ), patch(
+            "skyscanner_multi_domain.transports.scrapling.compare_via_scrapling",
+            side_effect=fake_scrapling,
+        ), patch(
+            "skyscanner_multi_domain.scan.trace.ScanTraceWriter.write",
+            side_effect=lambda event: trace_events.append(event.to_json_dict()),
+        ):
+            await run_page_scan(
+                origin="BJS", destination="ALA", date="2026-06-10",
+                region_codes=["CN", "SG"], transport="opencli",
+                allow_browser_fallback=True,
+            )
+
+        # CN: 1 event (opencli success)
+        cn_events = [e for e in trace_events if e["region"] == "CN"]
+        assert len(cn_events) == 1
+        assert cn_events[0]["attempt_index"] == 1
+        assert cn_events[0]["action"] == "accept"
+
+        # SG: 3 events (opencli → cdp → scrapling)
+        sg_events = [e for e in trace_events if e["region"] == "SG"]
+        assert len(sg_events) == 3
+        assert sg_events[0]["attempt_index"] == 1
+        assert sg_events[1]["attempt_index"] == 2
+        assert sg_events[2]["attempt_index"] == 3
+
+    async def test_metadata_propagation_in_trace(self) -> None:
+        """FetchAttempt metadata is preserved in trace event."""
+        trace_events: list[dict] = []
+
+        async def fake_opencli(args, regions, **kwargs):
+            return [
+                FlightQuote(
+                    region=region.code, domain=region.domain,
+                    price=None, currency=region.currency,
+                    source_url=f"https://example.test/{region.code}",
+                    status="opencli_error",
+                    fetch_metadata={
+                        "phase": "extract",
+                        "exit_code": 1,
+                        "stderr_tail": "boom",
+                        "retryable": True,
+                        "elapsed_ms": 12345,
+                    },
+                )
+                for region in regions
+            ]
+
+        with patch(
+            "skyscanner_multi_domain.transports.opencli.compare_via_opencli",
+            side_effect=fake_opencli,
+        ), patch(
+            "skyscanner_multi_domain.scan.trace.ScanTraceWriter.write",
+            side_effect=lambda event: trace_events.append(event.to_json_dict()),
+        ):
+            await run_page_scan(
+                origin="BJS", destination="ALA", date="2026-06-10",
+                region_codes=["SG"], transport="opencli",
+                allow_browser_fallback=False,
+            )
+
+        assert len(trace_events) == 1
+        e = trace_events[0]
+        assert e["phase"] == "extract"
+        assert e["elapsed_ms"] == 12345
+        assert e["retryable"] is True
+        assert e["metadata"]["exit_code"] == 1
+        assert e["metadata"]["stderr_tail"] == "boom"
+
+    async def test_page_transport_traces_all_regions(self) -> None:
+        """Page/CDP-only transport traces every region."""
+        trace_events: list[dict] = []
+
+        async def fake_cdp(args, regions, **kwargs):
+            return [
+                FlightQuote(
+                    region=region.code, domain=region.domain,
+                    price=100.0 + i, currency=region.currency,
+                    source_url=f"https://example.test/{region.code}",
+                    status="ok", confidence=0.9,
+                    fetch_metadata={"elapsed_ms": 1000},
+                )
+                for i, region in enumerate(regions)
+            ]
+
+        with patch(
+            "skyscanner_multi_domain.transports.cdp.compare_via_pages",
+            side_effect=fake_cdp,
+        ), patch(
+            "skyscanner_multi_domain.scan.trace.ScanTraceWriter.write",
+            side_effect=lambda event: trace_events.append(event.to_json_dict()),
+        ):
+            await run_page_scan(
+                origin="BJS", destination="ALA", date="2026-06-10",
+                region_codes=["CN", "HK", "SG"], transport="page",
+            )
+
+        assert len(trace_events) == 3
+        regions = {e["region"] for e in trace_events}
+        assert regions == {"CN", "HK", "SG"}
+        for e in trace_events:
+            assert e["transport"] == "cdp"
+            assert e["attempt_index"] == 1
