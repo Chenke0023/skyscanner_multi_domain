@@ -69,6 +69,13 @@ from skyscanner_multi_domain.scan.output_rows import (
     QuoteRow,
     SimplifiedQuoteRow,
 )
+from skyscanner_multi_domain.scan.config import (
+    CdpMode,
+    ChallengePolicy,
+    LowConfidencePolicy,
+    ScanConfig,
+    TransportMode,
+)
 from skyscanner_neo import (
     DEFAULT_REGIONS,
     NeoCli,
@@ -1271,6 +1278,7 @@ class SimpleCLI:
         args: argparse.Namespace,
         *,
         manual_regions: list[str],
+        config: ScanConfig,
     ) -> int:
         if not args.origin or not args.destination:
             print("参数错误: 点对点模式下必须同时提供 --origin 和 --destination。")
@@ -1488,6 +1496,7 @@ class SimpleCLI:
                 query_payload=query_payload,
                 on_progress=on_progress,
                 fetch_pipeline=getattr(args, "fetch_pipeline", "balanced"),
+                config=config,
             )
             if not quotes:
                 return (
@@ -1665,6 +1674,7 @@ class SimpleCLI:
         args: argparse.Namespace,
         *,
         manual_regions: list[str],
+        config: ScanConfig,
     ) -> int:
         airport_limit = max(
             int(
@@ -1935,6 +1945,7 @@ class SimpleCLI:
                         query_payload=query_payload,
                         on_progress=on_progress,
                         fetch_pipeline=getattr(args, "fetch_pipeline", "balanced"),
+                        config=config,
                     )
                 if not quotes:
                     return pair_index, []
@@ -2134,16 +2145,64 @@ class SimpleCLI:
         manual_regions = [
             code.strip().upper() for code in args.regions.split(",") if code.strip()
         ]
+        config = self._build_scan_config(args)
         if getattr(args, "origin_country", None) or getattr(
             args, "destination_country", None
         ):
             return await self._run_expanded_route_page_command(
                 args,
                 manual_regions=manual_regions,
+                config=config,
             )
         return await self._run_point_to_point_page_command(
             args,
             manual_regions=manual_regions,
+            config=config,
+        )
+
+    @staticmethod
+    def _build_scan_config(args: argparse.Namespace) -> ScanConfig:
+        manual_tabs: dict[str, str] = {}
+        manual_tabs_json = getattr(args, "manual_tabs_json", None)
+        if manual_tabs_json:
+            try:
+                import json
+                manual_tabs = json.loads(Path(manual_tabs_json).read_text(encoding="utf-8"))
+            except Exception:
+                pass
+
+        # ScanConfig.transport is the strict-mode override.  Default is AUTO,
+        # which preserves the legacy --transport flag's "primary + fallback"
+        # semantic.  Setting --transport-mode opencli/cdp/scrapling forces a
+        # single transport with fallback disabled.
+        transport_mode_raw = getattr(args, "transport_mode", None) or "auto"
+        try:
+            transport_mode = TransportMode(transport_mode_raw)
+        except ValueError:
+            transport_mode = TransportMode.AUTO
+
+        return ScanConfig(
+            transport=transport_mode,
+            cdp_mode=CdpMode(getattr(args, "cdp_mode", "attach")),
+            cdp_host=getattr(args, "cdp_host", "http://localhost:9222"),
+            keep_tabs=bool(getattr(args, "keep_tabs", False)),
+            manual_tabs=manual_tabs,
+            low_confidence_policy=LowConfidencePolicy(
+                getattr(args, "low_confidence_policy", "fallback")
+            ),
+            rankable_confidence=float(getattr(args, "rankable_confidence", 0.80)),
+            review_confidence=float(getattr(args, "review_confidence", 0.50)),
+            challenge_policy=ChallengePolicy(
+                getattr(args, "challenge_policy", "stop")
+            ),
+            trace_dir=getattr(args, "trace_dir", "traces") or None,
+            no_trace=bool(getattr(args, "no_trace", False)),
+            failure_log_dir=getattr(args, "failure_log_dir", "failures") or None,
+            debug_page_text=bool(getattr(args, "debug_page_text", False)),
+            output=getattr(args, "output", "table"),
+            output_file=getattr(args, "output_file", None),
+            show_attempts=bool(getattr(args, "show_attempts", False)),
+            show_low_confidence=bool(getattr(args, "show_low_confidence", False)),
         )
 
     def interactive_page(self) -> int:
@@ -2455,6 +2514,113 @@ def build_parser() -> argparse.ArgumentParser:
     )
     page.add_argument(
         "--no-save", dest="save", action="store_false", help="不保存 Markdown 结果"
+    )
+
+    # ── P7: Transport mode ────────────────────────────────────────────
+    page.add_argument(
+        "--transport-mode",
+        choices=["auto", "opencli", "cdp", "scrapling"],
+        default="auto",
+        help=(
+            "传输模式严格控制: auto=按 --transport 选择并允许 fallback (默认), "
+            "opencli/cdp/scrapling=只跑该传输，禁用 fallback"
+        ),
+    )
+
+    # ── P7: CDP mode ──────────────────────────────────────────────────
+    page.add_argument(
+        "--cdp-mode",
+        choices=["attach", "managed", "manual"],
+        default="attach",
+        help="CDP 浏览器连接模式: attach=连接已有浏览器 (默认), managed=启动独立浏览器, manual=手动 Tab 映射",
+    )
+    page.add_argument(
+        "--cdp-host",
+        default="http://localhost:9222",
+        help="CDP 浏览器调试端口地址 (默认 http://localhost:9222)",
+    )
+    page.add_argument(
+        "--keep-tabs",
+        action="store_true",
+        help="调试用: owned tabs 不自动关闭",
+    )
+    page.add_argument(
+        "--manual-tabs-json",
+        default=None,
+        help="手动 Tab 映射 JSON 文件路径 (cdp-mode=manual 时需要)",
+    )
+
+    # ── P7: Confidence / trust policy ──────────────────────────────────
+    page.add_argument(
+        "--low-confidence-policy",
+        choices=["fallback", "show", "hide", "accept-review"],
+        default="fallback",
+        help="低置信度价格处理策略: fallback=触发回退 (默认), show=展示但不参与排序, hide=仅写入 trace, accept-review=接受但标记需人工复核",
+    )
+    page.add_argument(
+        "--rankable-confidence",
+        type=float,
+        default=0.80,
+        help="可参与排序的最低置信度阈值 (默认 0.80)",
+    )
+    page.add_argument(
+        "--review-confidence",
+        type=float,
+        default=0.50,
+        help="触发人工复核标记的置信度阈值 (默认 0.50)",
+    )
+
+    # ── P7: Challenge policy ──────────────────────────────────────────
+    page.add_argument(
+        "--challenge-policy",
+        choices=["stop", "manual"],
+        default="stop",
+        help="遇到验证码时的策略: stop=终止不绕过 (默认), manual=输出需要用户处理的 URL/Tab 信息",
+    )
+
+    # ── P7: Trace / debug ─────────────────────────────────────────────
+    page.add_argument(
+        "--trace-dir",
+        default="traces",
+        help="Trace JSONL 输出目录 (默认 traces/)",
+    )
+    page.add_argument(
+        "--no-trace",
+        action="store_true",
+        help="禁用 trace JSONL 输出",
+    )
+    page.add_argument(
+        "--failure-log-dir",
+        default="failures",
+        help="Failure log 输出目录 (默认 failures/)",
+    )
+    page.add_argument(
+        "--debug-page-text",
+        action="store_true",
+        help="在 failure log 中保留完整 page text (默认截断)",
+    )
+
+    # ── P7: Output format ─────────────────────────────────────────────
+    page.add_argument(
+        "--output",
+        choices=["table", "json", "jsonl"],
+        default="table",
+        help="输出格式: table=终端表格 (默认), json=结构化 JSON, jsonl=每行一个 quote",
+    )
+    page.add_argument(
+        "--output-file",
+        default=None,
+        help="结果输出文件路径 (--output json 或 jsonl 时使用)",
+    )
+    page.add_argument(
+        "--show-attempts",
+        action="store_true",
+        help="展示每个 region 的完整 fallback attempt 链路",
+    )
+    page.add_argument(
+        "--show-low-confidence",
+        action="store_true",
+        help="展示低置信度价格 (默认隐藏)",
     )
 
     return parser
