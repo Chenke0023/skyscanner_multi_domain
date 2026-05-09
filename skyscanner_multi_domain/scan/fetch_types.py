@@ -49,7 +49,6 @@ class AttemptAction(Enum):
     FALLBACK_CDP = "fallback_cdp"
     FALLBACK_SCRAPLING = "fallback_scrapling"
     FALLBACK_GOOGLE_JUMP = "fallback_google_jump"
-    WAIT_RENDER = "wait_render"    # retry same transport with longer wait
     TERMINAL = "terminal"          # no price, but no point retrying (challenge, no_flights, etc.)
 
 
@@ -58,9 +57,12 @@ class AttemptPlan:
     """What to do after a fetch attempt."""
 
     action: AttemptAction
+    failure_class: str = ""           # e.g. "success", "semantic_mismatch", "challenge"
     reason: str = ""
     transports_remaining: list[str] = field(default_factory=list)
     confidence: float = 1.0
+    manual_review_required: bool = False
+    max_attempts: int = 1
 
 
 # ── AttemptPlanner ────────────────────────────────────────────────────────────
@@ -86,51 +88,60 @@ class AttemptPlanner:
         fc = classify_quote_failure(quote)
         decision = decide_fallback(quote)
 
+        base = AttemptPlan(
+            action=AttemptAction.TERMINAL,
+            failure_class=fc,
+            reason=decision.reason,
+            confidence=0.0,
+            manual_review_required=decision.manual_review_required,
+            max_attempts=decision.max_attempts,
+        )
+
         if not decision.should_fallback:
             if fc == "success":
                 return AttemptPlan(
                     action=AttemptAction.ACCEPT,
+                    failure_class=fc,
                     reason="Price found and passed sanity checks",
                     confidence=quote.confidence or 0.9,
                 )
-            return AttemptPlan(
-                action=AttemptAction.TERMINAL,
-                reason=decision.reason,
-                confidence=0.0,
-            )
+            return base
 
         # Map router transports to AttemptAction
         remaining = decision.transports
         if not remaining:
-            return AttemptPlan(
-                action=AttemptAction.TERMINAL,
-                reason="All fallback transports exhausted",
-            )
+            return base
 
         primary = remaining[0]
         if primary == "google_jump":
             return AttemptPlan(
                 action=AttemptAction.FALLBACK_GOOGLE_JUMP,
+                failure_class=fc,
                 reason=decision.reason,
                 transports_remaining=remaining,
+                manual_review_required=decision.manual_review_required,
+                max_attempts=decision.max_attempts,
             )
         if primary == "cdp":
             return AttemptPlan(
                 action=AttemptAction.FALLBACK_CDP,
+                failure_class=fc,
                 reason=decision.reason,
                 transports_remaining=remaining,
+                manual_review_required=decision.manual_review_required,
+                max_attempts=decision.max_attempts,
             )
         if primary == "scrapling":
             return AttemptPlan(
                 action=AttemptAction.FALLBACK_SCRAPLING,
+                failure_class=fc,
                 reason=decision.reason,
                 transports_remaining=remaining,
+                manual_review_required=decision.manual_review_required,
+                max_attempts=decision.max_attempts,
             )
 
-        return AttemptPlan(
-            action=AttemptAction.TERMINAL,
-            reason=f"Unknown fallback transport: {primary}",
-        )
+        return base
 
 
 def fetch_attempt_to_quote(
@@ -154,18 +165,18 @@ def fetch_attempt_to_quote(
         return quote
 
     # Captcha check
-    from skyscanner_multi_domain.transports.scrapling import (
-        _build_captcha_quote,
-        _check_captcha_in_page,
+    from skyscanner_multi_domain.parsing.challenge import (
+        build_captcha_quote,
+        check_captcha_in_page,
     )
     from types import SimpleNamespace
 
-    has_captcha, captcha_type = _check_captcha_in_page(
+    has_captcha, captcha_type = check_captcha_in_page(
         attempt.page_text,
         SimpleNamespace(url=url),
     )
     if has_captcha:
-        quote = _build_captcha_quote(
+        quote = build_captcha_quote(
             region,
             url,
             captcha_type,

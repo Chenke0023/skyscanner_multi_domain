@@ -34,7 +34,7 @@ from skyscanner_multi_domain.parsing.page_parser import (
     extract_page_quote,
 )
 from skyscanner_multi_domain.geo.regions import REGION_HOST_ALIASES
-from skyscanner_multi_domain.transports.scrapling import _build_captcha_quote, _check_captcha_in_page
+from skyscanner_multi_domain.parsing.challenge import build_captcha_quote, check_captcha_in_page
 
 CDP_HTTP = "http://localhost:9222"
 CDP_HOST_CANDIDATES = ("localhost", "::1", "127.0.0.1")
@@ -593,12 +593,12 @@ def _quote_from_cdp_payload(
     if quote.price is not None:
         return quote
 
-    has_captcha, captcha_type = _check_captcha_in_page(
+    has_captcha, captcha_type = check_captcha_in_page(
         page_text,
         SimpleNamespace(url=page_url),
     )
     if has_captcha:
-        quote = _build_captcha_quote(
+        quote = build_captcha_quote(
             region,
             page_url,
             captcha_type,

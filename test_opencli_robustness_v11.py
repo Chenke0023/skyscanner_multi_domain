@@ -1058,3 +1058,86 @@ def test_fetch_attempt_to_quote_with_error() -> None:
     quote = fetch_attempt_to_quote(attempt, region)
     assert quote.price is None
     assert quote.source_kind == "opencli"
+
+
+def test_attempt_planner_manual_review_for_challenge() -> None:
+    """AttemptPlan must surface manual_review_required for challenge status."""
+    from skyscanner_multi_domain.scan.fetch_types import AttemptPlanner, AttemptAction
+
+    planner = AttemptPlanner()
+    quote = FlightQuote(
+        region="SG", domain="https://www.skyscanner.sg",
+        price=None, currency="SGD",
+        source_url="https://www.skyscanner.sg/...",
+        status="px_challenge",
+    )
+    plan = planner.plan(quote)
+    assert plan.action == AttemptAction.TERMINAL
+    assert plan.manual_review_required is True
+    assert plan.failure_class == "challenge"
+
+
+def test_attempt_planner_max_attempts_for_network() -> None:
+    """AttemptPlan must surface max_attempts from FallbackDecision."""
+    from skyscanner_multi_domain.scan.fetch_types import AttemptPlanner, AttemptAction
+
+    planner = AttemptPlanner()
+    quote = FlightQuote(
+        region="SG", domain="https://www.skyscanner.sg",
+        price=None, currency="SGD",
+        source_url="https://www.skyscanner.sg/...",
+        status="opencli_error",
+    )
+    plan = planner.plan(quote)
+    assert plan.action == AttemptAction.FALLBACK_GOOGLE_JUMP
+    assert plan.max_attempts == 3  # network decision has max_attempts=3
+    assert plan.failure_class == "network"
+
+
+def test_orchestrator_semantic_mismatch_triggers_cdp_not_scrapling() -> None:
+    """Semantic mismatch with price must trigger CDP fallback; scrapling should NOT run if CDP succeeds.
+
+    Regression: opencli returns price + page_semantic_mismatch → planner routes to
+    [cdp, scrapling] → CDP succeeds → final quote is CDP result, scrapling never called.
+    """
+    import asyncio
+    from unittest.mock import AsyncMock, patch
+    from skyscanner_multi_domain.scan.orchestrator import run_page_scan
+    from skyscanner_multi_domain.models import RegionConfig, FlightQuote
+
+    async def run_test():
+        # opencli returns semantic mismatch (has price but wrong route/currency)
+        opencli_quote = FlightQuote(
+            region="SG", domain="https://www.skyscanner.sg",
+            price=899.0, currency="CNY",
+            source_url="https://www.skyscanner.sg/...",
+            status="page_semantic_mismatch",
+            confidence=0.3, route_mismatch=True,
+        )
+
+        # CDP returns valid price
+        cdp_quote = FlightQuote(
+            region="SG", domain="https://www.skyscanner.sg",
+            price=450.0, currency="SGD",
+            source_url="https://www.skyscanner.sg/...",
+            status="ok", confidence=0.85,
+        )
+
+        with patch("skyscanner_multi_domain.transports.opencli.compare_via_opencli", new_callable=AsyncMock) as mock_opencli,              patch("skyscanner_multi_domain.transports.cdp.compare_via_pages", new_callable=AsyncMock) as mock_cdp,              patch("skyscanner_multi_domain.transports.scrapling.compare_via_scrapling", new_callable=AsyncMock) as mock_scrapling:
+            mock_opencli.return_value = [opencli_quote]
+            mock_cdp.return_value = [cdp_quote]
+            mock_scrapling.return_value = []
+
+            quotes = await run_page_scan(
+                origin="BJS", destination="ALA", date="2026-05-20",
+                region_codes=["SG"],
+                allow_browser_fallback=True,
+            )
+
+            assert mock_cdp.called, "CDP fallback must be called for semantic_mismatch"
+            assert not mock_scrapling.called, "Scrapling must NOT be called when CDP succeeds"
+            assert quotes[0].price == 450.0
+            assert quotes[0].currency == "SGD"
+            assert quotes[0].status == "ok"
+
+    asyncio.run(run_test())

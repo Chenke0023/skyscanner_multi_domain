@@ -9,13 +9,13 @@ from unittest.mock import patch
 
 from transport_scrapling import (
     _build_cookie_scope_urls,
-    _check_captcha_in_page,
     _get_persistent_probe_candidates,
     _get_matching_cdp_page_ws_urls,
     _resolve_scrapling_state_overrides,
     _state_usage,
     compare_via_scrapling,
 )
+from skyscanner_multi_domain.parsing.challenge import check_captcha_in_page
 from skyscanner_models import RegionConfig
 
 
@@ -24,7 +24,7 @@ class CaptchaDetectionTests(unittest.TestCase):
         class FakePage:
             url = "https://www.skyscanner.com.sg/sttc/px/captcha-v2/index.html"
 
-        has_captcha, captcha_type = _check_captcha_in_page(
+        has_captcha, captcha_type = check_captcha_in_page(
             "Verify you are human\ncaptcha-v2\nPress and hold", FakePage()
         )
 

@@ -65,8 +65,8 @@ from skyscanner_multi_domain.transports.cdp import (  # noqa: F401
     verify_browser_session_persistence,
     wait_for_cdp,
 )
+from skyscanner_multi_domain.parsing.challenge import check_captcha_in_page  # noqa: F401
 from skyscanner_multi_domain.transports.scrapling import (  # noqa: F401
-    _check_captcha_in_page,
     _extract_scrapling_page_text,
     compare_via_scrapling,
 )
