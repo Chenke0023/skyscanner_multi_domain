@@ -14,6 +14,13 @@ from typing import Any, Awaitable, Callable, Literal, Optional, Union
 from skyscanner_multi_domain.runtime.paths import get_failure_log_file
 from skyscanner_multi_domain.diagnostics.attempt_trace import flush as flush_attempt_trace
 from skyscanner_multi_domain.models import FlightQuote, RegionConfig
+from skyscanner_multi_domain.scan.trace import (
+    ScanTraceContext,
+    ScanTraceWriter,
+    append_attempt_history,
+    emit_attempt_trace,
+    merge_attempt_history,
+)
 from skyscanner_multi_domain.planning.search_plan import (
     DateCandidate,
     RouteCandidate,
@@ -395,6 +402,7 @@ async def run_page_scan(
     on_progress: ScanProgressCallback | None = None,
     allow_browser_fallback: bool = True,
     fetch_pipeline: str = "balanced",
+    config: Any | None = None,  # ScanConfig — lazy import to avoid circular deps
 ) -> list[FlightQuote]:
     from skyscanner_multi_domain.transports.cdp import compare_via_pages, detect_cdp_version, ensure_cdp_ready
     from skyscanner_multi_domain.transports.scrapling import compare_via_scrapling
@@ -409,6 +417,56 @@ async def run_page_scan(
     from skyscanner_multi_domain.models import new_run_id
 
     run_id = new_run_id()
+    route_key = build_route_key(origin, destination, date, return_date)
+
+    # ── P7.4: transport mode strict enforcement ──────────────────────────
+    # When config.transport is set to a specific transport (not AUTO), force
+    # that transport and disable browser fallback.  AUTO preserves the
+    # caller-provided transport/allow_browser_fallback (legacy behavior).
+    if config is not None:
+        cfg_transport = getattr(config, "transport", None)
+        cfg_t_str = getattr(cfg_transport, "value", None) if cfg_transport is not None else None
+        if cfg_t_str == "opencli":
+            transport = "opencli"
+            allow_browser_fallback = False
+        elif cfg_t_str == "cdp":
+            transport = "page"
+            allow_browser_fallback = False
+        elif cfg_t_str == "scrapling":
+            transport = "scrapling"
+            allow_browser_fallback = False
+        # AUTO: leave transport/allow_browser_fallback as caller passed
+
+    # CDP options threaded from config to compare_via_pages call sites.
+    cdp_mode = "attach"
+    cdp_manual_tabs: dict[str, str] = {}
+    if config is not None:
+        cdp_mode_cfg = getattr(config, "cdp_mode", None)
+        cdp_mode = getattr(cdp_mode_cfg, "value", None) or cdp_mode
+        cdp_manual_tabs = dict(getattr(config, "manual_tabs", None) or {})
+
+    trace_ctx: ScanTraceContext | None = None
+    no_trace = getattr(config, "no_trace", False) if config is not None else False
+    trace_dir = getattr(config, "trace_dir", "traces") if config is not None else "traces"
+
+    if not no_trace and trace_dir:
+        trace_path = Path(trace_dir) / f"{run_id}.jsonl"
+        trace_ctx = ScanTraceContext(
+            scan_id=run_id,
+            route_id=route_key,
+            origin=origin,
+            destination=destination,
+            depart_date=date,
+            writer=ScanTraceWriter(trace_path),
+        )
+
+    # Per-region attempt counter so each region's attempt_index starts at 1
+    _attempt_index: dict[str, int] = {}
+
+    def next_attempt_index(region_code: str) -> int:
+        idx = _attempt_index.get(region_code, 0) + 1
+        _attempt_index[region_code] = idx
+        return idx
 
     try:
         normalized_rerun_scope = (rerun_scope or "all").lower()
@@ -614,6 +672,25 @@ async def run_page_scan(
                 fetch_pipeline=fetch_pipeline,
             )
 
+            # ── v3: trace primary scrapling attempt ─────────────────
+            planner = AttemptPlanner(config=config)
+            for region, quote in zip(batch_regions, quotes):
+                plan = planner.plan(quote)
+                emit_attempt_trace(
+                    trace_ctx=trace_ctx,
+                    quote=quote,
+                    plan=plan,
+                    region=region.code,
+                    domain=region.domain,
+                    transport="scrapling",
+                    attempt_index=next_attempt_index(region.code),
+                )
+                append_attempt_history(
+                    quote, transport="scrapling",
+                    attempt_index=_attempt_index.get(region.code, 1),
+                    plan=plan,
+                )
+
             # WAIT_RENDER retry (v2 logic, preserved)
             wait_render_regions = [
                 region
@@ -645,8 +722,42 @@ async def run_page_scan(
                                 "failure_class": classify_failure(replacement.status),
                                 "error": replacement.error,
                             })
+                            # trace the WAIT_RENDER retry failure
+                            wait_plan = planner.plan(replacement)
+                            emit_attempt_trace(
+                                trace_ctx=trace_ctx,
+                                quote=replacement,
+                                plan=wait_plan,
+                                region=quote.region,
+                                domain=getattr(
+                                    next((r for r in batch_regions if r.code == quote.region), None),
+                                    "domain", None,
+                                ),
+                                transport="scrapling_wait",
+                                attempt_index=next_attempt_index(quote.region),
+                            )
                             merged.append(quote)
                         else:
+                            # trace the WAIT_RENDER retry success
+                            wait_plan = planner.plan(replacement)
+                            emit_attempt_trace(
+                                trace_ctx=trace_ctx,
+                                quote=replacement,
+                                plan=wait_plan,
+                                region=quote.region,
+                                domain=getattr(
+                                    next((r for r in batch_regions if r.code == quote.region), None),
+                                    "domain", None,
+                                ),
+                                transport="scrapling_wait",
+                                attempt_index=next_attempt_index(quote.region),
+                            )
+                            merge_attempt_history(quote, replacement)
+                            append_attempt_history(
+                                replacement, transport="scrapling_wait",
+                                attempt_index=_attempt_index.get(quote.region, 1),
+                                plan=wait_plan,
+                            )
                             merged.append(replacement)
                     else:
                         merged.append(quote)
@@ -656,7 +767,6 @@ async def run_page_scan(
             if not enable_browser_fallback:
                 return quotes
 
-            planner = AttemptPlanner()
             quote_by_region: dict[str, FlightQuote] = {q.region: q for q in quotes}
             cdp_targets: list[tuple[RegionConfig, FlightQuote]] = []
 
@@ -679,7 +789,8 @@ async def run_page_scan(
                             )
                         )
                     page_quotes = await compare_via_pages(
-                        args, page_regions, persist_failures=False, run_id=run_id
+                        args, page_regions, persist_failures=False, run_id=run_id,
+                        cdp_mode=cdp_mode, manual_tabs=cdp_manual_tabs,
                     )
                     page_by_region_map = {q.region: q for q in page_quotes if q is not None}
                     for region, quote in cdp_targets:
@@ -694,6 +805,23 @@ async def run_page_scan(
                                  "error": quote.error},
                                 *list(page_quote.fallback_attempts or []),
                             ]
+                            # trace CDP fallback success
+                            cdp_plan = planner.plan(page_quote)
+                            emit_attempt_trace(
+                                trace_ctx=trace_ctx,
+                                quote=page_quote,
+                                plan=cdp_plan,
+                                region=region.code,
+                                domain=region.domain,
+                                transport="cdp",
+                                attempt_index=next_attempt_index(region.code),
+                            )
+                            merge_attempt_history(quote, page_quote)
+                            append_attempt_history(
+                                page_quote, transport="cdp",
+                                attempt_index=_attempt_index.get(region.code, 1),
+                                plan=cdp_plan,
+                            )
                             quote_by_region[region.code] = page_quote
                         elif page_quote:
                             quote.fallback_attempts.append({
@@ -702,6 +830,23 @@ async def run_page_scan(
                                 "failure_class": classify_quote_failure(page_quote),
                                 "error": page_quote.error,
                             })
+                            # trace CDP fallback failure (scrapling_pass)
+                            cdp_plan = planner.plan(page_quote)
+                            emit_attempt_trace(
+                                trace_ctx=trace_ctx,
+                                quote=page_quote,
+                                plan=cdp_plan,
+                                region=region.code,
+                                domain=region.domain,
+                                transport="cdp",
+                                attempt_index=next_attempt_index(region.code),
+                            )
+                            merge_attempt_history(quote, page_quote)
+                            append_attempt_history(
+                                page_quote, transport="cdp",
+                                attempt_index=_attempt_index.get(region.code, 1),
+                                plan=cdp_plan,
+                            )
 
             return [quote_by_region.get(q.region, q) for q in quotes]
 
@@ -731,11 +876,29 @@ async def run_page_scan(
                 history_telemetry=history_telemetry,
             )
 
+            # ── v3: trace primary opencli attempt ────────────────────
+            planner = AttemptPlanner(config=config)
+            for region, quote in zip(batch_regions, quotes):
+                plan = planner.plan(quote)
+                emit_attempt_trace(
+                    trace_ctx=trace_ctx,
+                    quote=quote,
+                    plan=plan,
+                    region=region.code,
+                    domain=region.domain,
+                    transport="opencli",
+                    attempt_index=next_attempt_index(region.code),
+                )
+                append_attempt_history(
+                    quote, transport="opencli",
+                    attempt_index=_attempt_index.get(region.code, 1),
+                    plan=plan,
+                )
+
             if not enable_fallbacks:
                 return quotes
 
             # ── v3: router-driven fallback ──────────────────────────
-            planner = AttemptPlanner()
             quote_by_region: dict[str, FlightQuote] = {q.region: q for q in quotes}
 
             # Collect regions by their fallback decision
@@ -770,6 +933,23 @@ async def run_page_scan(
                                  "failure_class": classify_quote_failure(quote),
                                  "error": quote.error},
                             ]
+                            # trace google_jump success
+                            gj_plan = planner.plan(gj_quote)
+                            emit_attempt_trace(
+                                trace_ctx=trace_ctx,
+                                quote=gj_quote,
+                                plan=gj_plan,
+                                region=region.code,
+                                domain=region.domain,
+                                transport="google_jump",
+                                attempt_index=next_attempt_index(region.code),
+                            )
+                            merge_attempt_history(quote, gj_quote)
+                            append_attempt_history(
+                                gj_quote, transport="google_jump",
+                                attempt_index=_attempt_index.get(region.code, 1),
+                                plan=gj_plan,
+                            )
                             quote_by_region[region.code] = gj_quote
                     except Exception:
                         pass
@@ -789,7 +969,8 @@ async def run_page_scan(
                             )
                         )
                     page_quotes = await compare_via_pages(
-                        args, page_regions, persist_failures=False, run_id=run_id
+                        args, page_regions, persist_failures=False, run_id=run_id,
+                        cdp_mode=cdp_mode, manual_tabs=cdp_manual_tabs,
                     )
                     page_by_region_map = {q.region: q for q in page_quotes}
                     for region, quote in cdp_targets:
@@ -804,6 +985,23 @@ async def run_page_scan(
                                  "error": quote.error},
                                 *list(page_quote.fallback_attempts or []),
                             ]
+                            # trace CDP fallback success
+                            cdp_plan = planner.plan(page_quote)
+                            emit_attempt_trace(
+                                trace_ctx=trace_ctx,
+                                quote=page_quote,
+                                plan=cdp_plan,
+                                region=region.code,
+                                domain=region.domain,
+                                transport="cdp",
+                                attempt_index=next_attempt_index(region.code),
+                            )
+                            merge_attempt_history(quote, page_quote)
+                            append_attempt_history(
+                                page_quote, transport="cdp",
+                                attempt_index=_attempt_index.get(region.code, 1),
+                                plan=cdp_plan,
+                            )
                             quote_by_region[region.code] = page_quote
                         elif page_quote:
                             # Update quote_by_region with CDP result so scrapling
@@ -817,6 +1015,23 @@ async def run_page_scan(
                                  "error": page_quote.error},
                                 *list(page_quote.fallback_attempts or []),
                             ]
+                            # trace CDP fallback failure
+                            cdp_plan = planner.plan(page_quote)
+                            emit_attempt_trace(
+                                trace_ctx=trace_ctx,
+                                quote=page_quote,
+                                plan=cdp_plan,
+                                region=region.code,
+                                domain=region.domain,
+                                transport="cdp",
+                                attempt_index=next_attempt_index(region.code),
+                            )
+                            merge_attempt_history(quote, page_quote)
+                            append_attempt_history(
+                                page_quote, transport="cdp",
+                                attempt_index=_attempt_index.get(region.code, 1),
+                                plan=cdp_plan,
+                            )
                             quote_by_region[region.code] = page_quote
 
             # Try Scrapling fallback — re-evaluate planner for each region
@@ -855,6 +1070,23 @@ async def run_page_scan(
                                  "error": sq.error},
                                 *list(sq.fallback_attempts or []),
                             ]
+                            # trace scrapling fallback success
+                            sq_plan = planner.plan(sq)
+                            emit_attempt_trace(
+                                trace_ctx=trace_ctx,
+                                quote=sq,
+                                plan=sq_plan,
+                                region=region.code,
+                                domain=region.domain,
+                                transport="scrapling",
+                                attempt_index=next_attempt_index(region.code),
+                            )
+                            merge_attempt_history(current, sq)
+                            append_attempt_history(
+                                sq, transport="scrapling",
+                                attempt_index=_attempt_index.get(region.code, 1),
+                                plan=sq_plan,
+                            )
                             quote_by_region[region.code] = sq
                         elif sq:
                             # Merge scrapling failure into quote_by_region
@@ -865,6 +1097,17 @@ async def run_page_scan(
                                 "failure_class": classify_quote_failure(sq),
                                 "error": sq.error,
                             })
+                            # trace scrapling fallback failure
+                            sq_plan = planner.plan(sq)
+                            emit_attempt_trace(
+                                trace_ctx=trace_ctx,
+                                quote=sq,
+                                plan=sq_plan,
+                                region=region.code,
+                                domain=region.domain,
+                                transport="scrapling",
+                                attempt_index=next_attempt_index(region.code),
+                            )
                             quote_by_region[region.code] = current
 
             # Rebuild quotes list preserving order with fallback replacements
@@ -872,8 +1115,29 @@ async def run_page_scan(
             return new_quotes
 
         if normalized_transport == "page":
-            quotes = await compare_via_pages(args, selected_regions, run_id=run_id)
+            quotes = await compare_via_pages(
+                args, selected_regions, run_id=run_id,
+                cdp_mode=cdp_mode, manual_tabs=cdp_manual_tabs,
+            )
             quotes = apply_plan_metadata(quotes)
+            # trace page/CDP transport
+            planner = AttemptPlanner(config=config)
+            for region, quote in zip(selected_regions, quotes):
+                plan = planner.plan(quote)
+                emit_attempt_trace(
+                    trace_ctx=trace_ctx,
+                    quote=quote,
+                    plan=plan,
+                    region=region.code,
+                    domain=region.domain,
+                    transport="cdp",
+                    attempt_index=next_attempt_index(region.code),
+                )
+                append_attempt_history(
+                    quote, transport="cdp",
+                    attempt_index=_attempt_index.get(region.code, 1),
+                    plan=plan,
+                )
             await emit_progress(
                 stage="final",
                 quotes=quotes,
@@ -991,7 +1255,8 @@ async def run_page_scan(
                                     )
                                 )
                             batch_fallback_quotes = await compare_via_pages(
-                                args, batch_failed, persist_failures=False, run_id=run_id
+                                args, batch_failed, persist_failures=False, run_id=run_id,
+                                cdp_mode=cdp_mode, manual_tabs=cdp_manual_tabs,
                             )
                             batch_fallback_quotes = apply_plan_metadata(batch_fallback_quotes)
                             merged_quotes = merge_quotes_by_region(merged_quotes, batch_fallback_quotes)
@@ -1148,4 +1413,6 @@ async def run_page_scan(
         quotes.sort(key=lambda item: (item.price is None, item.price or float("inf")))
     finally:
         flush_attempt_trace()
+        if trace_ctx is not None:
+            trace_ctx.writer.flush()
     return quotes
