@@ -62,6 +62,9 @@ class FlightQuote:
     max_chunk_size_used: int = 0
     progressive_wait_used: int = 0
 
+    # Transport-level structured metadata (phase, retryability, subprocess details)
+    fetch_metadata: dict[str, Any] = field(default_factory=dict)
+
 
 # ── AttemptTrace ──────────────────────────────────────────────────────────────
 

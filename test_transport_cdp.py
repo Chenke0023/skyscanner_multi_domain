@@ -115,7 +115,7 @@ def test_get_matching_cdp_tabs_filters_by_path_and_region_aliases() -> None:
     assert matches == [tabs[0]]
 
 
-def test_compare_via_pages_reuses_existing_matching_tabs_without_opening_new_ones() -> None:
+def test_compare_via_pages_creates_owned_tabs_and_closes_them() -> None:
     args = argparse.Namespace(
         origin="BJSA",
         destination="ALA",
@@ -132,14 +132,12 @@ def test_compare_via_pages_reuses_existing_matching_tabs_without_opening_new_one
         locale="zh-HK",
     )
     target_url = "https://www.skyscanner.com.hk/transport/flights/bjsa/ala/260429/?adultsv2=1"
-    existing_tabs = [
-        {
-            "type": "page",
-            "url": target_url,
-            "webSocketDebuggerUrl": "ws://existing-hk",
-        }
-    ]
-    opened_urls: list[str] = []
+    new_tab = {
+        "type": "page",
+        "url": target_url,
+        "webSocketDebuggerUrl": "ws://new-hk",
+        "id": "new-tab-1",
+    }
 
     class FakeSession:
         async def __aenter__(self):
@@ -151,14 +149,9 @@ def test_compare_via_pages_reuses_existing_matching_tabs_without_opening_new_one
     async def run_case() -> None:
         with (
             patch("transport_cdp.aiohttp.ClientSession", return_value=FakeSession()),
-            patch(
-                "transport_cdp.cdp_list_tabs",
-                side_effect=[existing_tabs, existing_tabs],
-            ),
-            patch(
-                "transport_cdp.cdp_open_tab",
-                side_effect=lambda _session, url: opened_urls.append(url),
-            ),
+            patch("transport_cdp.cdp_list_tabs", return_value=[new_tab]),
+            patch("transport_cdp.cdp_open_tab", return_value=new_tab) as mock_open,
+            patch("transport_cdp.cdp_close_tab") as mock_close,
             patch(
                 "transport_cdp.cdp_eval",
                 return_value={
@@ -175,7 +168,8 @@ def test_compare_via_pages_reuses_existing_matching_tabs_without_opening_new_one
                 build_search_url=lambda *_args: target_url,
             )
 
-        assert opened_urls == []
+        mock_open.assert_called_once()
+        mock_close.assert_called_once()
         assert len(quotes) == 1
         assert quotes[0].status == "page_text"
         assert quotes[0].cheapest_price == 3072.0

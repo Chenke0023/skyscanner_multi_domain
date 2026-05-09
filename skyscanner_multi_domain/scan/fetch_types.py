@@ -36,9 +36,16 @@ class FetchAttempt:
     # Evidence block: what the transport observed about the page
     evidence: dict[str, Any] = field(default_factory=dict)
 
+    # Structured metadata: phase, retryability, subprocess details, etc.
+    metadata: dict[str, Any] = field(default_factory=dict)
+
     @property
     def ok(self) -> bool:
         return self.error is None and bool(self.page_text)
+
+    @property
+    def retryable(self) -> bool:
+        return self.metadata.get("retryable", self.error is not None)
 
 
 # ── AttemptAction ─────────────────────────────────────────────────────────────
@@ -160,6 +167,7 @@ def fetch_attempt_to_quote(
     url = attempt.url or fallback_url
     quote = extract_page_quote(region, url, attempt.page_text)
     quote.source_kind = attempt.transport
+    quote.fetch_metadata = dict(attempt.metadata)
 
     if quote.price is not None:
         return quote
@@ -183,6 +191,7 @@ def fetch_attempt_to_quote(
             source_label=attempt.transport,
         )
         quote.source_kind = attempt.transport
+        quote.fetch_metadata = dict(attempt.metadata)
 
     # Apply readiness evidence from transport (opencli-specific classification)
     readiness = attempt.evidence.get("readiness")
@@ -197,8 +206,8 @@ def fetch_attempt_to_quote(
             f"(confidence {no_flights_conf:.2f}, terminal)"
         )
 
-    # Propagate transport error if no price
-    if quote.price is None and attempt.error and not quote.error:
+    # Propagate transport error if no price (transport knows better than parser)
+    if quote.price is None and attempt.error:
         quote.error = attempt.error[:200]
 
     return quote
