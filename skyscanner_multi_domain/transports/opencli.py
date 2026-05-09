@@ -26,6 +26,70 @@ TAB_POLL_INTERVAL = 2.0
 MAX_REGION_TIME = 45
 DEFAULT_MAX_CONCURRENT_DOMAINS = 3
 
+
+# ── Error classification ─────────────────────────────────────────────────────
+
+
+class OpenCLIError(Exception):
+    """Base for OpenCLI transport errors."""
+
+    retryable: bool = False
+    phase: str = ""
+
+    def __init__(self, message: str, *, result: "OpenCLICommandResult | None" = None) -> None:
+        super().__init__(message)
+        self.result = result
+
+
+class OpenCLIBinaryMissingError(OpenCLIError):
+    """opencli binary not found or cannot execute."""
+
+    retryable = False
+    phase = "subprocess_start"
+
+
+class OpenCLITimeoutError(OpenCLIError):
+    """opencli command exceeded timeout."""
+
+    retryable = True
+    phase = "subprocess_wait"
+
+
+class OpenCLINonZeroExitError(OpenCLIError):
+    """opencli returned non-zero exit code."""
+
+    retryable = True
+    phase = "subprocess_run"
+
+
+class OpenCLIInvalidJSONError(OpenCLIError):
+    """opencli stdout was not valid JSON."""
+
+    retryable = True
+    phase = "subprocess_parse"
+
+
+class OpenCLITabCreationError(OpenCLIError):
+    """Tab creation returned empty tab ID."""
+
+    retryable = True
+    phase = "tab_create"
+
+
+class OpenCLIWaitInteractiveError(OpenCLIError):
+    """Page did not reach interactive state."""
+
+    retryable = True
+    phase = "wait_interactive"
+
+
+class OpenCLIExtractError(OpenCLIError):
+    """Text extraction failed or returned empty."""
+
+    retryable = True
+    phase = "extract"
+
+
 # ── Async subprocess infrastructure ──────────────────────────────────────────
 
 
@@ -51,15 +115,30 @@ async def _run_opencli_async(
     *,
     timeout: float | None = None,
 ) -> OpenCLICommandResult:
-    """Run an opencli command via async subprocess — non-blocking."""
+    """Run an opencli command via async subprocess — non-blocking.
+
+    Raises:
+        OpenCLIBinaryMissingError: if the opencli binary is not found or cannot start.
+        OpenCLITimeoutError: if the command exceeds its timeout.
+    """
     effective_timeout = timeout or 60.0
     started = time.monotonic()
-    proc = await asyncio.create_subprocess_exec(
-        "opencli",
-        *args,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-    )
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "opencli",
+            *args,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+    except FileNotFoundError as exc:
+        raise OpenCLIBinaryMissingError(
+            f"opencli binary not found in PATH"
+        ) from exc
+    except OSError as exc:
+        raise OpenCLIBinaryMissingError(
+            f"opencli cannot start: {exc}"
+        ) from exc
+
     try:
         stdout_bytes, stderr_bytes = await asyncio.wait_for(
             proc.communicate(), timeout=effective_timeout,
@@ -67,27 +146,42 @@ async def _run_opencli_async(
     except asyncio.TimeoutError:
         proc.kill()
         stdout_bytes, stderr_bytes = await proc.communicate()
-        return OpenCLICommandResult(
+        result = OpenCLICommandResult(
             returncode=proc.returncode or -1,
             stdout=stdout_bytes.decode("utf-8", errors="replace") if stdout_bytes else "",
             stderr=stderr_bytes.decode("utf-8", errors="replace") if stderr_bytes else "",
             duration_ms=int((time.monotonic() - started) * 1000),
             timed_out=True,
         )
-    return OpenCLICommandResult(
+        raise OpenCLITimeoutError(
+            f"opencli command timed out after {effective_timeout}s: {' '.join(args)}",
+            result=result,
+        )
+
+    result = OpenCLICommandResult(
         returncode=proc.returncode or 0,
         stdout=stdout_bytes.decode("utf-8", errors="replace") if stdout_bytes else "",
         stderr=stderr_bytes.decode("utf-8", errors="replace") if stderr_bytes else "",
         duration_ms=int((time.monotonic() - started) * 1000),
     )
+    if not result.ok:
+        raise OpenCLINonZeroExitError(
+            f"opencli exited with code {result.returncode}: {result.stderr[:300]}",
+            result=result,
+        )
+    return result
 
 
 async def _opencli_json(args: list[str], timeout: int = 60) -> Any:
     """Run opencli command and parse JSON output (async)."""
     result = await _run_opencli_async(args, timeout=timeout)
-    if not result.ok:
-        raise RuntimeError(f"opencli failed (rc={result.returncode}): {result.stderr[:300]}")
-    return result.stdout_json
+    try:
+        return result.stdout_json
+    except json.JSONDecodeError as exc:
+        raise OpenCLIInvalidJSONError(
+            f"opencli stdout is not valid JSON: {result.stdout[:300]}",
+            result=result,
+        ) from exc
 
 
 # ── Async tab operations ─────────────────────────────────────────────────────
@@ -465,52 +559,106 @@ class OpenCLIDomainScheduler:
                     "max_chunk_size_used": 0,
                 }
 
+                attempt: Optional[FetchAttempt] = None
+                success = False
+
+                def _error_to_attempt(exc: Exception, phase: str) -> FetchAttempt:
+                    if isinstance(exc, OpenCLIError):
+                        return FetchAttempt(
+                            transport="opencli",
+                            region_code=region.code,
+                            url=url,
+                            page_text="",
+                            error=str(exc)[:300],
+                            metadata={
+                                "phase": exc.phase or phase,
+                                "retryable": exc.retryable,
+                                "exit_code": exc.result.returncode if exc.result else None,
+                                "stderr_tail": (exc.result.stderr[-400:] if exc.result else "")[-400:],
+                                "duration_ms": exc.result.duration_ms if exc.result else 0,
+                            },
+                        )
+                    return FetchAttempt(
+                        transport="opencli",
+                        region_code=region.code,
+                        url=url,
+                        page_text="",
+                        error=str(exc)[:300],
+                        metadata={
+                            "phase": phase,
+                            "retryable": True,
+                            "exception_type": type(exc).__name__,
+                        },
+                    )
+
                 try:
                     tab_id, delta_ensure = await session.ensure_tab_async(url)
                     if not tab_id:
-                        raise RuntimeError("No tab ID returned")
-
-                    success, delta_wait_state = await session.wait_progressive_state(
-                        tab_id, self._effective_page_wait(domain),
-                    )
-                    attempt, delta_extract = await session.extract_with_progressive_content_wait(
-                        tab_id, region, url, wait_steps=policy.extract_wait_steps,
-                    )
-                    page_text = attempt.page_text
-
-                    quote = fetch_attempt_to_quote(attempt, region, fallback_url=url)
-
-                    quote.tab_open_count = delta_ensure["tab_open_count"]
-                    quote.reused_tab_count = delta_ensure["reused_tab_count"]
-                    quote.progressive_wait_used = delta_wait_state + delta_extract["progressive_wait_used"]
-                    quote.extract_attempt_count = delta_extract["extract_attempt_count"]
-                    quote.max_chunk_size_used = delta_extract["max_chunk_size_used"]
-
-                    # P0: sanity check — validate route/date/currency match the request
-                    if quote.price is not None:
-                        sanity_check_quote(
-                            quote=quote,
-                            region=region,
-                            source_url=url,
-                            page_text=page_text,
-                            expected_origin=args.origin,
-                            expected_destination=args.destination,
-                            expected_date=args.date,
-                        )
-
-                    if not success and quote.price is None:
-                        if quote.status not in TERMINAL_STATUSES:
-                            quote.status = "opencli_timeout"
-                            quote.error = "Page did not reach interactive state and no price extracted"
-
+                        raise OpenCLITabCreationError("No tab ID returned from tab creation")
                 except Exception as exc:
-                    quote = FlightQuote(
-                        region=region.code, domain=region.domain,
-                        price=None, currency=region.currency, source_url=url,
-                        status="opencli_error", error=str(exc)[:200],
+                    attempt = _error_to_attempt(exc, "tab_create")
+
+                if attempt is None:
+                    try:
+                        success, delta_wait_state = await session.wait_progressive_state(
+                            tab_id, self._effective_page_wait(domain),
+                        )
+                    except Exception as exc:
+                        attempt = _error_to_attempt(exc, "wait_interactive")
+
+                if attempt is None:
+                    try:
+                        attempt, delta_extract = await session.extract_with_progressive_content_wait(
+                            tab_id, region, url, wait_steps=policy.extract_wait_steps,
+                        )
+                        page_text = attempt.page_text
+                    except Exception as exc:
+                        attempt = _error_to_attempt(exc, "extract")
+
+                if attempt is None:
+                    attempt = FetchAttempt(
+                        transport="opencli",
+                        region_code=region.code,
+                        url=url,
+                        page_text="",
+                        error="Unknown failure: no attempt produced",
+                        metadata={"phase": "unknown", "retryable": True},
                     )
-                    quote.tab_open_count = delta_ensure["tab_open_count"]
-                    quote.reused_tab_count = delta_ensure["reused_tab_count"]
+
+                if quote is None:
+                    if attempt.error:
+                        quote = FlightQuote(
+                            region=region.code, domain=region.domain,
+                            price=None, currency=region.currency, source_url=url,
+                            status="opencli_error", error=attempt.error[:200],
+                        )
+                        quote.source_kind = attempt.transport
+                        quote.fetch_metadata = dict(attempt.metadata)
+                    else:
+                        quote = fetch_attempt_to_quote(attempt, region, fallback_url=url)
+
+                quote.tab_open_count = delta_ensure["tab_open_count"]
+                quote.reused_tab_count = delta_ensure["reused_tab_count"]
+                quote.progressive_wait_used = delta_wait_state + delta_extract["progressive_wait_used"]
+                quote.extract_attempt_count = delta_extract["extract_attempt_count"]
+                quote.max_chunk_size_used = delta_extract["max_chunk_size_used"]
+
+                # P0: sanity check — validate route/date/currency match the request
+                if quote.price is not None:
+                    sanity_check_quote(
+                        quote=quote,
+                        region=region,
+                        source_url=url,
+                        page_text=page_text,
+                        expected_origin=args.origin,
+                        expected_destination=args.destination,
+                        expected_date=args.date,
+                    )
+
+                if not success and quote.price is None:
+                    if quote.status not in TERMINAL_STATUSES:
+                        quote.status = "opencli_timeout"
+                        quote.error = "Page did not reach interactive state and no price extracted"
 
                 if quote is None:
                     quote = FlightQuote(
