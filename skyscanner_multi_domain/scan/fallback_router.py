@@ -159,21 +159,47 @@ _DEFAULT_DECISION = FallbackDecision(
 # ── Public API ───────────────────────────────────────────────────────────────
 
 
-def classify_quote_failure(quote: FlightQuote) -> FailureClass:
+def classify_quote_failure(
+    quote: FlightQuote,
+    *,
+    min_parser_confidence: float = MIN_PARSER_CONFIDENCE,
+) -> FailureClass:
     """Map a FlightQuote's status to a failure class."""
     if quote.status == "page_semantic_mismatch":
         return "semantic_mismatch"
     if quote.price is not None:
-        if (quote.confidence or 0.0) < MIN_PARSER_CONFIDENCE:
+        if (quote.confidence or 0.0) < min_parser_confidence:
             return "low_confidence"
         return "success"
     return FAILURE_CLASS_MAP.get(quote.status, "other")
 
 
-def decide_fallback(quote: FlightQuote) -> FallbackDecision:
-    """Given a failed quote, decide whether and how to fallback."""
-    fc = classify_quote_failure(quote)
+def decide_fallback(
+    quote: FlightQuote,
+    *,
+    min_parser_confidence: float = MIN_PARSER_CONFIDENCE,
+    challenge_policy: str = "stop",
+) -> FallbackDecision:
+    """Given a failed quote, decide whether and how to fallback.
+
+    Args:
+        min_parser_confidence: Confidence threshold below which prices are
+                               treated as unreliable.
+        challenge_policy: "stop" = terminal on captcha, "manual" = emit
+                          manual_review action.
+    """
+    fc = classify_quote_failure(quote, min_parser_confidence=min_parser_confidence)
     decision = _DECISION_TABLE.get(fc, _DEFAULT_DECISION)
+
+    # Challenge policy: "manual" implies manual_review_required but
+    # still returns should_fallback=True so orchestrator can surface it.
+    if fc == "challenge" and challenge_policy == "manual":
+        decision = FallbackDecision(
+            should_fallback=True,
+            reason="Captcha/challenge detected — manual review requested by user policy",
+            manual_review_required=True,
+        )
+        return decision
 
     # If we've already exhausted the transports in prior attempts, don't re-try
     tried_transports = {
