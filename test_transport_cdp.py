@@ -115,6 +115,79 @@ def test_get_matching_cdp_tabs_filters_by_path_and_region_aliases() -> None:
     assert matches == [tabs[0]]
 
 
+def test_compare_via_pages_recovers_from_stale_tab_id() -> None:
+    """If a domain_tabs entry references a tab that no longer exists, the
+    scan should drop the stale id and create a fresh tab instead of dying.
+
+    Regression test for "Tab xxxxxxxx not found" surfacing in the UI."""
+    args = argparse.Namespace(
+        origin="BJSA",
+        destination="ALA",
+        date="2026-04-29",
+        return_date=None,
+        page_wait=0,
+        timeout=5,
+    )
+    region = RegionConfig(
+        code="HK",
+        name="香港",
+        domain="https://www.skyscanner.com.hk",
+        currency="HKD",
+        locale="zh-HK",
+    )
+    target_url = "https://www.skyscanner.com.hk/transport/flights/bjsa/ala/260429/?adultsv2=1"
+    fresh_tab = {
+        "type": "page",
+        "url": target_url,
+        "webSocketDebuggerUrl": "ws://fresh-hk",
+        "id": "fresh-tab-id",
+    }
+
+    class FakeSession:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return None
+
+    from transport_cdp import TabNotFoundError
+
+    async def run_case() -> None:
+        with (
+            patch("transport_cdp.aiohttp.ClientSession", return_value=FakeSession()),
+            patch("transport_cdp.cdp_list_tabs", return_value=[fresh_tab]),
+            patch(
+                "transport_cdp.cdp_navigate_tab",
+                side_effect=TabNotFoundError("Tab STALE not found"),
+            ) as mock_navigate,
+            patch("transport_cdp.cdp_open_tab", return_value=fresh_tab) as mock_open,
+            patch("transport_cdp.cdp_close_tab"),
+            patch(
+                "transport_cdp.cdp_eval",
+                return_value={
+                    "url": target_url,
+                    "text": "最優\nHK$3,305\n最便宜\nHK$3,072",
+                },
+            ),
+            patch("transport_cdp.emit_trace", lambda **k: None),
+        ):
+            quotes = await compare_via_pages(
+                args,
+                [region],
+                persist_failures=False,
+                build_search_url=lambda *_args: target_url,
+                manual_tabs={"www.skyscanner.com.hk": "STALE"},
+            )
+
+        mock_navigate.assert_called_once()
+        mock_open.assert_called_once()
+        assert len(quotes) == 1
+        assert quotes[0].status == "page_text"
+        assert quotes[0].cheapest_price == 3072.0
+
+    asyncio.run(run_case())
+
+
 def test_compare_via_pages_creates_owned_tabs_and_closes_them() -> None:
     args = argparse.Namespace(
         origin="BJSA",

@@ -303,6 +303,16 @@ def wait_for_cdp_shutdown(
 # ---------------------------------------------------------------------------
 
 
+class TabNotFoundError(RuntimeError):
+    """Raised by cdp_navigate_tab when the requested tab id is no longer live.
+
+    Callers should treat this as a recoverable error: recreate the tab in
+    attach/managed mode, or mark the region page_missing in manual mode.
+    Letting it bubble up kills the whole scan, which used to surface as
+    "Tab xxxxxxxx not found" in the UI.
+    """
+
+
 async def cdp_open_tab(session: aiohttp.ClientSession, url: str) -> dict[str, Any]:
     from urllib.parse import quote
     target_url = f"{CDP_HTTP}/json/new?{quote(url, safe=':/?&=%')}"
@@ -329,7 +339,7 @@ async def cdp_navigate_tab(
             selected_tab = t
             break
     if not selected_tab:
-        raise RuntimeError(f"Tab {tab_id} not found")
+        raise TabNotFoundError(f"Tab {tab_id} not found")
 
     ws_url = selected_tab.get("webSocketDebuggerUrl", "")
     if not ws_url:
@@ -696,9 +706,20 @@ async def compare_via_pages(
             domain_host = _get_domain_host(region)
 
             if domain_host in domain_tabs:
-                # Already have a tab for this domain, navigate it
-                await cdp_navigate_tab(session, domain_tabs[domain_host], url)
-                continue
+                # Already have a tab for this domain, navigate it.
+                # If the tab disappeared (user closed it, race with another scan,
+                # browser restart), recover instead of killing the whole scan.
+                try:
+                    await cdp_navigate_tab(session, domain_tabs[domain_host], url)
+                    continue
+                except TabNotFoundError:
+                    stale_tab_id = domain_tabs.pop(domain_host, None)
+                    owned_tab_ids.discard(stale_tab_id or "")
+                    if cdp_mode == "manual":
+                        # Manual mode owns no tabs — leave the region pending so
+                        # the page_missing pre-population path handles it.
+                        continue
+                    # Fall through to the create-new-tab path below.
 
             if cdp_mode == "manual":
                 continue
