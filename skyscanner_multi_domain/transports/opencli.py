@@ -16,14 +16,9 @@ from skyscanner_multi_domain.diagnostics.snapshots import (
     should_save_opencli_snapshot,
 )
 from skyscanner_multi_domain.models import FlightQuote, RegionConfig
-from skyscanner_multi_domain.parsing.page_parser import (
-    extract_page_quote,
-    sanity_check_quote,
-)
-from skyscanner_multi_domain.parsing.readiness import (
-    classify_opencli_page_readiness,
-    classify_opencli_page_readiness_with_confidence,
-)
+from skyscanner_multi_domain.parsing.page_parser import sanity_check_quote
+from skyscanner_multi_domain.parsing.readiness import classify_opencli_page_readiness_with_confidence
+from skyscanner_multi_domain.scan.fetch_types import FetchAttempt, fetch_attempt_to_quote
 from skyscanner_multi_domain.scan.wait_policy import normalize_domain
 
 TAB_WAIT_TIMEOUT = 20
@@ -260,7 +255,7 @@ class OpenCLITabSession:
         region: RegionConfig,
         url: str,
         wait_steps: list[int] | None = None,
-    ) -> tuple[FlightQuote, str, dict[str, int]]:
+    ) -> tuple[FetchAttempt, dict[str, int]]:
         if wait_steps is None:
             wait_steps = [0, 8, 15]
         chunk_sizes = [15000, 50000, 100000]
@@ -273,7 +268,6 @@ class OpenCLITabSession:
             "progressive_wait_used": 0,
             "max_chunk_size_used": 0,
         }
-        last_quote = None
         last_text = ""
 
         for chunk_size, extra_wait in attempts:
@@ -288,63 +282,35 @@ class OpenCLITabSession:
 
             result = await _tab_extract_async(tab_id, chunk_size=chunk_size)
             last_text = str(result.get("content", ""))
-            quote = _quote_from_opencli_result(region, result, url)
             readiness, no_flights_conf = classify_opencli_page_readiness_with_confidence(last_text)
-            quote.readiness = readiness
 
-            if quote.price is not None:
-                return quote, last_text, delta
+            # Challenge is terminal regardless of chunk size
+            if readiness == "challenge":
+                return FetchAttempt(
+                    transport="opencli",
+                    region_code=region.code,
+                    url=url,
+                    page_text=last_text,
+                    evidence={"readiness": "challenge", "no_flights_confidence": 0.0},
+                ), delta
 
-            if quote.readiness == "challenge" or quote.status in ("px_challenge", "page_challenge"):
-                if quote.status not in ("px_challenge", "page_challenge"):
-                    quote.status = "page_challenge"
-                    quote.error = "OpenCLI page readiness classified the page as a challenge"
-                return quote, last_text, delta
-            if quote.readiness == "no_flights":
-                # High-confidence no-flights (>= 0.8) is terminal; low-confidence falls
-                # through to allow further retry/extract attempts within the same pass
-                if no_flights_conf >= 0.8:
-                    quote.status = "opencli_no_flights"
-                    quote.error = (
-                        f"OpenCLI page readiness classified the page as no flights "
-                        f"(confidence {no_flights_conf:.2f}, terminal)"
-                    )
-                    return quote, last_text, delta
+            # High-confidence no-flights is terminal
+            if readiness == "no_flights" and no_flights_conf >= 0.8:
+                return FetchAttempt(
+                    transport="opencli",
+                    region_code=region.code,
+                    url=url,
+                    page_text=last_text,
+                    evidence={"readiness": "no_flights", "no_flights_confidence": no_flights_conf},
+                ), delta
 
-            last_quote = quote
-
-        return last_quote or _quote_from_opencli_result(region, {}, url), last_text, delta
-
-
-def _quote_from_opencli_result(
-    region: RegionConfig,
-    result: dict[str, Any],
-    fallback_url: str,
-) -> FlightQuote:
-    page_url = str(result.get("url", fallback_url))
-    page_text = str(result.get("content", ""))
-    quote = extract_page_quote(region, page_url, page_text)
-    quote.source_kind = "opencli"
-
-    if quote.price is not None:
-        return quote
-
-    from types import SimpleNamespace
-    from skyscanner_multi_domain.parsing.challenge import build_captcha_quote, check_captcha_in_page
-
-    has_captcha, captcha_type = check_captcha_in_page(
-        page_text,
-        SimpleNamespace(url=page_url),
-    )
-    if has_captcha:
-        quote = build_captcha_quote(
-            region,
-            page_url,
-            captcha_type,
-            source_label="opencli",
-        )
-        quote.source_kind = "opencli"
-    return quote
+        return FetchAttempt(
+            transport="opencli",
+            region_code=region.code,
+            url=url,
+            page_text=last_text,
+            evidence={"readiness": readiness, "no_flights_confidence": no_flights_conf},
+        ), delta
 
 
 # ── OpenCLIDomainScheduler ───────────────────────────────────────────────────
@@ -602,9 +568,12 @@ class OpenCLIDomainScheduler:
                     success, delta_wait_state = await session.wait_progressive_state(
                         tab_id, self._effective_page_wait(domain),
                     )
-                    quote, page_text, delta_extract = await session.extract_with_progressive_content_wait(
+                    attempt, delta_extract = await session.extract_with_progressive_content_wait(
                         tab_id, region, url, wait_steps=policy.extract_wait_steps,
                     )
+                    page_text = attempt.page_text
+
+                    quote = fetch_attempt_to_quote(attempt, region, fallback_url=url)
 
                     quote.tab_open_count = delta_ensure["tab_open_count"]
                     quote.reused_tab_count = delta_ensure["reused_tab_count"]
