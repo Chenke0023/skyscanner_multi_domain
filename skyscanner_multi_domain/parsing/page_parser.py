@@ -573,7 +573,9 @@ def _build_candidate_list(
         _labeled_candidate_to_price_candidate(candidate, "cheapest_block")
         for candidate in cheapest_search.candidates
     )
-    if fallback_price is not None:
+    # Only include fallback price in candidate ranking when no labeled candidates exist.
+    # Low-confidence fallback should not dilute ranking when Best/Cheapest blocks are present.
+    if fallback_price is not None and not best_search.candidates and not cheapest_search.candidates:
         candidates.append(
             PriceCandidate(
                 amount=fallback_price.price,

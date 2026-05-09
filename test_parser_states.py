@@ -53,5 +53,88 @@ class ReadinessImprovementTests(unittest.TestCase):
         self.assertEqual(quote.best_price, 123.0)
         self.assertEqual(quote.cheapest_price, 111.0)
 
+    # ── Fixture-driven regression tests ────────────────────────────────────────
+
+    def test_best_and_cheapest_high_confidence(self) -> None:
+        page_text = "Best\n£123\nCheapest\n£111"
+        quote, diagnostics = extract_page_quote_with_diagnostics(REGIONS["UK"], "https://example.com", page_text)
+
+        self.assertEqual(quote.status, "page_text")
+        self.assertEqual(quote.price, 111.0)
+        self.assertEqual(quote.best_price, 123.0)
+        self.assertEqual(quote.cheapest_price, 111.0)
+        self.assertGreater(quote.confidence or 0, 0.7)
+        self.assertEqual(quote.price_source, "cheapest_block")
+        self.assertTrue(len(diagnostics.best_candidates) > 0)
+        self.assertTrue(len(diagnostics.cheapest_candidates) > 0)
+
+    def test_best_only_medium_confidence_with_warning(self) -> None:
+        page_text = "Best\n£123"
+        quote, diagnostics = extract_page_quote_with_diagnostics(REGIONS["UK"], "https://example.com", page_text)
+
+        self.assertEqual(quote.status, "page_text_best_only")
+        self.assertEqual(quote.price, 123.0)
+        self.assertIsNone(quote.cheapest_price)
+        self.assertLess(quote.confidence or 1.0, 0.8)
+        self.assertTrue(any("Best" in w for w in quote.parser_warnings))
+
+    def test_cheapest_only_medium_confidence_with_warning(self) -> None:
+        page_text = "Cheapest\n£111"
+        quote, diagnostics = extract_page_quote_with_diagnostics(REGIONS["UK"], "https://example.com", page_text)
+
+        self.assertEqual(quote.status, "page_text_cheapest_only")
+        self.assertEqual(quote.price, 111.0)
+        self.assertIsNone(quote.best_price)
+        self.assertLess(quote.confidence or 1.0, 0.8)
+
+    def test_first_price_fallback_low_confidence(self) -> None:
+        page_text = "Some results here\n£99"
+        quote, diagnostics = extract_page_quote_with_diagnostics(REGIONS["UK"], "https://example.com", page_text)
+
+        self.assertEqual(quote.status, "page_text_fallback")
+        self.assertEqual(quote.price, 99.0)
+        self.assertLess(quote.confidence or 1.0, 0.5)
+        self.assertEqual(quote.price_source, "first_price_fallback")
+
+    def test_fallback_not_ranked_when_labeled_candidates_exist(self) -> None:
+        # When Best/Cheapest labels exist, fallback should not appear in candidates
+        page_text = "Best\n£123\nCheapest\n£111\nAlso £99 somewhere"
+        quote, diagnostics = extract_page_quote_with_diagnostics(REGIONS["UK"], "https://example.com", page_text)
+
+        self.assertEqual(quote.status, "page_text")
+        sources = quote.candidate_sources
+        self.assertNotIn("first_price_fallback", sources)
+
+    def test_challenge_page_terminal(self) -> None:
+        page_text = "Please verify you are human. Complete the security check."
+        quote, diagnostics = extract_page_quote_with_diagnostics(REGIONS["UK"], "https://example.com", page_text)
+
+        self.assertEqual(quote.status, "page_challenge")
+        self.assertIsNone(quote.price)
+        self.assertIsNotNone(diagnostics.state.challenge_hint)
+
+    def test_loading_page(self) -> None:
+        page_text = "Searching for the best flights..."
+        quote, diagnostics = extract_page_quote_with_diagnostics(REGIONS["UK"], "https://example.com", page_text)
+
+        self.assertEqual(quote.status, "page_loading")
+        self.assertIsNone(quote.price)
+        self.assertIsNotNone(diagnostics.state.loading_hint)
+
+    def test_evidence_block_on_parse_failure(self) -> None:
+        page_text = (
+            "Some random text without prices or labels. "
+            "This is definitely not an empty shell because it has enough content. "
+            "But there are no sorting markers or prices to parse."
+        )
+        quote, diagnostics = extract_page_quote_with_diagnostics(REGIONS["UK"], "https://example.com", page_text)
+
+        self.assertEqual(quote.status, "page_parse_failed")
+        self.assertIsNone(quote.price)
+        # Evidence block should still be present
+        self.assertIsNotNone(diagnostics.failure_stage)
+        self.assertIsNotNone(diagnostics.failure_reason)
+        self.assertIsNotNone(quote.evidence_text)
+
 if __name__ == "__main__":
     unittest.main()
