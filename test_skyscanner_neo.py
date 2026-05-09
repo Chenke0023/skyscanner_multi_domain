@@ -411,6 +411,7 @@ class RunPageScanFallbackTests(unittest.TestCase):
                 currency="CNY",
                 source_url="https://www.skyscanner.cn/transport/flights/bjsa/ala/260429/",
                 status="page_text",
+                confidence=0.9,
                 best_price=3217.0,
                 cheapest_price=2187.0,
             )
@@ -475,6 +476,7 @@ class RunPageScanFallbackTests(unittest.TestCase):
                 currency="CNY",
                 source_url="https://www.skyscanner.cn/transport/flights/bjsa/ala/260429/",
                 status="page_text",
+                confidence=0.9,
                 best_price=3217.0,
                 cheapest_price=2187.0,
             ),
@@ -496,6 +498,7 @@ class RunPageScanFallbackTests(unittest.TestCase):
                 currency="HKD",
                 source_url="https://www.skyscanner.com.hk/transport/flights/bjsa/ala/260429/",
                 status="page_text",
+                confidence=0.9,
                 best_price=2539.0,
                 cheapest_price=2465.0,
             )
@@ -557,6 +560,7 @@ class RunPageScanFallbackTests(unittest.TestCase):
                         currency="CNY",
                         source_url="https://www.skyscanner.cn/transport/flights/bjsa/ala/260429/",
                         status="page_text",
+                        confidence=0.9,
                         best_price=3217.0,
                         cheapest_price=2187.0,
                     ),
@@ -579,6 +583,7 @@ class RunPageScanFallbackTests(unittest.TestCase):
                     currency="CNY",
                     source_url="https://www.skyscanner.cn/transport/flights/bjsa/ala/260429/",
                     status="page_text",
+                    confidence=0.9,
                     best_price=3217.0,
                     cheapest_price=2187.0,
                 ),
@@ -589,6 +594,7 @@ class RunPageScanFallbackTests(unittest.TestCase):
                     currency="HKD",
                     source_url="https://www.skyscanner.com.hk/transport/flights/bjsa/ala/260429/",
                     status="page_text",
+                    confidence=0.9,
                     best_price=2539.0,
                     cheapest_price=2150.0,
                 ),
@@ -638,6 +644,7 @@ class RunPageScanFallbackTests(unittest.TestCase):
                 currency="CNY",
                 source_url="https://www.skyscanner.cn/transport/flights/bjsa/ala/260429/",
                 status="page_text",
+                confidence=0.9,
                 best_price=3217.0,
                 cheapest_price=2187.0,
             ),
@@ -659,6 +666,7 @@ class RunPageScanFallbackTests(unittest.TestCase):
                 currency="HKD",
                 source_url="https://www.skyscanner.com.hk/transport/flights/bjsa/ala/260429/",
                 status="page_text",
+                confidence=0.9,
                 best_price=2539.0,
                 cheapest_price=2465.0,
             )
@@ -732,6 +740,7 @@ class RunPageScanFallbackTests(unittest.TestCase):
                 currency="CNY",
                 source_url="https://www.skyscanner.cn/transport/flights/bjsa/ala/260429/",
                 status="page_text",
+                confidence=0.9,
                 best_price=3217.0,
                 cheapest_price=2187.0,
             )
@@ -871,6 +880,7 @@ class RunPageScanFallbackTests(unittest.TestCase):
                         currency="HKD",
                         source_url="https://example.com/hk",
                         status="page_text",
+                        confidence=0.9,
                         cheapest_price=850.0,
                     ),
                     FlightQuote(
@@ -880,6 +890,7 @@ class RunPageScanFallbackTests(unittest.TestCase):
                         currency="CNY",
                         source_url="https://example.com/cn",
                         status="page_text",
+                        confidence=0.9,
                         cheapest_price=820.0,
                     ),
                 ]
@@ -933,6 +944,7 @@ class RunPageScanFallbackTests(unittest.TestCase):
                             currency="CNY",
                             source_url="https://example.com/cn",
                             status="page_text",
+                            confidence=0.9,
                             cheapest_price=820.0,
                         )
                     ]
