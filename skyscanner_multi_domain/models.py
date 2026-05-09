@@ -43,6 +43,10 @@ class FlightQuote:
     evidence_text: Optional[str] = None
     parser_warnings: list[str] = field(default_factory=list)
     fallback_attempts: list[dict[str, Any]] = field(default_factory=list)
+    attempt_history: list[dict[str, Any]] = field(default_factory=list)
+    rankable: Optional[bool] = None
+    result_visibility: Optional[str] = None
+    requires_manual_review: bool = False
     price_candidates_count: int = 0
     selected_candidate_rank: Optional[int] = None
     candidate_sources: list[str] = field(default_factory=list)
