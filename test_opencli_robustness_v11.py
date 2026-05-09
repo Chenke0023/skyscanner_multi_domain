@@ -1048,6 +1048,69 @@ def test_attempt_planner_terminal_for_no_flights() -> None:
     assert plan.action == AttemptAction.TERMINAL
 
 
+def test_attempt_planner_gates_low_confidence_price() -> None:
+    """AttemptPlanner must route low-confidence prices to fallback for verification."""
+    from skyscanner_multi_domain.scan.fetch_types import AttemptPlanner, AttemptAction
+
+    planner = AttemptPlanner()
+    quote = FlightQuote(
+        region="SG", domain="https://www.skyscanner.sg",
+        price=123.0, currency="SGD",
+        source_url="https://www.skyscanner.sg/...",
+        status="page_text_fallback", confidence=0.45,
+    )
+    plan = planner.plan(quote)
+    assert plan.action == AttemptAction.FALLBACK_CDP
+    assert plan.failure_class == "low_confidence"
+    assert "confidence" in plan.reason.lower()
+
+
+def test_attempt_planner_accepts_high_confidence_price() -> None:
+    """AttemptPlanner must ACCEPT a high-confidence price without gating."""
+    from skyscanner_multi_domain.scan.fetch_types import AttemptPlanner, AttemptAction
+
+    planner = AttemptPlanner()
+    quote = FlightQuote(
+        region="SG", domain="https://www.skyscanner.sg",
+        price=123.0, currency="SGD",
+        source_url="https://www.skyscanner.sg/...",
+        status="page_text", confidence=0.9,
+    )
+    plan = planner.plan(quote)
+    assert plan.action == AttemptAction.ACCEPT
+    assert plan.failure_class == "success"
+
+
+def test_classify_quote_failure_respects_confidence_threshold() -> None:
+    """classify_quote_failure must return low_confidence when price exists but confidence is below threshold."""
+    from skyscanner_multi_domain.scan.fallback_router import classify_quote_failure
+
+    low_conf_quote = FlightQuote(
+        region="SG", domain="https://www.skyscanner.sg",
+        price=100.0, currency="SGD",
+        source_url="https://www.skyscanner.sg/...",
+        status="page_text", confidence=0.4,
+    )
+    assert classify_quote_failure(low_conf_quote) == "low_confidence"
+
+    high_conf_quote = FlightQuote(
+        region="SG", domain="https://www.skyscanner.sg",
+        price=100.0, currency="SGD",
+        source_url="https://www.skyscanner.sg/...",
+        status="page_text", confidence=0.9,
+    )
+    assert classify_quote_failure(high_conf_quote) == "success"
+
+    no_conf_quote = FlightQuote(
+        region="SG", domain="https://www.skyscanner.sg",
+        price=100.0, currency="SGD",
+        source_url="https://www.skyscanner.sg/...",
+        status="page_text",
+    )
+    # Default confidence is None → treated as 0.0 → below threshold
+    assert classify_quote_failure(no_conf_quote) == "low_confidence"
+
+
 def test_fetch_attempt_to_quote_basic() -> None:
     """fetch_attempt_to_quote must parse page text into a FlightQuote."""
     from skyscanner_multi_domain.scan.fetch_types import FetchAttempt, fetch_attempt_to_quote

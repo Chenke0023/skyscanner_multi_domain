@@ -16,6 +16,10 @@ from skyscanner_multi_domain.models import FlightQuote
 
 FailureClass = str  # one of the keys in FAILURE_CLASS_MAP
 
+# Prices with confidence below this threshold are treated as unreliable
+# and routed to fallback transports for verification.
+MIN_PARSER_CONFIDENCE = 0.5
+
 FAILURE_CLASS_MAP: dict[str, str] = {
     # Success — no fallback needed
     "price_found": "success",
@@ -41,6 +45,8 @@ FAILURE_CLASS_MAP: dict[str, str] = {
     "captcha_solve_failed": "challenge",
     "page_empty_shell": "empty_shell",
     "opencli_not_attempted": "not_attempted",
+    # Confidence-gated recoverable
+    "low_confidence": "low_confidence",
     # Fallback
     "request_error": "network",
     "invalid_transport": "transport_error",
@@ -135,6 +141,12 @@ _DECISION_TABLE: dict[str, FallbackDecision] = {
         reason="Region was never attempted — try CDP and Scrapling",
         max_attempts=2,
     ),
+    "low_confidence": FallbackDecision(
+        should_fallback=True,
+        transports=["cdp", "scrapling"],
+        reason="Parsed price confidence below threshold — verify with alternative transports",
+        max_attempts=2,
+    ),
 }
 
 _DEFAULT_DECISION = FallbackDecision(
@@ -152,6 +164,8 @@ def classify_quote_failure(quote: FlightQuote) -> FailureClass:
     if quote.status == "page_semantic_mismatch":
         return "semantic_mismatch"
     if quote.price is not None:
+        if (quote.confidence or 0.0) < MIN_PARSER_CONFIDENCE:
+            return "low_confidence"
         return "success"
     return FAILURE_CLASS_MAP.get(quote.status, "other")
 
@@ -198,6 +212,7 @@ def build_fallback_telemetry(quotes: list[FlightQuote]) -> dict[str, Any]:
     routed_to_cdp = 0
     routed_to_scrapling = 0
     manual_review = 0
+    low_confidence_count = 0
 
     for quote in quotes:
         decision = decide_fallback(quote)
@@ -216,6 +231,9 @@ def build_fallback_telemetry(quotes: list[FlightQuote]) -> dict[str, Any]:
             if "scrapling" in decision.transports:
                 routed_to_scrapling += 1
 
+        if fc == "low_confidence":
+            low_confidence_count += 1
+
         if decision.manual_review_required:
             manual_review += 1
 
@@ -226,4 +244,5 @@ def build_fallback_telemetry(quotes: list[FlightQuote]) -> dict[str, Any]:
         "fallback_routed_to_cdp_count": routed_to_cdp,
         "fallback_routed_to_scrapling_count": routed_to_scrapling,
         "fallback_manual_review_required_count": manual_review,
+        "fallback_low_confidence_count": low_confidence_count,
     }
