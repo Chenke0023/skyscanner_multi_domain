@@ -675,6 +675,7 @@ async def compare_via_pages(
     run_id: str = "",
     cdp_mode: str = "attach",
     manual_tabs: dict[str, str] | None = None,
+    keep_tabs: bool = False,
 ) -> list[FlightQuote]:
     if build_search_url is None:
         from skyscanner_multi_domain.scan.orchestrator import build_search_url as _bsu
@@ -857,11 +858,12 @@ async def compare_via_pages(
                 pending_regions = next_pending
                 await asyncio.sleep(poll_interval)
         finally:
-            for tab_id in owned_tab_ids:
-                try:
-                    await cdp_close_tab(session, tab_id)
-                except Exception:
-                    pass
+            if not keep_tabs:
+                for tab_id in owned_tab_ids:
+                    try:
+                        await cdp_close_tab(session, tab_id)
+                    except Exception:
+                        pass
 
         ordered_quotes: list[FlightQuote] = []
         for region in selected_regions:
