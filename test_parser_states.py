@@ -67,6 +67,21 @@ class ReadinessImprovementTests(unittest.TestCase):
         self.assertEqual(quote.price_source, "cheapest_block")
         self.assertTrue(len(diagnostics.best_candidates) > 0)
         self.assertTrue(len(diagnostics.cheapest_candidates) > 0)
+        # Normal price gap between Best and Cheapest must not produce a warning
+        self.assertEqual(quote.parser_warnings, [])
+
+    def test_best_and_cheapest_normal_price_gap_no_warnings(self) -> None:
+        # Best=3305, Cheapest=3072 is a normal result — no "inconsistent price" warning
+        page_text = "Best\nHK$3,305\nCheapest\nHK$3,072"
+        quote, _ = extract_page_quote_with_diagnostics(
+            REGIONS["HK"], "https://example.com", page_text
+        )
+
+        self.assertEqual(quote.status, "page_text")
+        self.assertEqual(quote.best_price, 3305.0)
+        self.assertEqual(quote.cheapest_price, 3072.0)
+        self.assertEqual(quote.price_source, "cheapest_block")
+        self.assertEqual(quote.parser_warnings, [])
 
     def test_best_only_medium_confidence_with_warning(self) -> None:
         page_text = "Best\n£123"
