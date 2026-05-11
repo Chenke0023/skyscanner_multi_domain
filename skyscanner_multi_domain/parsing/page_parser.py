@@ -504,13 +504,6 @@ def attach_parser_trust_metadata(
         confidence = min(confidence or 0.7, 0.7)
         warnings.append("Best/Cheapest 只解析到一侧，可信度降低。")
 
-    if (
-        diagnostics.selected_best is not None
-        and diagnostics.selected_cheapest is not None
-        and diagnostics.selected_best.price != diagnostics.selected_cheapest.price
-    ):
-        warnings.append("Best 与 Cheapest 价格不一致，请点开页面确认票价条件。")
-
     quote.confidence = round(confidence, 2)
     quote.price_source = price_source
     quote.evidence_text = " ".join(evidence_text.split())[:240] if evidence_text else None

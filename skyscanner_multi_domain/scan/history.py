@@ -426,7 +426,8 @@ def build_plan_telemetry(quotes_by_date: QuotesByDate) -> dict[str, Any]:
         "best_date_rank": _optional_int(best_quote.get("date_rank")) if best_quote else None,
         "best_result_route_rank": _optional_int(best_quote.get("route_rank")) if best_quote else None,
         "best_route_rank": _optional_int(best_quote.get("route_rank")) if best_quote else None,
-        "failed_tasks_by_reason": _failed_tasks_by_reason(flattened),
+        "failed_tasks_by_failure_class": _failed_tasks_by_failure_class(flattened),
+        "failed_tasks_by_status": _failed_tasks_by_status(flattened),
         "best_result_region": (
             str(best_quote.get("region") or "") or None if best_quote else None
         ),
@@ -627,7 +628,7 @@ def build_default_execution_policy_telemetry(quotes_by_date: QuotesByDate) -> di
     )
 
 
-def _failed_tasks_by_reason(quotes: list[dict[str, Any]]) -> dict[str, int]:
+def _failed_tasks_by_failure_class(quotes: list[dict[str, Any]]) -> dict[str, int]:
     counts: dict[str, int] = {}
     for quote in quotes:
         if _quote_has_numeric_price(quote):
@@ -639,6 +640,16 @@ def _failed_tasks_by_reason(quotes: list[dict[str, Any]]) -> dict[str, int]:
             or "unknown"
         )
         counts[reason] = counts.get(reason, 0) + 1
+    return counts
+
+
+def _failed_tasks_by_status(quotes: list[dict[str, Any]]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for quote in quotes:
+        if _quote_has_numeric_price(quote):
+            continue
+        status = quote.get("status", "unknown")
+        counts[status] = counts.get(status, 0) + 1
     return counts
 
 

@@ -299,7 +299,8 @@ class ParserTrustMetadataTests(unittest.TestCase):
             any("恢复后的 Best" in warning for warning in quote.parser_warnings)
         )
 
-    def test_best_and_cheapest_disagreement_emits_warning(self) -> None:
+    def test_best_and_cheapest_normal_price_gap_no_warning(self) -> None:
+        # Best > Cheapest is the normal case — no "价格不一致" warning
         page_text = "\n".join(
             [
                 "Show results by",
@@ -314,12 +315,7 @@ class ParserTrustMetadataTests(unittest.TestCase):
 
         self.assertEqual(quote.best_price, 300.0)
         self.assertEqual(quote.cheapest_price, 222.0)
-        self.assertTrue(
-            any(
-                "Best 与 Cheapest 价格不一致" in warning
-                for warning in quote.parser_warnings
-            )
-        )
+        self.assertEqual(quote.parser_warnings, [])
 
     def test_inconsistent_best_only_keeps_cheapest_with_warning(self) -> None:
         page_text = "\n".join(

@@ -1110,7 +1110,7 @@ class DesktopUIService:
         first_valid = telemetry.get("first_valid_price_task_index")
         best_task = telemetry.get("best_price_task_index")
         best_market_rank = telemetry.get("best_market_rank")
-        failed_by_reason = telemetry.get("failed_tasks_by_reason")
+        failed_by_reason = telemetry.get("failed_tasks_by_failure_class")
         lines = [
             "",
             "SearchPlan 复盘:",

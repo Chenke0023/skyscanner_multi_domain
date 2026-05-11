@@ -150,7 +150,7 @@ def test_history_detail_includes_plan_telemetry_and_trust_summary(tmp_path: Path
                     "first_valid_price_task_index": 1,
                     "best_price_task_index": 2,
                     "best_market_rank": 1,
-                    "failed_tasks_by_reason": {"parse_failed": 1},
+                    "failed_tasks_by_failure_class": {"parse_failed": 1},
                 }
             },
             "rows_by_date": [
