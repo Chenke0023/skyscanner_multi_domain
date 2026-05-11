@@ -440,10 +440,12 @@ async def run_page_scan(
     # CDP options threaded from config to compare_via_pages call sites.
     cdp_mode = "attach"
     cdp_manual_tabs: dict[str, str] = {}
+    keep_tabs = False
     if config is not None:
         cdp_mode_cfg = getattr(config, "cdp_mode", None)
         cdp_mode = getattr(cdp_mode_cfg, "value", None) or cdp_mode
         cdp_manual_tabs = dict(getattr(config, "manual_tabs", None) or {})
+        keep_tabs = bool(getattr(config, "keep_tabs", False))
 
     trace_ctx: ScanTraceContext | None = None
     no_trace = getattr(config, "no_trace", False) if config is not None else False
@@ -791,6 +793,7 @@ async def run_page_scan(
                     page_quotes = await compare_via_pages(
                         args, page_regions, persist_failures=False, run_id=run_id,
                         cdp_mode=cdp_mode, manual_tabs=cdp_manual_tabs,
+                        keep_tabs=keep_tabs,
                     )
                     page_by_region_map = {q.region: q for q in page_quotes if q is not None}
                     for region, quote in cdp_targets:
@@ -971,6 +974,7 @@ async def run_page_scan(
                     page_quotes = await compare_via_pages(
                         args, page_regions, persist_failures=False, run_id=run_id,
                         cdp_mode=cdp_mode, manual_tabs=cdp_manual_tabs,
+                        keep_tabs=keep_tabs,
                     )
                     page_by_region_map = {q.region: q for q in page_quotes}
                     for region, quote in cdp_targets:
@@ -1118,6 +1122,7 @@ async def run_page_scan(
             quotes = await compare_via_pages(
                 args, selected_regions, run_id=run_id,
                 cdp_mode=cdp_mode, manual_tabs=cdp_manual_tabs,
+                keep_tabs=keep_tabs,
             )
             quotes = apply_plan_metadata(quotes)
             # trace page/CDP transport
@@ -1257,6 +1262,7 @@ async def run_page_scan(
                             batch_fallback_quotes = await compare_via_pages(
                                 args, batch_failed, persist_failures=False, run_id=run_id,
                                 cdp_mode=cdp_mode, manual_tabs=cdp_manual_tabs,
+                                keep_tabs=keep_tabs,
                             )
                             batch_fallback_quotes = apply_plan_metadata(batch_fallback_quotes)
                             merged_quotes = merge_quotes_by_region(merged_quotes, batch_fallback_quotes)

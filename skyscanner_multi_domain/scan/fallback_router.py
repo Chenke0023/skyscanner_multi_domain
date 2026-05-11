@@ -165,9 +165,9 @@ def classify_quote_failure(
     min_parser_confidence: float = MIN_PARSER_CONFIDENCE,
 ) -> FailureClass:
     """Map a FlightQuote's status to a failure class."""
-    if quote.status == "page_semantic_mismatch":
-        return "semantic_mismatch"
     if quote.price is not None:
+        if quote.status == "page_semantic_mismatch":
+            return "semantic_mismatch"
         if (quote.confidence or 0.0) < min_parser_confidence:
             return "low_confidence"
         return "success"
@@ -222,53 +222,3 @@ def decide_fallback(
         max_attempts=min(decision.max_attempts, len(remaining)),
         manual_review_required=decision.manual_review_required,
     )
-
-
-def should_skip_automatic_retry(quote: FlightQuote) -> bool:
-    """Quick check: should we skip all automatic retries for this quote?"""
-    decision = decide_fallback(quote)
-    return not decision.should_fallback
-
-
-def build_fallback_telemetry(quotes: list[FlightQuote]) -> dict[str, Any]:
-    """Build telemetry summary about fallback decisions across a batch of quotes."""
-    skipped_challenge = 0
-    skipped_no_flights = 0
-    skipped_other = 0
-    routed_to_cdp = 0
-    routed_to_scrapling = 0
-    manual_review = 0
-    low_confidence_count = 0
-
-    for quote in quotes:
-        decision = decide_fallback(quote)
-        fc = classify_quote_failure(quote)
-
-        if not decision.should_fallback:
-            if fc == "challenge":
-                skipped_challenge += 1
-            elif fc == "no_flights":
-                skipped_no_flights += 1
-            else:
-                skipped_other += 1
-        else:
-            if "cdp" in decision.transports:
-                routed_to_cdp += 1
-            if "scrapling" in decision.transports:
-                routed_to_scrapling += 1
-
-        if fc == "low_confidence":
-            low_confidence_count += 1
-
-        if decision.manual_review_required:
-            manual_review += 1
-
-    return {
-        "fallback_skipped_challenge_count": skipped_challenge,
-        "fallback_skipped_no_flights_count": skipped_no_flights,
-        "fallback_skipped_other_count": skipped_other,
-        "fallback_routed_to_cdp_count": routed_to_cdp,
-        "fallback_routed_to_scrapling_count": routed_to_scrapling,
-        "fallback_manual_review_required_count": manual_review,
-        "fallback_low_confidence_count": low_confidence_count,
-    }
