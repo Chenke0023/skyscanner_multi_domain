@@ -31,6 +31,38 @@ def _infer_label(text: str) -> str | None:
     return None
 
 
+def _label_source(card: dict[str, Any], label: str | None) -> str | None:
+    if label is None:
+        return None
+    for key in ("cardText", "priceText", "aria", "role"):
+        if label in str(card.get(key) or "").lower() or (
+            label == "best" and "最佳" in str(card.get(key) or "")
+        ) or (
+            label == "cheapest" and "最便宜" in str(card.get(key) or "")
+        ):
+            return key
+    return "inferred"
+
+
+def _raw_ref(card: dict[str, Any], index: int, label: str | None) -> str:
+    context = str(card.get("cardText") or card.get("priceText") or "")[:500]
+    geometry = {
+        "x": card.get("x"),
+        "y": card.get("y"),
+        "w": card.get("w"),
+        "h": card.get("h"),
+    }
+    return repr(
+        {
+            "index": index,
+            "label": label,
+            "label_source": _label_source(card, label),
+            "geometry": geometry,
+            "text": context,
+        }
+    )
+
+
 def parse_dom_cards(
     region: RegionConfig,
     source_url: str,
@@ -52,7 +84,7 @@ def parse_dom_cards(
                 currency=currency or region.currency,
                 label=label,
                 source_url=source_url,
-                raw_ref=card_text[:500] or price_text[:500] or f"dom_card:{index}",
+                raw_ref=_raw_ref(card, index, label),
                 confidence=0.75,
             )
         )

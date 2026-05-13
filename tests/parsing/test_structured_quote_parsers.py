@@ -46,13 +46,15 @@ def test_parse_hydration_script_price() -> None:
 
 
 def test_parse_dom_card_price_and_label() -> None:
-    cards = [{"priceText": "£123", "cardText": "Best flight £123 Non-stop"}]
+    cards = [{"priceText": "£123", "cardText": "Best flight £123 Non-stop", "x": 1, "y": 2, "w": 300, "h": 120}]
 
     evidences = parse_dom_cards(_region(), "https://example.test/search", cards)
 
     assert evidences[0].layer == "dom"
     assert evidences[0].label == "best"
     assert evidences[0].price == 123
+    assert "label_source" in (evidences[0].raw_ref or "")
+    assert "geometry" in (evidences[0].raw_ref or "")
 
 
 def test_resolve_network_dom_agree_high() -> None:
@@ -69,6 +71,8 @@ def test_resolve_network_dom_agree_high() -> None:
     assert result.confidence == "high"
     assert result.final_quote.price == 123
     assert result.final_quote.source_kind == "cdp_structured"
+    assert "merge: network and dom agree within tolerance" in result.decision_trace
+    assert result.final_quote.fetch_metadata["decision_trace"] == result.decision_trace
 
 
 def test_resolve_network_dom_conflict_medium() -> None:
@@ -84,3 +88,4 @@ def test_resolve_network_dom_conflict_medium() -> None:
     assert result.confidence == "medium"
     assert result.conflict_reason == "network_dom_conflict"
     assert result.final_quote.error == "network_dom_conflict"
+    assert "merge: network and dom conflict" in result.decision_trace

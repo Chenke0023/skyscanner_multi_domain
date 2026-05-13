@@ -9,9 +9,11 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import base64
 import json
 import time
 from dataclasses import asdict
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -31,6 +33,23 @@ from skyscanner_multi_domain.transports.cdp import (
     cdp_open_tab,
     TabNotFoundError,
 )
+
+
+async def _cdp_command(ws_url: str, method: str, params: dict[str, Any] | None = None) -> Any:
+    timeout = aiohttp.ClientTimeout(total=20)
+    async with aiohttp.ClientSession(timeout=timeout) as session:
+        async with session.ws_connect(ws_url) as ws:
+            await ws.send_json({"id": 1, "method": method, "params": params or {}})
+            async for message in ws:
+                if message.type != aiohttp.WSMsgType.TEXT:
+                    continue
+                payload = json.loads(message.data)
+                if payload.get("id") != 1:
+                    continue
+                if "error" in payload:
+                    raise RuntimeError(json.dumps(payload["error"], ensure_ascii=False))
+                return payload.get("result")
+    return None
 
 
 def _capture_expression() -> str:
@@ -112,9 +131,34 @@ def _write_diagnostics(
     region: RegionConfig,
     capture: dict[str, Any],
     result: Any,
+    network_candidates: list[Any] | None = None,
+    screenshot_png: bytes | None = None,
 ) -> str:
     base = get_failure_log_file("cdp_structured") / _route_key(args) / region.code
     base.mkdir(parents=True, exist_ok=True)
+    final_quote = result.final_quote
+    (base / "meta.json").write_text(
+        json.dumps(
+            {
+                "region": region.code,
+                "url": final_quote.source_url,
+                "status": final_quote.status,
+                "price": final_quote.price,
+                "currency": final_quote.currency,
+                "confidence": result.confidence,
+                "conflict_reason": result.conflict_reason,
+                "captcha_detected": "challenge" in (final_quote.status or "").lower(),
+                "timestamp": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    (base / "network_candidates.json").write_text(
+        json.dumps(network_candidates or [], ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
     (base / "dom_cards.json").write_text(
         json.dumps(capture.get("domCards", []), ensure_ascii=False, indent=2),
         encoding="utf-8",
@@ -131,13 +175,31 @@ def _write_diagnostics(
                 "conflict_reason": result.conflict_reason,
                 "final_quote": asdict(result.final_quote),
                 "evidences": [asdict(e) for e in result.evidences],
+                "decision_trace": result.decision_trace,
             },
             ensure_ascii=False,
             indent=2,
         ),
         encoding="utf-8",
     )
+    screenshot_path = base / "screenshot.png"
+    screenshot_path.write_bytes(screenshot_png or b"")
     return str(base)
+
+
+async def _capture_screenshot(ws_url: str) -> bytes | None:
+    try:
+        result = await _cdp_command(
+            ws_url,
+            "Page.captureScreenshot",
+            {"format": "png", "captureBeyondViewport": True},
+        )
+        data = str((result or {}).get("data") or "")
+        if data:
+            return base64.b64decode(data)
+    except Exception:
+        return None
+    return None
 
 
 async def compare_via_cdp_structured(
@@ -198,30 +260,42 @@ async def compare_via_cdp_structured(
 
                 await asyncio.sleep(args.page_wait)
                 started = time.monotonic()
-                capture = await cdp_eval(ws_url, _capture_expression())
+                capture_error: str | None = None
+                try:
+                    capture = await cdp_eval(ws_url, _capture_expression())
+                except Exception as exc:  # noqa: BLE001
+                    capture_error = f"CDP structured capture failed: {exc}"
+                    capture = {"url": url, "pageText": "", "domCards": [], "hydrationScripts": []}
                 if not isinstance(capture, dict):
                     capture = {"pageText": "", "domCards": [], "hydrationScripts": []}
                 source_url = str(capture.get("url") or url)
+                network_candidates: list[Any] = []
                 evidences = []
-                evidences.extend(parse_network_json(region, source_url, []))
+                evidences.extend(parse_network_json(region, source_url, network_candidates))
                 evidences.extend(parse_hydration_scripts(region, source_url, list(capture.get("hydrationScripts") or [])))
                 evidences.extend(parse_dom_cards(region, source_url, list(capture.get("domCards") or [])))
                 if not evidences:
                     evidences.extend(parse_text_fallback(region, source_url, str(capture.get("pageText") or "")))
                 result = resolve_quote(region, source_url, evidences)
                 quote = result.final_quote
+                if capture_error and quote.price is None:
+                    quote.error = capture_error
                 quote.extract_attempt_count = 1
                 quote.progressive_wait_used = args.page_wait
                 quote.fetch_metadata["elapsed_ms"] = int((time.monotonic() - started) * 1000)
-                if quote.price is None:
+                needs_artifacts = quote.price is None or result.conflict_reason is not None
+                if needs_artifacts:
+                    screenshot_png = await _capture_screenshot(ws_url)
                     diagnostic_dir = _write_diagnostics(
                         args=args,
                         region=region,
                         capture=capture,
                         result=result,
+                        network_candidates=network_candidates,
+                        screenshot_png=screenshot_png,
                     )
                     quote.debug_log_path = str(Path(diagnostic_dir) / "final_decision.json")
-                    if persist_failure_log is not None:
+                    if quote.price is None and persist_failure_log is not None:
                         persist_failure_log(
                             quote,
                             transport="cdp_structured",

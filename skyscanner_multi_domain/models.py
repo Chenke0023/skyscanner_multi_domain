@@ -88,6 +88,7 @@ class StructuredQuoteResult:
     evidences: list[QuoteEvidence]
     confidence: Literal["high", "medium", "low", "failed"]
     conflict_reason: Optional[str] = None
+    decision_trace: list[str] = field(default_factory=list)
 
 
 # ── AttemptTrace ──────────────────────────────────────────────────────────────

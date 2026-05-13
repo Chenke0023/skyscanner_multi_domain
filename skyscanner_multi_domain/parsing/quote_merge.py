@@ -68,6 +68,12 @@ def resolve_quote(
     hydration = best_evidence(evidences, "hydration")
     dom = best_evidence(evidences, "dom")
     text = best_evidence(evidences, "text")
+    decision_trace = [
+        f"network: found {sum(1 for e in evidences if e.layer == 'network' and e.price is not None)} usable candidates",
+        f"hydration: found {sum(1 for e in evidences if e.layer == 'hydration' and e.price is not None)} usable candidates",
+        f"dom: found {sum(1 for e in evidences if e.layer == 'dom' and e.price is not None)} usable candidates",
+        f"text: found {sum(1 for e in evidences if e.layer == 'text' and e.price is not None)} usable candidates",
+    ]
 
     selected: QuoteEvidence | None = None
     confidence: Literal["high", "medium", "low", "failed"] = "failed"
@@ -76,31 +82,39 @@ def resolve_quote(
     if network and dom and price_close(network.price or 0, dom.price or 0):
         selected = max([network, dom], key=lambda e: e.confidence)
         confidence = "high"
+        decision_trace.append("merge: network and dom agree within tolerance")
     elif hydration and dom and price_close(hydration.price or 0, dom.price or 0):
         selected = max([hydration, dom], key=lambda e: e.confidence)
         confidence = "high"
+        decision_trace.append("merge: hydration and dom agree within tolerance")
     elif network and dom:
         selected = max([network, dom], key=lambda e: e.confidence)
         confidence = "medium"
         conflict_reason = "network_dom_conflict"
+        decision_trace.append("merge: network and dom conflict")
     elif network:
         selected = network
         confidence = "medium"
         conflict_reason = "network_only"
+        decision_trace.append("merge: selected network evidence only")
     elif hydration:
         selected = hydration
         confidence = "medium"
         conflict_reason = "hydration_only"
+        decision_trace.append("merge: selected hydration evidence only")
     elif dom:
         selected = dom
         confidence = "medium"
         conflict_reason = "dom_only"
+        decision_trace.append("merge: selected dom evidence only")
     elif text:
         selected = text
         confidence = "low"
         conflict_reason = "text_fallback"
+        decision_trace.append("merge: selected text fallback evidence")
 
     if selected is None:
+        decision_trace.append("final: no usable evidence, confidence=failed")
         quote = _quote_from_evidence(
             region,
             source_url,
@@ -110,6 +124,9 @@ def resolve_quote(
             error="No structured price evidence found",
         )
     else:
+        decision_trace.append(
+            f"final: selected {selected.layer} evidence, confidence={confidence}"
+        )
         quote = _quote_from_evidence(
             region,
             source_url,
@@ -123,10 +140,12 @@ def resolve_quote(
         "conflict_reason": conflict_reason,
         "evidence_count": len(evidences),
         "evidences": [asdict(e) for e in evidences[:20]],
+        "decision_trace": decision_trace,
     }
     return StructuredQuoteResult(
         final_quote=quote,
         evidences=evidences,
         confidence=confidence,
         conflict_reason=conflict_reason,
+        decision_trace=decision_trace,
     )
