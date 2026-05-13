@@ -384,6 +384,57 @@ class TransportModeStrictTests(unittest.IsolatedAsyncioTestCase):
         assert len(opencli_calls) >= 1
         assert len(cdp_calls) >= 1, "AUTO should still allow CDP fallback"
 
+    async def test_cdp_structured_falls_back_to_opencli(self) -> None:
+        structured_calls: list = []
+        opencli_calls: list = []
+
+        async def fake_structured(args, regions, **kwargs):
+            structured_calls.append(regions)
+            return [
+                FlightQuote(
+                    region=r.code, domain=r.domain, price=None, currency=r.currency,
+                    source_url=f"https://example.test/{r.code}",
+                    status="cdp_structured_parse_failed",
+                    source_kind="cdp_structured",
+                    error="No structured price evidence found",
+                )
+                for r in regions
+            ]
+
+        async def fake_opencli(args, regions, **kwargs):
+            opencli_calls.append(regions)
+            return [
+                FlightQuote(
+                    region=r.code, domain=r.domain, price=188.0, currency=r.currency,
+                    source_url=f"https://example.test/{r.code}",
+                    status="price_found", confidence=0.9, source_kind="opencli",
+                )
+                for r in regions
+            ]
+
+        with patch(
+            "skyscanner_multi_domain.transports.cdp.ensure_cdp_ready",
+            return_value={"Browser": "test"},
+        ), patch(
+            "skyscanner_multi_domain.transports.cdp_structured.compare_via_cdp_structured",
+            side_effect=fake_structured,
+        ), patch(
+            "skyscanner_multi_domain.transports.opencli.compare_via_opencli",
+            side_effect=fake_opencli,
+        ):
+            quotes = await run_page_scan(
+                origin="BJS", destination="ALA", date="2026-06-10",
+                region_codes=["SG"], transport="cdp_structured",
+                allow_browser_fallback=True,
+                config=ScanConfig(no_trace=True),
+            )
+
+        assert len(structured_calls) == 1
+        assert len(opencli_calls) == 1
+        assert quotes[0].price == 188.0
+        assert quotes[0].source_kind == "opencli"
+        assert quotes[0].fallback_attempts[0]["transport"] == "cdp_structured_primary"
+
 
 # ── CLI config building ───────────────────────────────────────────────────────
 

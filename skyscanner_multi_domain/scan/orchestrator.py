@@ -1120,7 +1120,7 @@ async def run_page_scan(
             return new_quotes
 
         if normalized_transport == "cdp_structured":
-            quotes = await compare_via_cdp_structured(
+            structured_quotes = await compare_via_cdp_structured(
                 args,
                 selected_regions,
                 build_search_url=build_search_url,
@@ -1130,9 +1130,8 @@ async def run_page_scan(
                 manual_tabs=cdp_manual_tabs,
                 keep_tabs=keep_tabs,
             )
-            quotes = apply_plan_metadata(quotes)
             planner = AttemptPlanner(config=config)
-            for region, quote in zip(selected_regions, quotes):
+            for region, quote in zip(selected_regions, structured_quotes):
                 plan = planner.plan(quote)
                 emit_attempt_trace(
                     trace_ctx=trace_ctx,
@@ -1149,6 +1148,45 @@ async def run_page_scan(
                     attempt_index=_attempt_index.get(region.code, 1),
                     plan=plan,
                 )
+            fallback_regions = [
+                region
+                for region, quote in zip(selected_regions, structured_quotes)
+                if quote.price is None
+            ]
+            fallback_by_region: dict[str, FlightQuote] = {}
+            if fallback_regions:
+                fallback_quotes = await run_opencli_pass(
+                    fallback_regions,
+                    enable_fallbacks=allow_browser_fallback,
+                )
+                fallback_by_region = {quote.region: quote for quote in fallback_quotes}
+            merged_quotes: list[FlightQuote] = []
+            for quote in structured_quotes:
+                fallback_quote = fallback_by_region.get(quote.region)
+                if fallback_quote is not None and fallback_quote.price is not None:
+                    fallback_quote.fallback_attempts = [
+                        {
+                            "transport": "cdp_structured_primary",
+                            "status": quote.status,
+                            "failure_class": classify_quote_failure(quote),
+                            "error": quote.error,
+                        },
+                        *list(fallback_quote.fallback_attempts or []),
+                    ]
+                    merged_quotes.append(fallback_quote)
+                elif fallback_quote is not None:
+                    quote.fallback_attempts.append(
+                        {
+                            "transport": "opencli_fallback",
+                            "status": fallback_quote.status,
+                            "failure_class": classify_quote_failure(fallback_quote),
+                            "error": fallback_quote.error,
+                        }
+                    )
+                    merged_quotes.append(quote)
+                else:
+                    merged_quotes.append(quote)
+            quotes = apply_plan_metadata(merged_quotes)
             await emit_progress(
                 stage="final",
                 quotes=quotes,
