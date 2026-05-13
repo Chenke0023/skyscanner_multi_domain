@@ -2393,7 +2393,7 @@ def build_parser() -> argparse.ArgumentParser:
     auto_once.add_argument("--timeout", type=int, default=30, help="HTTP/CDP 超时")
     auto_once.add_argument(
         "--transport",
-        choices=["scrapling", "page", "opencli"],
+        choices=["scrapling", "page", "opencli", "cdp_structured"],
         default="opencli",
         help="后台复扫使用的抓取传输",
     )
@@ -2470,9 +2470,9 @@ def build_parser() -> argparse.ArgumentParser:
     page.add_argument("--timeout", type=int, default=30, help="HTTP/CDP 超时")
     page.add_argument(
         "--transport",
-        choices=["scrapling", "page", "opencli"],
+        choices=["scrapling", "page", "opencli", "cdp_structured"],
         default="opencli",
-        help="opencli: 使用 opencli 浏览器自动化（默认）；page: 通过浏览器 CDP 读取结果页（Comet 优先）；scrapling: legacy 直接抓取页面文本",
+        help="opencli: 使用 opencli 浏览器自动化（默认）；cdp_structured: 实验性结构化 CDP；page: 通过浏览器 CDP 读取结果页；scrapling: legacy 直接抓取页面文本",
     )
     page.add_argument(
         "--exact-airport",

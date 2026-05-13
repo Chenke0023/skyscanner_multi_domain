@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any, Optional
+from typing import Any, Literal, Optional
 import uuid
 
 
@@ -68,6 +68,26 @@ class FlightQuote:
 
     # Transport-level structured metadata (phase, retryability, subprocess details)
     fetch_metadata: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class QuoteEvidence:
+    layer: Literal["network", "hydration", "dom", "text"]
+    price: Optional[float]
+    currency: str
+    label: Optional[str]
+    source_url: str
+    raw_ref: Optional[str] = None
+    confidence: float = 0.0
+    error: Optional[str] = None
+
+
+@dataclass
+class StructuredQuoteResult:
+    final_quote: FlightQuote
+    evidences: list[QuoteEvidence]
+    confidence: Literal["high", "medium", "low", "failed"]
+    conflict_reason: Optional[str] = None
 
 
 # ── AttemptTrace ──────────────────────────────────────────────────────────────

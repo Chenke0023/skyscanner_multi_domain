@@ -64,6 +64,25 @@ class CliParserTests(unittest.TestCase):
 
         self.assertEqual(args.return_date, "2026-05-25")
 
+    def test_page_command_accepts_cdp_structured_transport(self) -> None:
+        parser = build_parser()
+
+        args = parser.parse_args(
+            [
+                "page",
+                "-o",
+                "北京",
+                "-d",
+                "阿拉木图",
+                "-t",
+                "2026-05-20",
+                "--transport",
+                "cdp_structured",
+            ]
+        )
+
+        self.assertEqual(args.transport, "cdp_structured")
+
     def test_page_command_accepts_country_mode_arguments(self) -> None:
         parser = build_parser()
 
