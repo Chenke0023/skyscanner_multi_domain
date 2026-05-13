@@ -59,6 +59,50 @@ def _quote_from_evidence(
     return quote
 
 
+
+
+def _evidence_ranking(evidences: list[QuoteEvidence], selected: QuoteEvidence | None) -> list[dict[str, object]]:
+    selected_id = id(selected) if selected is not None else None
+    ranking = []
+    for evidence in sorted(evidences, key=lambda item: (item.confidence, item.price or 0), reverse=True):
+        ranking.append(
+            {
+                "layer": evidence.layer,
+                "price": evidence.price,
+                "currency": evidence.currency,
+                "label": evidence.label,
+                "confidence": evidence.confidence,
+                "selected": id(evidence) == selected_id,
+                "raw_ref": evidence.raw_ref,
+            }
+        )
+    return ranking
+
+
+def _rejected_candidates(evidences: list[QuoteEvidence], selected: QuoteEvidence | None) -> list[dict[str, object]]:
+    selected_id = id(selected) if selected is not None else None
+    rejected = []
+    for evidence in sorted(evidences, key=lambda item: (item.confidence, item.price or 0), reverse=True):
+        if id(evidence) == selected_id:
+            continue
+        reason = "lower_confidence"
+        if selected and evidence.price is not None and selected.price is not None and not price_close(evidence.price, selected.price):
+            reason = "price_conflict"
+        elif evidence.price is None:
+            reason = "missing_price"
+        rejected.append(
+            {
+                "layer": evidence.layer,
+                "price": evidence.price,
+                "currency": evidence.currency,
+                "label": evidence.label,
+                "confidence": evidence.confidence,
+                "reason": reason,
+                "raw_ref": evidence.raw_ref,
+            }
+        )
+    return rejected[:50]
+
 def resolve_quote(
     region: RegionConfig,
     source_url: str,
@@ -92,6 +136,11 @@ def resolve_quote(
         confidence = "medium"
         conflict_reason = "network_dom_conflict"
         decision_trace.append("merge: network and dom conflict")
+    elif hydration and dom:
+        selected = max([hydration, dom], key=lambda e: e.confidence)
+        confidence = "medium"
+        conflict_reason = "hydration_dom_conflict"
+        decision_trace.append("merge: hydration and dom conflict")
     elif network:
         selected = network
         confidence = "medium"
@@ -135,11 +184,24 @@ def resolve_quote(
             confidence=selected.confidence,
             error=conflict_reason,
         )
+    ranking = _evidence_ranking(evidences, selected)
+    rejected = _rejected_candidates(evidences, selected)
+    if ranking:
+        decision_trace.append(
+            "ranking: " + "; ".join(
+                f"{item['layer']}:{item['price']}@{item['confidence']}"
+                for item in ranking[:5]
+            )
+        )
+    if rejected:
+        decision_trace.append(f"rejected: {len(rejected)} lower-ranked/conflicting candidates")
     quote.fetch_metadata = {
         "structured_confidence": confidence,
         "conflict_reason": conflict_reason,
         "evidence_count": len(evidences),
         "evidences": [asdict(e) for e in evidences[:20]],
+        "evidence_ranking": ranking,
+        "rejected_candidates": rejected,
         "decision_trace": decision_trace,
     }
     return StructuredQuoteResult(

@@ -21,8 +21,8 @@ import aiohttp
 
 from skyscanner_multi_domain.models import FlightQuote, RegionConfig
 from skyscanner_multi_domain.parsing.dom_parser import parse_dom_cards, parse_text_fallback
-from skyscanner_multi_domain.parsing.hydration_parser import parse_hydration_scripts
-from skyscanner_multi_domain.parsing.network_parser import parse_network_json
+from skyscanner_multi_domain.parsing.hydration_parser import enrich_hydration_candidates, parse_hydration_scripts
+from skyscanner_multi_domain.parsing.network_parser import enrich_network_candidates, parse_network_json
 from skyscanner_multi_domain.parsing.quote_merge import resolve_quote
 from skyscanner_multi_domain.runtime.paths import get_failure_log_file
 from skyscanner_multi_domain.transports.cdp import (
@@ -117,26 +117,41 @@ def _dom_cards_expression() -> str:
   }
   function nearestCard(el) {
     let cur = el;
-    for (let depth = 0; cur && depth < 8; depth++, cur = cur.parentElement) {
+    for (let depth = 0; cur && depth < 12; depth++, cur = cur.parentElement) {
       const text = cur.innerText || "";
-      if (text.length < 3000 && /best|cheapest|lowest|最佳|最便宜|price|flight|航班/i.test(text)) {
+      if (text.length < 5000 && /best|cheapest|lowest|最佳|最便宜|price|flight|航班|价格|票价/i.test(text)) {
         return cur;
       }
     }
     return el;
   }
-  return [...document.querySelectorAll("body *")]
+  const candidateSelector = "body *, button, a, [role=button], [data-testid]";
+  const seen = new Set();
+  return [...document.querySelectorAll(candidateSelector)]
     .filter(visible)
-    .filter(el => priceRegex.test(el.innerText || ""))
-    .slice(0, 200)
+    .filter(el => {
+      const text = el.innerText || el.textContent || el.getAttribute("aria-label") || "";
+      const attrs = `${el.getAttribute("aria-label") || ""} ${el.getAttribute("data-testid") || ""}`;
+      return priceRegex.test(text) || priceRegex.test(attrs);
+    })
+    .filter(el => {
+      const card = nearestCard(el);
+      const key = `${card.tagName}:${(card.innerText || "").slice(0, 200)}`;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    })
+    .slice(0, 120)
     .map((el, idx) => {
       const card = nearestCard(el);
       const rect = card.getBoundingClientRect();
       return {
         idx,
-        priceText: (el.innerText || "").slice(0, 500),
-        cardText: (card.innerText || "").slice(0, 2500),
+        priceText: (el.innerText || el.textContent || el.getAttribute("aria-label") || "").slice(0, 800),
+        cardText: (card.innerText || card.textContent || "").slice(0, 2500),
         role: el.getAttribute("role"),
+        testId: el.getAttribute("data-testid"),
+        cardTestId: card.getAttribute("data-testid"),
         aria: el.getAttribute("aria-label"),
         tag: el.tagName,
         cardTag: card.tagName,
@@ -157,10 +172,10 @@ def _hydration_scripts_expression() -> str:
     index: i,
     type: s.type || "",
     id: s.id || "",
-    text: (s.textContent || "").slice(0, 500000)
+    text: (s.textContent || "").slice(0, 120000)
   }))
   .filter(x => /price|itinerary|flight|currency/i.test(x.text))
-  .slice(0, 100)
+  .slice(0, 20)
 )()
 """.strip()
 
@@ -186,6 +201,8 @@ def _write_diagnostics(
     capture: dict[str, Any],
     result: Any,
     network_candidates: list[Any] | None = None,
+    enriched_network_candidates: list[Any] | None = None,
+    enriched_hydration_candidates: list[Any] | None = None,
     screenshot_png: bytes | None = None,
     failure_stage: str | None = None,
 ) -> str:
@@ -220,12 +237,20 @@ def _write_diagnostics(
         json.dumps(network_candidates or [], ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
+    (base / "network_candidates_enriched.json").write_text(
+        json.dumps(enriched_network_candidates or [], ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
     (base / "dom_cards.json").write_text(
         json.dumps(capture.get("domCards", []), ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
     (base / "hydration_candidates.json").write_text(
         json.dumps(capture.get("hydrationScripts", []), ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    (base / "hydration_candidates_enriched.json").write_text(
+        json.dumps(enriched_hydration_candidates or [], ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
     (base / "page_text.txt").write_text(str(capture.get("pageText", "")), encoding="utf-8")
@@ -239,6 +264,8 @@ def _write_diagnostics(
                 "page_health": capture.get("pageHealth", {}),
                 "final_quote": asdict(result.final_quote),
                 "evidences": [asdict(e) for e in result.evidences],
+                "evidence_ranking": result.final_quote.fetch_metadata.get("evidence_ranking", []),
+                "rejected_candidates": result.final_quote.fetch_metadata.get("rejected_candidates", []),
                 "decision_trace": result.decision_trace,
             },
             ensure_ascii=False,
@@ -300,10 +327,13 @@ async def _capture_structured_artifacts(ws_url: str, url: str, trace: list[str])
 
 async def _capture_screenshot(ws_url: str) -> bytes | None:
     try:
-        result = await _cdp_command(
-            ws_url,
-            "Page.captureScreenshot",
-            {"format": "png", "captureBeyondViewport": True},
+        result = await asyncio.wait_for(
+            _cdp_command(
+                ws_url,
+                "Page.captureScreenshot",
+                {"format": "png", "captureBeyondViewport": False},
+            ),
+            timeout=8.0,
         )
         data = str((result or {}).get("data") or "")
         if data:
@@ -354,6 +384,8 @@ async def compare_via_cdp_structured(
                     "stageErrors": [],
                 }
                 network_candidates: list[Any] = []
+                enriched_network_candidates: list[Any] = []
+                enriched_hydration_candidates: list[Any] = []
 
                 try:
                     trace.append("target_select:start")
@@ -406,14 +438,17 @@ async def compare_via_cdp_structured(
                     capture["stageErrors"].append({"stage": failure_stage, "error": "CDP tab has no webSocketDebuggerUrl"})
                 else:
                     trace.append(f"wait_result:start seconds={args.page_wait}")
-                    await asyncio.sleep(args.page_wait)
+                    await asyncio.sleep(min(args.page_wait, 5))
                     trace.append("wait_result:ok")
                     capture, eval_failure_stage = await _capture_structured_artifacts(ws_url, url, trace)
                     failure_stage = failure_stage or eval_failure_stage
 
                 source_url = str(capture.get("url") or url)
                 evidences = []
-                trace.append("network_capture:metadata_only candidates=0")
+                enriched_network_candidates = enrich_network_candidates(network_candidates)
+                enriched_hydration_candidates = enrich_hydration_candidates(list(capture.get("hydrationScripts") or []))
+                trace.append(f"network_capture:metadata_only candidates={len(enriched_network_candidates)}")
+                trace.append(f"hydration_scan:candidates={len(enriched_hydration_candidates)}")
                 evidences.extend(parse_network_json(region, source_url, network_candidates))
                 evidences.extend(parse_hydration_scripts(region, source_url, list(capture.get("hydrationScripts") or [])))
                 evidences.extend(parse_dom_cards(region, source_url, list(capture.get("domCards") or [])))
@@ -442,6 +477,8 @@ async def compare_via_cdp_structured(
                         capture=capture,
                         result=result,
                         network_candidates=network_candidates,
+                        enriched_network_candidates=enriched_network_candidates,
+                        enriched_hydration_candidates=enriched_hydration_candidates,
                         screenshot_png=screenshot_png,
                         failure_stage=failure_stage,
                     )
