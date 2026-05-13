@@ -405,6 +405,7 @@ async def run_page_scan(
     config: Any | None = None,  # ScanConfig — lazy import to avoid circular deps
 ) -> list[FlightQuote]:
     from skyscanner_multi_domain.transports.cdp import compare_via_pages, detect_cdp_version, ensure_cdp_ready
+    from skyscanner_multi_domain.transports.cdp_structured import compare_via_cdp_structured
     from skyscanner_multi_domain.transports.scrapling import compare_via_scrapling
     from skyscanner_multi_domain.transports.opencli import compare_via_opencli
     from skyscanner_multi_domain.planning.date_window import format_trip_date_label
@@ -641,7 +642,7 @@ async def run_page_scan(
             return [merged[region_code] for region_code in ordered_regions]
 
         normalized_transport = (transport or "opencli").lower()
-        if normalized_transport == "page":
+        if normalized_transport in {"page", "cdp_structured"}:
             ensure_cdp_ready(
                 start_url=build_search_url(
                     selected_regions[0], origin, destination, date, return_date
@@ -1118,7 +1119,43 @@ async def run_page_scan(
             new_quotes = [quote_by_region.get(q.region, q) for q in quotes]
             return new_quotes
 
-        if normalized_transport == "page":
+        if normalized_transport == "cdp_structured":
+            quotes = await compare_via_cdp_structured(
+                args,
+                selected_regions,
+                build_search_url=build_search_url,
+                persist_failure_log=_persist_failure_log,
+                run_id=run_id,
+                cdp_mode=cdp_mode,
+                manual_tabs=cdp_manual_tabs,
+                keep_tabs=keep_tabs,
+            )
+            quotes = apply_plan_metadata(quotes)
+            planner = AttemptPlanner(config=config)
+            for region, quote in zip(selected_regions, quotes):
+                plan = planner.plan(quote)
+                emit_attempt_trace(
+                    trace_ctx=trace_ctx,
+                    quote=quote,
+                    plan=plan,
+                    region=region.code,
+                    domain=region.domain,
+                    transport="cdp_structured",
+                    attempt_index=next_attempt_index(region.code),
+                )
+                append_attempt_history(
+                    quote,
+                    transport="cdp_structured",
+                    attempt_index=_attempt_index.get(region.code, 1),
+                    plan=plan,
+                )
+            await emit_progress(
+                stage="final",
+                quotes=quotes,
+                completed_regions=[region.code for region in selected_regions],
+                is_final=True,
+            )
+        elif normalized_transport == "page":
             quotes = await compare_via_pages(
                 args, selected_regions, run_id=run_id,
                 cdp_mode=cdp_mode, manual_tabs=cdp_manual_tabs,
@@ -1395,7 +1432,7 @@ async def run_page_scan(
                         region, origin, destination, date, return_date
                     ),
                     status="invalid_transport",
-                    error=f"未知 transport: {transport}（可选: scrapling, page, opencli）",
+                    error=f"未知 transport: {transport}（可选: scrapling, page, opencli, cdp_structured）",
                 )
                 for region in selected_regions
             ]
