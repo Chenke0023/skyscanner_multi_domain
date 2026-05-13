@@ -52,7 +52,9 @@ def test_write_diagnostics_persists_full_artifact_set(tmp_path, monkeypatch) -> 
         "meta.json",
         "page_health.json",
         "network_candidates.json",
+        "network_candidates_enriched.json",
         "hydration_candidates.json",
+        "hydration_candidates_enriched.json",
         "dom_cards.json",
         "page_text.txt",
         "final_decision.json",
@@ -74,7 +76,7 @@ def test_capture_structured_artifacts_records_eval_failure_stage(monkeypatch) ->
             return {"url": "https://example.test/search", "readyState": "complete"}
         if "innerText" in expression and "querySelectorAll" not in expression:
             return "page text"
-        if "querySelectorAll(\"body *\")" in expression:
+        if "candidateSelector" in expression:
             raise RuntimeError("Execution context was destroyed")
         return []
 
