@@ -1154,7 +1154,7 @@ async def run_page_scan(
                 if quote.price is None
             ]
             fallback_by_region: dict[str, FlightQuote] = {}
-            if fallback_regions:
+            if fallback_regions and allow_browser_fallback:
                 fallback_quotes = await run_opencli_pass(
                     fallback_regions,
                     enable_fallbacks=allow_browser_fallback,

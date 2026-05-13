@@ -35,6 +35,41 @@ from skyscanner_multi_domain.transports.cdp import (
 )
 
 
+class CdpStageError(RuntimeError):
+    def __init__(self, stage: str, cause: Exception):
+        self.stage = stage
+        self.cause = cause
+        super().__init__(f"{stage}: {cause}")
+
+
+def _is_transient_eval_error(error: Exception) -> bool:
+    text = str(error).lower()
+    transient_markers = (
+        "execution context was destroyed",
+        "cannot find context",
+        "context with specified id",
+        "inspected target navigated",
+        "target closed",
+        "session closed",
+        "websocket",
+    )
+    return any(marker in text for marker in transient_markers)
+
+
+async def _safe_eval(ws_url: str, stage: str, expression: str, *, retries: int = 2) -> Any:
+    last_error: Exception | None = None
+    for attempt in range(retries + 1):
+        try:
+            return await cdp_eval(ws_url, expression, max_retries=0)
+        except Exception as exc:  # noqa: BLE001
+            last_error = exc
+            if attempt < retries and _is_transient_eval_error(exc):
+                await asyncio.sleep(0.75 * (attempt + 1))
+                continue
+            raise CdpStageError(stage, exc) from exc
+    raise CdpStageError(stage, last_error or RuntimeError("unknown CDP eval failure"))
+
+
 async def _cdp_command(ws_url: str, method: str, params: dict[str, Any] | None = None) -> Any:
     timeout = aiohttp.ClientTimeout(total=20)
     async with aiohttp.ClientSession(timeout=timeout) as session:
@@ -52,7 +87,26 @@ async def _cdp_command(ws_url: str, method: str, params: dict[str, Any] | None =
     return None
 
 
-def _capture_expression() -> str:
+def _page_health_expression() -> str:
+    return r"""
+(() => ({
+  url: location.href,
+  title: document.title,
+  readyState: document.readyState,
+  hasBody: !!document.body,
+  bodyTextLength: document.body ? (document.body.innerText || "").length : 0,
+  scripts: document.scripts ? document.scripts.length : 0
+}))()
+""".strip()
+
+
+def _page_text_expression() -> str:
+    return r"""
+(() => document.body ? (document.body.innerText || "").slice(0, 80000) : "")()
+""".strip()
+
+
+def _dom_cards_expression() -> str:
     return r"""
 (() => {
   const priceRegex = /(?:¥|￥|HK\$|S\$|US\$|A\$|CA\$|£|€|\$|₩|₹|CNY|HKD|SGD|GBP|EUR|USD|JPY|KRW|INR)\s?[\d,]+(?:\.\d+)?/i;
@@ -71,7 +125,7 @@ def _capture_expression() -> str:
     }
     return el;
   }
-  const domCards = [...document.querySelectorAll("body *")]
+  return [...document.querySelectorAll("body *")]
     .filter(visible)
     .filter(el => priceRegex.test(el.innerText || ""))
     .slice(0, 200)
@@ -92,22 +146,22 @@ def _capture_expression() -> str:
         h: rect.height
       };
     });
-  const hydrationScripts = [...document.querySelectorAll("script")]
-    .map((s, i) => ({
-      index: i,
-      type: s.type || "",
-      id: s.id || "",
-      text: (s.textContent || "").slice(0, 2000000)
-    }))
-    .filter(x => /price|itinerary|flight|currency/i.test(x.text));
-  return {
-    title: document.title,
-    url: location.href,
-    pageText: document.body ? document.body.innerText.slice(0, 80000) : "",
-    domCards,
-    hydrationScripts
-  };
 })()
+""".strip()
+
+
+def _hydration_scripts_expression() -> str:
+    return r"""
+(() => [...document.querySelectorAll("script")]
+  .map((s, i) => ({
+    index: i,
+    type: s.type || "",
+    id: s.id || "",
+    text: (s.textContent || "").slice(0, 500000)
+  }))
+  .filter(x => /price|itinerary|flight|currency/i.test(x.text))
+  .slice(0, 100)
+)()
 """.strip()
 
 
@@ -133,6 +187,7 @@ def _write_diagnostics(
     result: Any,
     network_candidates: list[Any] | None = None,
     screenshot_png: bytes | None = None,
+    failure_stage: str | None = None,
 ) -> str:
     base = get_failure_log_file("cdp_structured") / _route_key(args) / region.code
     base.mkdir(parents=True, exist_ok=True)
@@ -147,12 +202,18 @@ def _write_diagnostics(
                 "currency": final_quote.currency,
                 "confidence": result.confidence,
                 "conflict_reason": result.conflict_reason,
+                "failure_stage": failure_stage or capture.get("failureStage"),
+                "stage_errors": capture.get("stageErrors", []),
                 "captcha_detected": "challenge" in (final_quote.status or "").lower(),
                 "timestamp": datetime.now(timezone.utc).isoformat(timespec="seconds"),
             },
             ensure_ascii=False,
             indent=2,
         ),
+        encoding="utf-8",
+    )
+    (base / "page_health.json").write_text(
+        json.dumps(capture.get("pageHealth", {}), ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
     (base / "network_candidates.json").write_text(
@@ -173,6 +234,9 @@ def _write_diagnostics(
             {
                 "confidence": result.confidence,
                 "conflict_reason": result.conflict_reason,
+                "failure_stage": failure_stage or capture.get("failureStage"),
+                "stage_errors": capture.get("stageErrors", []),
+                "page_health": capture.get("pageHealth", {}),
                 "final_quote": asdict(result.final_quote),
                 "evidences": [asdict(e) for e in result.evidences],
                 "decision_trace": result.decision_trace,
@@ -185,6 +249,53 @@ def _write_diagnostics(
     screenshot_path = base / "screenshot.png"
     screenshot_path.write_bytes(screenshot_png or b"")
     return str(base)
+
+
+async def _capture_structured_artifacts(ws_url: str, url: str, trace: list[str]) -> tuple[dict[str, Any], str | None]:
+    capture: dict[str, Any] = {
+        "url": url,
+        "pageHealth": {},
+        "pageText": "",
+        "domCards": [],
+        "hydrationScripts": [],
+        "stageErrors": [],
+    }
+    failure_stage: str | None = None
+
+    async def run_stage(stage: str, expression: str, default: Any) -> Any:
+        nonlocal failure_stage
+        trace.append(f"{stage}:start")
+        try:
+            value = await _safe_eval(ws_url, stage, expression)
+            count = len(value) if isinstance(value, (list, str)) else "ok"
+            trace.append(f"{stage}:ok count={count}")
+            return value
+        except CdpStageError as exc:
+            failure_stage = failure_stage or exc.stage
+            message = str(exc.cause)
+            capture["stageErrors"].append({"stage": exc.stage, "error": message})
+            trace.append(f"{stage}:failed {message}")
+            return default
+
+    health = await run_stage("health_eval", _page_health_expression(), {})
+    if isinstance(health, dict):
+        capture["pageHealth"] = health
+        capture["url"] = str(health.get("url") or url)
+
+    page_text = await run_stage("text_eval", _page_text_expression(), "")
+    if isinstance(page_text, str):
+        capture["pageText"] = page_text
+
+    dom_cards = await run_stage("dom_eval", _dom_cards_expression(), [])
+    if isinstance(dom_cards, list):
+        capture["domCards"] = dom_cards
+
+    hydration_scripts = await run_stage("hydration_eval", _hydration_scripts_expression(), [])
+    if isinstance(hydration_scripts, list):
+        capture["hydrationScripts"] = hydration_scripts
+
+    capture["failureStage"] = failure_stage
+    return capture, failure_stage
 
 
 async def _capture_screenshot(ws_url: str) -> bytes | None:
@@ -228,64 +339,103 @@ async def compare_via_cdp_structured(
                     args.date,
                     getattr(args, "return_date", None),
                 )
+                started = time.monotonic()
+                trace: list[str] = []
                 domain_host = _domain_host(region)
                 tab_id = domain_tabs.get(domain_host)
                 ws_url = ""
+                failure_stage: str | None = None
+                capture: dict[str, Any] = {
+                    "url": url,
+                    "pageHealth": {},
+                    "pageText": "",
+                    "domCards": [],
+                    "hydrationScripts": [],
+                    "stageErrors": [],
+                }
+                network_candidates: list[Any] = []
+
                 try:
+                    trace.append("target_select:start")
                     if tab_id:
+                        trace.append("page_navigate:start")
                         ws_url = await cdp_navigate_tab(session, tab_id, url)
+                        trace.append("page_navigate:ok reused_tab=true")
                     elif cdp_mode != "manual":
                         tab = await cdp_open_tab(session, url)
                         tab_id = str(tab.get("id", ""))
                         ws_url = str(tab.get("webSocketDebuggerUrl", ""))
                         domain_tabs[domain_host] = tab_id
                         owned_tab_ids.add(tab_id)
+                        trace.append("target_select:ok opened_tab=true")
                     else:
                         raise RuntimeError("Manual mode: no tab provided for this domain")
-                except TabNotFoundError:
+                except TabNotFoundError as exc:
+                    failure_stage = "target_select"
+                    capture["stageErrors"].append({"stage": failure_stage, "error": str(exc)})
                     if cdp_mode == "manual":
-                        raise RuntimeError("Manual mode: provided tab no longer exists")
-                    tab = await cdp_open_tab(session, url)
-                    tab_id = str(tab.get("id", ""))
-                    ws_url = str(tab.get("webSocketDebuggerUrl", ""))
-                    domain_tabs[domain_host] = tab_id
-                    owned_tab_ids.add(tab_id)
-
-                if not ws_url:
-                    tabs = await cdp_list_tabs(session)
-                    tab = next((item for item in tabs if item.get("id") == tab_id), None)
-                    ws_url = str((tab or {}).get("webSocketDebuggerUrl", ""))
-                if not ws_url:
-                    raise RuntimeError("CDP tab has no webSocketDebuggerUrl")
-
-                await asyncio.sleep(args.page_wait)
-                started = time.monotonic()
-                capture_error: str | None = None
-                try:
-                    capture = await cdp_eval(ws_url, _capture_expression())
+                        trace.append("target_select:failed manual_tab_missing")
+                    else:
+                        try:
+                            tab = await cdp_open_tab(session, url)
+                            tab_id = str(tab.get("id", ""))
+                            ws_url = str(tab.get("webSocketDebuggerUrl", ""))
+                            domain_tabs[domain_host] = tab_id
+                            owned_tab_ids.add(tab_id)
+                            trace.append("target_select:ok opened_replacement_tab=true")
+                            failure_stage = None
+                        except Exception as open_exc:  # noqa: BLE001
+                            capture["stageErrors"].append({"stage": "target_select", "error": str(open_exc)})
                 except Exception as exc:  # noqa: BLE001
-                    capture_error = f"CDP structured capture failed: {exc}"
-                    capture = {"url": url, "pageText": "", "domCards": [], "hydrationScripts": []}
-                if not isinstance(capture, dict):
-                    capture = {"pageText": "", "domCards": [], "hydrationScripts": []}
+                    failure_stage = "target_select"
+                    capture["stageErrors"].append({"stage": failure_stage, "error": str(exc)})
+                    trace.append(f"target_select:failed {exc}")
+
+                if not ws_url and tab_id:
+                    try:
+                        tabs = await cdp_list_tabs(session)
+                        tab = next((item for item in tabs if item.get("id") == tab_id), None)
+                        ws_url = str((tab or {}).get("webSocketDebuggerUrl", ""))
+                    except Exception as exc:  # noqa: BLE001
+                        failure_stage = failure_stage or "target_select"
+                        capture["stageErrors"].append({"stage": "target_select", "error": str(exc)})
+
+                if not ws_url:
+                    failure_stage = failure_stage or "target_select"
+                    capture["failureStage"] = failure_stage
+                    capture["stageErrors"].append({"stage": failure_stage, "error": "CDP tab has no webSocketDebuggerUrl"})
+                else:
+                    trace.append(f"wait_result:start seconds={args.page_wait}")
+                    await asyncio.sleep(args.page_wait)
+                    trace.append("wait_result:ok")
+                    capture, eval_failure_stage = await _capture_structured_artifacts(ws_url, url, trace)
+                    failure_stage = failure_stage or eval_failure_stage
+
                 source_url = str(capture.get("url") or url)
-                network_candidates: list[Any] = []
                 evidences = []
+                trace.append("network_capture:metadata_only candidates=0")
                 evidences.extend(parse_network_json(region, source_url, network_candidates))
                 evidences.extend(parse_hydration_scripts(region, source_url, list(capture.get("hydrationScripts") or [])))
                 evidences.extend(parse_dom_cards(region, source_url, list(capture.get("domCards") or [])))
                 if not evidences:
                     evidences.extend(parse_text_fallback(region, source_url, str(capture.get("pageText") or "")))
                 result = resolve_quote(region, source_url, evidences)
+                result.decision_trace[:0] = trace
+                result.final_quote.fetch_metadata["decision_trace"] = result.decision_trace
                 quote = result.final_quote
-                if capture_error and quote.price is None:
-                    quote.error = capture_error
+                if failure_stage and quote.price is None:
+                    quote.error = f"CDP structured failed at {failure_stage}"
+                    quote.status = f"cdp_structured_{failure_stage}_failed"
                 quote.extract_attempt_count = 1
                 quote.progressive_wait_used = args.page_wait
                 quote.fetch_metadata["elapsed_ms"] = int((time.monotonic() - started) * 1000)
-                needs_artifacts = quote.price is None or result.conflict_reason is not None
+                quote.fetch_metadata["failure_stage"] = failure_stage
+                quote.fetch_metadata["stage_errors"] = capture.get("stageErrors", [])
+                needs_artifacts = quote.price is None or result.conflict_reason is not None or failure_stage is not None
                 if needs_artifacts:
-                    screenshot_png = await _capture_screenshot(ws_url)
+                    trace.append("screenshot_capture:start")
+                    screenshot_png = await _capture_screenshot(ws_url) if ws_url else None
+                    trace.append("screenshot_capture:ok" if screenshot_png else "screenshot_capture:empty")
                     diagnostic_dir = _write_diagnostics(
                         args=args,
                         region=region,
@@ -293,6 +443,7 @@ async def compare_via_cdp_structured(
                         result=result,
                         network_candidates=network_candidates,
                         screenshot_png=screenshot_png,
+                        failure_stage=failure_stage,
                     )
                     quote.debug_log_path = str(Path(diagnostic_dir) / "final_decision.json")
                     if quote.price is None and persist_failure_log is not None:
@@ -301,7 +452,7 @@ async def compare_via_cdp_structured(
                             transport="cdp_structured",
                             route_key=_route_key(args),
                             page_text=str(capture.get("pageText") or ""),
-                            extra={"diagnostic_dir": diagnostic_dir},
+                            extra={"diagnostic_dir": diagnostic_dir, "failure_stage": failure_stage},
                         )
                 quotes.append(quote)
         finally:
