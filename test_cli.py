@@ -78,10 +78,12 @@ class CliParserTests(unittest.TestCase):
                 "2026-05-20",
                 "--transport",
                 "cdp_structured",
+                "--no-fallback",
             ]
         )
 
         self.assertEqual(args.transport, "cdp_structured")
+        self.assertTrue(args.no_fallback)
 
     def test_page_command_accepts_country_mode_arguments(self) -> None:
         parser = build_parser()

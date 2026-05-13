@@ -1496,6 +1496,7 @@ class SimpleCLI:
                 query_payload=query_payload,
                 on_progress=on_progress,
                 fetch_pipeline=getattr(args, "fetch_pipeline", "balanced"),
+                allow_browser_fallback=not bool(getattr(args, "no_fallback", False)),
                 config=config,
             )
             if not quotes:
@@ -1665,6 +1666,12 @@ class SimpleCLI:
             )
         if show_delta:
             self._print_delta_summary(rows_by_date)
+        cdp_only_smoke = (
+            getattr(args, "transport", "") == "cdp_structured"
+            and bool(getattr(args, "no_fallback", False))
+        )
+        if cdp_only_smoke and quote_snapshots_by_date:
+            return 0
         if not any_rows:
             return 1
         return 0 if any_winner else 2
@@ -1945,6 +1952,7 @@ class SimpleCLI:
                         query_payload=query_payload,
                         on_progress=on_progress,
                         fetch_pipeline=getattr(args, "fetch_pipeline", "balanced"),
+                        allow_browser_fallback=not bool(getattr(args, "no_fallback", False)),
                         config=config,
                     )
                 if not quotes:
@@ -2137,6 +2145,12 @@ class SimpleCLI:
 
         if show_delta:
             self._print_delta_summary(rows_by_date)
+        cdp_only_smoke = (
+            getattr(args, "transport", "") == "cdp_structured"
+            and bool(getattr(args, "no_fallback", False))
+        )
+        if cdp_only_smoke and quote_snapshots_by_date:
+            return 0
         if not any_rows:
             return 1
         return 0 if any_winner else 2
@@ -2514,6 +2528,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     page.add_argument(
         "--no-save", dest="save", action="store_false", help="不保存 Markdown 结果"
+    )
+    page.add_argument(
+        "--no-fallback",
+        action="store_true",
+        help="实验/调试用: 禁用 transport fallback，仅运行当前 --transport",
     )
 
     # ── P7: Transport mode ────────────────────────────────────────────

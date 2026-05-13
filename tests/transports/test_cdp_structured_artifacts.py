@@ -1,11 +1,15 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import json
 
 from skyscanner_multi_domain.models import RegionConfig
 from skyscanner_multi_domain.parsing.quote_merge import resolve_quote
-from skyscanner_multi_domain.transports.cdp_structured import _write_diagnostics
+from skyscanner_multi_domain.transports.cdp_structured import (
+    _capture_structured_artifacts,
+    _write_diagnostics,
+)
 
 
 def test_write_diagnostics_persists_full_artifact_set(tmp_path, monkeypatch) -> None:
@@ -28,16 +32,25 @@ def test_write_diagnostics_persists_full_artifact_set(tmp_path, monkeypatch) -> 
     diagnostic_dir = _write_diagnostics(
         args=argparse.Namespace(origin="PEK", destination="HKG", date="2026-06-01", return_date=None),
         region=region,
-        capture={"domCards": [], "hydrationScripts": [], "pageText": "sample"},
+        capture={
+            "pageHealth": {"readyState": "complete"},
+            "domCards": [],
+            "hydrationScripts": [],
+            "pageText": "sample",
+            "failureStage": "dom_eval",
+            "stageErrors": [{"stage": "dom_eval", "error": "boom"}],
+        },
         result=result,
         network_candidates=[],
         screenshot_png=b"png-bytes",
+        failure_stage="dom_eval",
     )
 
     artifact_dir = tmp_path / "logs" / "failures" / "cdp_structured" / "PEK_HKG_20260601" / "HK"
     assert str(artifact_dir) == diagnostic_dir
     for name in (
         "meta.json",
+        "page_health.json",
         "network_candidates.json",
         "hydration_candidates.json",
         "dom_cards.json",
@@ -46,6 +59,37 @@ def test_write_diagnostics_persists_full_artifact_set(tmp_path, monkeypatch) -> 
         "screenshot.png",
     ):
         assert (artifact_dir / name).exists()
+    meta = json.loads((artifact_dir / "meta.json").read_text(encoding="utf-8"))
+    assert meta["failure_stage"] == "dom_eval"
+    assert json.loads((artifact_dir / "page_health.json").read_text(encoding="utf-8"))["readyState"] == "complete"
     final_decision = json.loads((artifact_dir / "final_decision.json").read_text(encoding="utf-8"))
     assert final_decision["decision_trace"]
+    assert final_decision["failure_stage"] == "dom_eval"
     assert (artifact_dir / "screenshot.png").read_bytes() == b"png-bytes"
+
+
+def test_capture_structured_artifacts_records_eval_failure_stage(monkeypatch) -> None:
+    async def fake_cdp_eval(ws_url: str, expression: str, *, max_retries: int = 0):
+        if "document.title" in expression:
+            return {"url": "https://example.test/search", "readyState": "complete"}
+        if "innerText" in expression and "querySelectorAll" not in expression:
+            return "page text"
+        if "querySelectorAll(\"body *\")" in expression:
+            raise RuntimeError("Execution context was destroyed")
+        return []
+
+    monkeypatch.setattr(
+        "skyscanner_multi_domain.transports.cdp_structured.cdp_eval",
+        fake_cdp_eval,
+    )
+    trace: list[str] = []
+
+    capture, failure_stage = asyncio.run(
+        _capture_structured_artifacts("ws://example", "https://example.test/search", trace)
+    )
+
+    assert failure_stage == "dom_eval"
+    assert capture["failureStage"] == "dom_eval"
+    assert capture["pageText"] == "page text"
+    assert capture["stageErrors"][0]["stage"] == "dom_eval"
+    assert any(item.startswith("dom_eval:failed") for item in trace)
