@@ -100,6 +100,121 @@ def _page_health_expression() -> str:
 """.strip()
 
 
+def _page_state_expression() -> str:
+    return r"""
+(() => {
+  const body = document.body;
+  const text = body ? (body.innerText || "") : "";
+  const lowerText = text.toLowerCase();
+
+  const cookieSelectors = '[class*="cookie"], [class*="consent"], [class*="gdpr"], [id*="cookie"], [id*="consent"], [data-testid*="cookie"]';
+  const hasCookieBanner = /cookie|consent|gdpr|accept all|同意|接受|隐私|privacy|we value your/i.test(text) &&
+    document.querySelector(cookieSelectors) !== null;
+
+  const hasChallenge = /captcha|challenge|recaptcha|hcaptcha|turnstile|robot|机器人|验证|verify you are human|security check/i.test(text) ||
+    document.querySelector('iframe[src*="captcha"], iframe[src*="challenge"], iframe[src*="recaptcha"], #captcha, .captcha, [class*="captcha"]') !== null;
+
+  const searchInputs = document.querySelectorAll('input[placeholder*="From" i], input[placeholder*="To" i], input[placeholder*="Depart" i], input[placeholder*="Origin" i], input[placeholder*="Destination" i]');
+  const hasSearchForm = searchInputs.length > 0 &&
+    document.querySelectorAll('[data-testid*="result"], [class*="result-card"], [class*="itinerary"]').length === 0;
+
+  const hasLoadingSkeleton = document.querySelector('[class*="skeleton"], [class*="shimmer"], [class*="loading"], [data-testid*="loading"], [aria-busy="true"], [class*="placeholder"]') !== null;
+
+  const hasSortControls = /sort by|排序| cheapest|best|fastest|price|recommend/i.test(text) &&
+    document.querySelectorAll('button, select, [role="tab"], [data-testid*="sort"]').length > 0;
+
+  const hasBestLabel = /best|最佳|推荐|top pick/i.test(text);
+  const hasCheapestLabel = /cheapest|最便宜|最低|lowest/i.test(text);
+
+  const hasCurrencyText = /(?:¥|￥|HK\$|S\$|US\$|A\$|CA\$|£|€|\$|₩|₹)\s?[\d,]+(?:\.\d+)?/i.test(text);
+
+  const hasNoResults = /no results|no flights|没找到|无结果|no matching|抱歉|sorry|we couldn.t find|couldn.t find any/i.test(text);
+
+  const resultSelectors = '[data-testid*="result"], [class*="result-card"], [class*="itinerary"], [class*="flight-card"], [class*="flight-list"]';
+  const resultCards = document.querySelectorAll(resultSelectors);
+  const hasResultCards = resultCards.length > 0;
+
+  const hasPriceDisplay = document.querySelectorAll('[class*="price"], [data-testid*="price"]').length > 0;
+
+  return {
+    final_url: location.href,
+    title: document.title,
+    ready_state: document.readyState,
+    body_text_length: text.length,
+    has_cookie_banner: hasCookieBanner,
+    has_challenge: hasChallenge,
+    has_search_form: hasSearchForm,
+    has_loading_skeleton: hasLoadingSkeleton,
+    has_sort_controls: hasSortControls,
+    has_best_label: hasBestLabel,
+    has_cheapest_label: hasCheapestLabel,
+    has_currency_text: hasCurrencyText,
+    has_no_results: hasNoResults,
+    has_result_cards: hasResultCards,
+    result_card_count: resultCards.length,
+    has_price_display: hasPriceDisplay,
+  };
+})()
+""".strip()
+
+
+def _classify_page_state(state: dict[str, Any]) -> str:
+    if state.get("has_challenge"):
+        return "challenge"
+    if state.get("has_loading_skeleton") and not state.get("has_result_cards") and not state.get("has_currency_text"):
+        return "loading_skeleton"
+    if state.get("has_search_form") and not state.get("has_result_cards"):
+        return "search_form_or_incomplete_params"
+    if state.get("has_no_results") and not state.get("has_currency_text") and not state.get("has_result_cards"):
+        return "no_results"
+    if state.get("has_result_cards") or state.get("has_sort_controls") or state.get("has_currency_text"):
+        return "results_visible"
+    if state.get("ready_state") != "complete":
+        return "incomplete_load"
+    if state.get("body_text_length", 0) < 500:
+        return "nearly_empty"
+    return "unknown"
+
+
+def _classify_failure_reason(
+    failure_stage: str | None,
+    page_state: dict[str, Any] | None,
+    capture: dict[str, Any],
+    result: Any,
+) -> str:
+    """Classify the specific reason why no quote was extracted."""
+    if failure_stage in ("target_select", "wait_result"):
+        return "navigation_failed"
+
+    state = _classify_page_state(page_state or {}) if page_state else "unknown"
+
+    if state == "challenge":
+        return "failed_challenge"
+    if state in ("search_form_or_incomplete_params", "nearly_empty"):
+        return "failed_invalid_search_page"
+    if state == "loading_skeleton":
+        return "failed_wait_timeout_before_results"
+    if state == "no_results":
+        return "failed_no_results"
+    if state == "results_visible":
+        dom_cards = capture.get("domCards", []) if capture else []
+        if not dom_cards:
+            return "failed_no_price_candidates_after_results"
+        return "failed_merge_conservative"
+    if state == "incomplete_load":
+        if page_state and page_state.get("has_cookie_banner"):
+            return "failed_cookie_interstitial"
+        return "failed_incomplete_load"
+
+    if failure_stage in ("dom_eval", "hydration_eval", "network_eval"):
+        return "failed_eval_error"
+
+    if page_state and page_state.get("has_cookie_banner"):
+        return "failed_cookie_interstitial"
+
+    return "failed_unknown"
+
+
 def _page_text_expression() -> str:
     return r"""
 (() => document.body ? (document.body.innerText || "").slice(0, 80000) : "")()
@@ -180,6 +295,24 @@ def _hydration_scripts_expression() -> str:
 """.strip()
 
 
+def _navigation_trace_expression(requested_url: str) -> str:
+    return f"""
+(() => {{
+  const nav = performance.getEntriesByType("navigation")[0] || {{}};
+  return {{
+    final_url: location.href,
+    title: document.title,
+    history_length: history.length,
+    ready_state: document.readyState,
+    navigation_type: nav.type || "unknown",
+    redirect_count: nav.redirectCount || 0,
+    load_duration_ms: Math.round(nav.duration || 0),
+    dom_complete_ms: Math.round(nav.domComplete || 0),
+  }};
+}})()
+""".strip()
+
+
 def _domain_host(region: RegionConfig) -> str:
     from urllib.parse import urlparse
 
@@ -203,8 +336,12 @@ def _write_diagnostics(
     network_candidates: list[Any] | None = None,
     enriched_network_candidates: list[Any] | None = None,
     enriched_hydration_candidates: list[Any] | None = None,
-    screenshot_png: bytes | None = None,
+    screenshot_initial: bytes | None = None,
+    screenshot_final: bytes | None = None,
     failure_stage: str | None = None,
+    page_state: dict[str, Any] | None = None,
+    navigation_trace: dict[str, Any] | None = None,
+    state_timeline: list[dict[str, Any]] | None = None,
 ) -> str:
     base = get_failure_log_file("cdp_structured") / _route_key(args) / region.code
     base.mkdir(parents=True, exist_ok=True)
@@ -254,14 +391,30 @@ def _write_diagnostics(
         encoding="utf-8",
     )
     (base / "page_text.txt").write_text(str(capture.get("pageText", "")), encoding="utf-8")
+    if page_state:
+        (base / "page_state.json").write_text(
+            json.dumps(page_state, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+    if navigation_trace:
+        (base / "navigation_trace.json").write_text(
+            json.dumps(navigation_trace, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
     (base / "final_decision.json").write_text(
         json.dumps(
             {
                 "confidence": result.confidence,
                 "conflict_reason": result.conflict_reason,
                 "failure_stage": failure_stage or capture.get("failureStage"),
+                "failure_reason": _classify_failure_reason(
+                    failure_stage, page_state, capture, result
+                ),
                 "stage_errors": capture.get("stageErrors", []),
                 "page_health": capture.get("pageHealth", {}),
+                "page_state": page_state,
+                "navigation_trace": navigation_trace,
+                "state_timeline": state_timeline or [],
                 "final_quote": asdict(result.final_quote),
                 "evidences": [asdict(e) for e in result.evidences],
                 "evidence_ranking": result.final_quote.fetch_metadata.get("evidence_ranking", []),
@@ -273,12 +426,61 @@ def _write_diagnostics(
         ),
         encoding="utf-8",
     )
-    screenshot_path = base / "screenshot.png"
-    screenshot_path.write_bytes(screenshot_png or b"")
+    if screenshot_initial:
+        (base / "screenshot_initial.png").write_bytes(screenshot_initial)
+    if screenshot_final:
+        (base / "screenshot_final.png").write_bytes(screenshot_final)
+    elif screenshot_initial:
+        (base / "screenshot.png").write_bytes(screenshot_initial)
     return str(base)
 
 
-async def _capture_structured_artifacts(ws_url: str, url: str, trace: list[str]) -> tuple[dict[str, Any], str | None]:
+async def wait_for_result_state(
+    ws_url: str,
+    timeout_seconds: float,
+    poll_interval: float = 1.0,
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """Poll page state until a terminal state is reached or timeout.
+
+    Returns (final_state, state_timeline) where state_timeline contains
+    snapshots at each poll iteration.
+    """
+    deadline = time.monotonic() + timeout_seconds
+    snapshots: list[dict[str, Any]] = []
+    terminal_states = {
+        "results_visible",
+        "no_results",
+        "challenge",
+        "search_form_or_incomplete_params",
+    }
+
+    while time.monotonic() < deadline:
+        try:
+            state = await _safe_eval(ws_url, "page_state_eval", _page_state_expression(), default=None)
+            if state is None:
+                await asyncio.sleep(poll_interval)
+                continue
+
+            if isinstance(state, dict):
+                state["_eval_timestamp"] = time.monotonic()
+                snapshots.append(state)
+                classified = _classify_page_state(state)
+                if classified in terminal_states:
+                    return state, snapshots
+
+        except CdpStageError:
+            pass
+        except Exception:
+            pass
+
+        await asyncio.sleep(poll_interval)
+
+    if snapshots:
+        return snapshots[-1], snapshots
+    return {"state": "timeout", "final_url": "", "ready_state": "unknown", "body_text_length": 0}, snapshots
+
+
+async def _capture_structured_artifacts(ws_url: str, url: str, trace: list[str]) -> tuple[dict[str, Any], str | None, dict[str, Any] | None]:
     capture: dict[str, Any] = {
         "url": url,
         "pageHealth": {},
@@ -288,6 +490,7 @@ async def _capture_structured_artifacts(ws_url: str, url: str, trace: list[str])
         "stageErrors": [],
     }
     failure_stage: str | None = None
+    page_state: dict[str, Any] | None = None
 
     async def run_stage(stage: str, expression: str, default: Any) -> Any:
         nonlocal failure_stage
@@ -309,6 +512,10 @@ async def _capture_structured_artifacts(ws_url: str, url: str, trace: list[str])
         capture["pageHealth"] = health
         capture["url"] = str(health.get("url") or url)
 
+    page_state = await run_stage("page_state_eval", _page_state_expression(), None)
+    if isinstance(page_state, dict):
+        capture["pageState"] = page_state
+
     page_text = await run_stage("text_eval", _page_text_expression(), "")
     if isinstance(page_text, str):
         capture["pageText"] = page_text
@@ -322,7 +529,7 @@ async def _capture_structured_artifacts(ws_url: str, url: str, trace: list[str])
         capture["hydrationScripts"] = hydration_scripts
 
     capture["failureStage"] = failure_stage
-    return capture, failure_stage
+    return capture, failure_stage, page_state
 
 
 async def _capture_screenshot(ws_url: str) -> bytes | None:
@@ -432,16 +639,43 @@ async def compare_via_cdp_structured(
                         failure_stage = failure_stage or "target_select"
                         capture["stageErrors"].append({"stage": "target_select", "error": str(exc)})
 
+                screenshot_initial: bytes | None = None
+                screenshot_final: bytes | None = None
+                page_state: dict[str, Any] | None = None
+                navigation_trace: dict[str, Any] | None = None
+                state_timeline: list[dict[str, Any]] = []
+
                 if not ws_url:
                     failure_stage = failure_stage or "target_select"
                     capture["failureStage"] = failure_stage
                     capture["stageErrors"].append({"stage": failure_stage, "error": "CDP tab has no webSocketDebuggerUrl"})
                 else:
-                    trace.append(f"wait_result:start seconds={args.page_wait}")
-                    await asyncio.sleep(min(args.page_wait, 5))
-                    trace.append("wait_result:ok")
-                    capture, eval_failure_stage = await _capture_structured_artifacts(ws_url, url, trace)
+                    trace.append(f"screenshot_initial:start")
+                    screenshot_initial = await _capture_screenshot(ws_url)
+                    trace.append("screenshot_initial:ok" if screenshot_initial else "screenshot_initial:empty")
+
+                    trace.append(f"wait_for_result_state:start timeout={args.page_wait}")
+                    page_state, state_timeline = await wait_for_result_state(ws_url, args.page_wait)
+                    trace.append(f"wait_for_result_state:ok state={_classify_page_state(page_state)}")
+
+                    trace.append("artifact_capture:start")
+                    capture, eval_failure_stage, _ = await _capture_structured_artifacts(ws_url, url, trace)
                     failure_stage = failure_stage or eval_failure_stage
+
+                    if page_state is None:
+                        page_state = capture.get("pageState")
+
+                    nav_expr = _navigation_trace_expression(url)
+                    try:
+                        navigation_trace = await _safe_eval(ws_url, "nav_trace", nav_expr)
+                        if not isinstance(navigation_trace, dict):
+                            navigation_trace = None
+                    except CdpStageError:
+                        navigation_trace = None
+
+                    trace.append("screenshot_final:start")
+                    screenshot_final = await _capture_screenshot(ws_url)
+                    trace.append("screenshot_final:ok" if screenshot_final else "screenshot_final:empty")
 
                 source_url = str(capture.get("url") or url)
                 evidences = []
@@ -458,19 +692,20 @@ async def compare_via_cdp_structured(
                 result.decision_trace[:0] = trace
                 result.final_quote.fetch_metadata["decision_trace"] = result.decision_trace
                 quote = result.final_quote
+                failure_reason = _classify_failure_reason(failure_stage, page_state, capture, result)
                 if failure_stage and quote.price is None:
-                    quote.error = f"CDP structured failed at {failure_stage}"
-                    quote.status = f"cdp_structured_{failure_stage}_failed"
+                    quote.error = f"CDP structured failed at {failure_stage}: {failure_reason}"
+                    quote.status = f"cdp_structured_{failure_reason}_failed"
                 quote.extract_attempt_count = 1
                 quote.progressive_wait_used = args.page_wait
                 quote.fetch_metadata["elapsed_ms"] = int((time.monotonic() - started) * 1000)
                 quote.fetch_metadata["failure_stage"] = failure_stage
+                quote.fetch_metadata["failure_reason"] = failure_reason
                 quote.fetch_metadata["stage_errors"] = capture.get("stageErrors", [])
+                quote.fetch_metadata["page_state"] = page_state
+                quote.fetch_metadata["navigation_trace"] = navigation_trace
                 needs_artifacts = quote.price is None or result.conflict_reason is not None or failure_stage is not None
                 if needs_artifacts:
-                    trace.append("screenshot_capture:start")
-                    screenshot_png = await _capture_screenshot(ws_url) if ws_url else None
-                    trace.append("screenshot_capture:ok" if screenshot_png else "screenshot_capture:empty")
                     diagnostic_dir = _write_diagnostics(
                         args=args,
                         region=region,
@@ -479,8 +714,12 @@ async def compare_via_cdp_structured(
                         network_candidates=network_candidates,
                         enriched_network_candidates=enriched_network_candidates,
                         enriched_hydration_candidates=enriched_hydration_candidates,
-                        screenshot_png=screenshot_png,
+                        screenshot_initial=screenshot_initial,
+                        screenshot_final=screenshot_final,
                         failure_stage=failure_stage,
+                        page_state=page_state,
+                        navigation_trace=navigation_trace,
+                        state_timeline=state_timeline,
                     )
                     quote.debug_log_path = str(Path(diagnostic_dir) / "final_decision.json")
                     if quote.price is None and persist_failure_log is not None:
@@ -489,7 +728,7 @@ async def compare_via_cdp_structured(
                             transport="cdp_structured",
                             route_key=_route_key(args),
                             page_text=str(capture.get("pageText") or ""),
-                            extra={"diagnostic_dir": diagnostic_dir, "failure_stage": failure_stage},
+                            extra={"diagnostic_dir": diagnostic_dir, "failure_stage": failure_stage, "failure_reason": failure_reason},
                         )
                 quotes.append(quote)
         finally:
