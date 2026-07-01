@@ -9,9 +9,9 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import AsyncMock, patch
 
-from skyscanner_models import FlightQuote
+from skyscanner_multi_domain.models import FlightQuote
 from skyscanner_neo import run_page_scan
-from scan_history import ScanHistoryStore
+from skyscanner_multi_domain.scan.history import ScanHistoryStore
 
 
 class RunPageScanFallbackTests(unittest.TestCase):
@@ -29,15 +29,15 @@ class RunPageScanFallbackTests(unittest.TestCase):
         async def run_case() -> None:
             with (
                 patch(
-                    "transport_opencli.compare_via_opencli",
+                    "skyscanner_multi_domain.transports.opencli.compare_via_opencli",
                     new=AsyncMock(return_value=opencli_quotes),
                 ) as opencli_mock,
                 patch(
-                    "transport_scrapling.compare_via_scrapling",
+                    "skyscanner_multi_domain.transports.scrapling.compare_via_scrapling",
                     new=AsyncMock(return_value=[]),
                 ) as scrapling_mock,
                 patch(
-                    "transport_cdp.compare_via_pages",
+                    "skyscanner_multi_domain.transports.cdp.compare_via_pages",
                     new=AsyncMock(return_value=[]),
                 ) as page_mock,
             ):
@@ -97,22 +97,22 @@ class RunPageScanFallbackTests(unittest.TestCase):
         async def run_case() -> None:
             with (
                 patch(
-                    "transport_opencli.compare_via_opencli",
+                    "skyscanner_multi_domain.transports.opencli.compare_via_opencli",
                     new=AsyncMock(return_value=opencli_quotes),
                 ) as opencli_mock,
                 patch(
-                    "transport_cdp.compare_via_pages",
+                    "skyscanner_multi_domain.transports.cdp.compare_via_pages",
                     new=AsyncMock(return_value=page_quotes),
                 ) as page_mock,
                 patch(
-                    "transport_scrapling.compare_via_scrapling",
+                    "skyscanner_multi_domain.transports.scrapling.compare_via_scrapling",
                     new=AsyncMock(return_value=scrapling_quotes),
                 ) as scrapling_mock,
                 patch(
-                    "transport_cdp.detect_cdp_version",
+                    "skyscanner_multi_domain.transports.cdp.detect_cdp_version",
                     return_value={"Browser": "Edg/146.0.3856.97"},
                 ),
-                patch("transport_cdp.ensure_cdp_ready") as ensure_cdp_ready_mock,
+                patch("skyscanner_multi_domain.transports.cdp.ensure_cdp_ready") as ensure_cdp_ready_mock,
             ):
                 quotes = await run_page_scan(
                     origin="BJSA", destination="ALA",
@@ -175,15 +175,15 @@ class RunPageScanFallbackTests(unittest.TestCase):
         async def run_case() -> None:
             with (
                 patch(
-                    "transport_scrapling.compare_via_scrapling",
+                    "skyscanner_multi_domain.transports.scrapling.compare_via_scrapling",
                     new=AsyncMock(side_effect=scrapling_side_effect),
                 ) as scrapling_mock,
                 patch(
-                    "transport_cdp.compare_via_pages",
+                    "skyscanner_multi_domain.transports.cdp.compare_via_pages",
                     new=AsyncMock(return_value=[]),
                 ) as page_mock,
-                patch("transport_cdp.detect_cdp_version", return_value=None),
-                patch("transport_cdp.ensure_cdp_ready") as ensure_cdp_ready_mock,
+                patch("skyscanner_multi_domain.transports.cdp.detect_cdp_version", return_value=None),
+                patch("skyscanner_multi_domain.transports.cdp.ensure_cdp_ready") as ensure_cdp_ready_mock,
             ):
                 quotes = await run_page_scan(
                     origin="BJSA", destination="ALA",
@@ -231,18 +231,18 @@ class RunPageScanFallbackTests(unittest.TestCase):
         async def run_case() -> None:
             with (
                 patch(
-                    "transport_scrapling.compare_via_scrapling",
+                    "skyscanner_multi_domain.transports.scrapling.compare_via_scrapling",
                     new=AsyncMock(return_value=scrapling_quotes),
                 ) as scrapling_mock,
                 patch(
-                    "transport_cdp.compare_via_pages",
+                    "skyscanner_multi_domain.transports.cdp.compare_via_pages",
                     new=AsyncMock(return_value=page_fallback_quotes),
                 ) as page_mock,
                 patch(
-                    "transport_cdp.detect_cdp_version",
+                    "skyscanner_multi_domain.transports.cdp.detect_cdp_version",
                     return_value={"Browser": "Edg/146.0.3856.97"},
                 ),
-                patch("transport_cdp.ensure_cdp_ready") as ensure_cdp_ready_mock,
+                patch("skyscanner_multi_domain.transports.cdp.ensure_cdp_ready") as ensure_cdp_ready_mock,
             ):
                 quotes = await run_page_scan(
                     origin="BJSA", destination="ALA",
@@ -290,15 +290,15 @@ class RunPageScanFallbackTests(unittest.TestCase):
         async def run_case() -> None:
             with (
                 patch(
-                    "transport_scrapling.compare_via_scrapling",
+                    "skyscanner_multi_domain.transports.scrapling.compare_via_scrapling",
                     new=AsyncMock(return_value=scrapling_quotes),
                 ),
                 patch(
-                    "transport_cdp.compare_via_pages",
+                    "skyscanner_multi_domain.transports.cdp.compare_via_pages",
                     new=AsyncMock(return_value=page_fallback_quotes),
                 ) as page_mock,
-                patch("transport_cdp.detect_cdp_version", return_value=None),
-                patch("transport_cdp.ensure_cdp_ready") as ensure_cdp_ready_mock,
+                patch("skyscanner_multi_domain.transports.cdp.detect_cdp_version", return_value=None),
+                patch("skyscanner_multi_domain.transports.cdp.ensure_cdp_ready") as ensure_cdp_ready_mock,
             ):
                 quotes = await run_page_scan(
                     origin="BJSA", destination="ALA",
@@ -316,7 +316,7 @@ class RunPageScanFallbackTests(unittest.TestCase):
     def test_run_page_scan_passes_return_date_to_transport(self) -> None:
         async def run_case() -> None:
             with patch(
-                "transport_scrapling.compare_via_scrapling",
+                "skyscanner_multi_domain.transports.scrapling.compare_via_scrapling",
                 new=AsyncMock(return_value=[]),
             ) as scrapling_mock:
                 quotes = await run_page_scan(
@@ -334,7 +334,7 @@ class RunPageScanFallbackTests(unittest.TestCase):
     def test_run_page_scan_filters_selected_regions_and_forwards_concurrency(self) -> None:
         async def run_case() -> None:
             with patch(
-                "transport_scrapling.compare_via_scrapling",
+                "skyscanner_multi_domain.transports.scrapling.compare_via_scrapling",
                 new=AsyncMock(return_value=[]),
             ) as scrapling_mock:
                 quotes = await run_page_scan(
@@ -427,10 +427,10 @@ class RunPageScanFallbackTests(unittest.TestCase):
 
                 with (
                     patch(
-                        "transport_scrapling.compare_via_scrapling",
+                        "skyscanner_multi_domain.transports.scrapling.compare_via_scrapling",
                         new=AsyncMock(return_value=live_quotes),
                     ),
-                    patch("transport_cdp.compare_via_pages", new=AsyncMock(return_value=[])),
+                    patch("skyscanner_multi_domain.transports.cdp.compare_via_pages", new=AsyncMock(return_value=[])),
                 ):
                     quotes = await run_page_scan(
                         origin="BJSA", destination="ALA",
@@ -493,11 +493,11 @@ class RunPageScanFallbackTests(unittest.TestCase):
 
             with (
                 patch(
-                    "transport_scrapling.compare_via_scrapling",
+                    "skyscanner_multi_domain.transports.scrapling.compare_via_scrapling",
                     new=AsyncMock(side_effect=compare_side_effect),
                 ) as scrapling_mock,
-                patch("transport_cdp.compare_via_pages", new=AsyncMock(return_value=[])) as page_mock,
-                patch("transport_cdp.ensure_cdp_ready") as ensure_cdp_ready_mock,
+                patch("skyscanner_multi_domain.transports.cdp.compare_via_pages", new=AsyncMock(return_value=[])) as page_mock,
+                patch("skyscanner_multi_domain.transports.cdp.ensure_cdp_ready") as ensure_cdp_ready_mock,
             ):
                 quotes = await run_page_scan(
                     origin="BJSA", destination="ALA",

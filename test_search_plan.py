@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from location_resolver import LocationRecord
-from search_plan import (
+from skyscanner_multi_domain.geo.location_resolver import LocationRecord
+from skyscanner_multi_domain.planning.search_plan import (
     TripIntent,
     build_date_candidates,
     build_market_candidates,
@@ -13,9 +13,9 @@ from search_plan import (
     render_search_plan,
     scan_batch_region_codes,
 )
-from scan_history import build_plan_telemetry
-from scan_orchestrator import quotes_to_dicts
-from skyscanner_models import FlightQuote
+from skyscanner_multi_domain.scan.history import build_plan_telemetry
+from skyscanner_multi_domain.scan.orchestrator import quotes_to_dicts
+from skyscanner_multi_domain.models import FlightQuote
 
 
 def test_build_date_candidates_orders_anchor_edges_nearby_remaining() -> None:

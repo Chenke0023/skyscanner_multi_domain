@@ -4,7 +4,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
-import app_paths
+from skyscanner_multi_domain.runtime import paths as app_paths
 
 
 def test_runtime_root_defaults_to_source_root_when_not_frozen() -> None:

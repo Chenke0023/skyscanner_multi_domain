@@ -8,8 +8,8 @@ import types
 import unittest
 from unittest.mock import patch
 
-from transport_scrapling import compare_via_scrapling
-from skyscanner_models import RegionConfig
+from skyscanner_multi_domain.transports.scrapling import compare_via_scrapling
+from skyscanner_multi_domain.models import RegionConfig
 
 
 class FullPricePage:
@@ -53,13 +53,13 @@ class ScraplingTraceTests(unittest.TestCase):
                     "scrapling": fake_scrapling,
                     "captcha_solver": fake_captcha_solver,
                 }),
-                patch("transport_scrapling._probe_existing_cdp_page", return_value=None),
-                patch("transport_scrapling._probe_page_with_playwright", return_value=None),
+                patch("skyscanner_multi_domain.transports.scrapling._probe_existing_cdp_page", return_value=None),
+                patch("skyscanner_multi_domain.transports.scrapling._probe_page_with_playwright", return_value=None),
                 patch(
-                    "transport_scrapling._resolve_scrapling_state_overrides",
+                    "skyscanner_multi_domain.transports.scrapling._resolve_scrapling_state_overrides",
                     return_value={"cookies": {"_px3": "token"}},
                 ),
-                patch("transport_scrapling.emit_trace", side_effect=lambda **k: traces.append(k)),
+                patch("skyscanner_multi_domain.transports.scrapling.emit_trace", side_effect=lambda **k: traces.append(k)),
             ):
                 await compare_via_scrapling(
                     args, [region],
@@ -113,13 +113,13 @@ class ScraplingTraceTests(unittest.TestCase):
                     "scrapling": fake_scrapling,
                     "captcha_solver": fake_captcha_solver,
                 }),
-                patch("transport_scrapling._probe_existing_cdp_page", return_value=None),
-                patch("transport_scrapling._probe_page_with_playwright", return_value=None),
+                patch("skyscanner_multi_domain.transports.scrapling._probe_existing_cdp_page", return_value=None),
+                patch("skyscanner_multi_domain.transports.scrapling._probe_page_with_playwright", return_value=None),
                 patch(
-                    "transport_scrapling._resolve_scrapling_state_overrides",
+                    "skyscanner_multi_domain.transports.scrapling._resolve_scrapling_state_overrides",
                     return_value={"user_data_dir": "/tmp/edge-profile"},
                 ),
-                patch("transport_scrapling.emit_trace", side_effect=lambda **k: traces.append(k)),
+                patch("skyscanner_multi_domain.transports.scrapling.emit_trace", side_effect=lambda **k: traces.append(k)),
             ):
                 await compare_via_scrapling(
                     args, [region],
@@ -177,10 +177,10 @@ class ScraplingTraceTests(unittest.TestCase):
                     "scrapling": fake_scrapling,
                     "captcha_solver": fake_captcha_solver,
                 }),
-                patch("transport_scrapling._probe_existing_cdp_page", return_value=None),
-                patch("transport_scrapling._probe_page_with_playwright", return_value=None),
-                patch("transport_scrapling._resolve_scrapling_state_overrides", return_value={}),
-                patch("transport_scrapling.emit_trace", side_effect=lambda **k: traces.append(k)),
+                patch("skyscanner_multi_domain.transports.scrapling._probe_existing_cdp_page", return_value=None),
+                patch("skyscanner_multi_domain.transports.scrapling._probe_page_with_playwright", return_value=None),
+                patch("skyscanner_multi_domain.transports.scrapling._resolve_scrapling_state_overrides", return_value={}),
+                patch("skyscanner_multi_domain.transports.scrapling.emit_trace", side_effect=lambda **k: traces.append(k)),
             ):
                 await compare_via_scrapling(
                     args, [region],
@@ -237,10 +237,10 @@ class ScraplingTraceTests(unittest.TestCase):
                     "scrapling": fake_scrapling,
                     "captcha_solver": fake_captcha_solver,
                 }),
-                patch("transport_scrapling._probe_existing_cdp_page", return_value=None),
-                patch("transport_scrapling._probe_page_with_playwright", return_value=None),
-                patch("transport_scrapling._resolve_scrapling_state_overrides", return_value={}),
-                patch("transport_scrapling.emit_trace", side_effect=lambda **k: traces.append(k)),
+                patch("skyscanner_multi_domain.transports.scrapling._probe_existing_cdp_page", return_value=None),
+                patch("skyscanner_multi_domain.transports.scrapling._probe_page_with_playwright", return_value=None),
+                patch("skyscanner_multi_domain.transports.scrapling._resolve_scrapling_state_overrides", return_value={}),
+                patch("skyscanner_multi_domain.transports.scrapling.emit_trace", side_effect=lambda **k: traces.append(k)),
             ):
                 await compare_via_scrapling(
                     args, [region],

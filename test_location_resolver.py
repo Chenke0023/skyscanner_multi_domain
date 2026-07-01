@@ -1,6 +1,6 @@
 import unittest
 
-from location_resolver import LocationResolver, load_location_mappings
+from skyscanner_multi_domain.geo.location_resolver import LocationResolver, load_location_mappings
 
 
 class LocationResolverTests(unittest.TestCase):

@@ -8,14 +8,14 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
-from transport_scrapling import (
+from skyscanner_multi_domain.transports.scrapling import (
     _build_cookie_scope_urls,
     _get_persistent_probe_candidates,
     _get_matching_cdp_page_ws_urls,
     _resolve_scrapling_state_overrides,
     _state_usage,
 )
-from skyscanner_models import RegionConfig
+from skyscanner_multi_domain.models import RegionConfig
 
 
 class PersistentProbeCandidatesTests(unittest.TestCase):
@@ -40,14 +40,14 @@ class PersistentProbeCandidatesTests(unittest.TestCase):
 
             with (
                 patch(
-                    "transport_scrapling._detect_local_browsers",
+                    "skyscanner_multi_domain.transports.scrapling._detect_local_browsers",
                     return_value={
                         "edge": edge_binary,
                         "chrome": chrome_binary,
                     },
                 ),
                 patch(
-                    "transport_scrapling.get_browser_profile_dir",
+                    "skyscanner_multi_domain.transports.scrapling.get_browser_profile_dir",
                     side_effect=fake_get_browser_profile_dir,
                 ),
             ):
@@ -87,14 +87,14 @@ class StateOverridesTests(unittest.TestCase):
         async def run_case() -> None:
             with (
                 patch(
-                    "transport_scrapling._cdp_get_cookie_jar",
+                    "skyscanner_multi_domain.transports.scrapling._cdp_get_cookie_jar",
                     return_value=[
                         {"name": "_px3", "value": "token", "domain": "www.skyscanner.com.hk"},
                         {"name": "scanner", "value": "abc", "domain": "www.skyscanner.com.hk"},
                     ],
                 ),
                 patch(
-                    "transport_scrapling._get_persistent_profile_dirs",
+                    "skyscanner_multi_domain.transports.scrapling._get_persistent_profile_dirs",
                     return_value=(Path("/tmp/edge-cdp-profile"),),
                 ),
             ):
@@ -126,14 +126,14 @@ class StateOverridesTests(unittest.TestCase):
         async def run_case() -> None:
             with (
                 patch(
-                    "transport_scrapling._cdp_get_cookie_jar",
+                    "skyscanner_multi_domain.transports.scrapling._cdp_get_cookie_jar",
                     return_value=[
                         {"name": "_px3", "value": "token"},
                         {"name": "scanner", "value": "abc"},
                     ],
                 ),
                 patch(
-                    "transport_scrapling._get_persistent_profile_dirs",
+                    "skyscanner_multi_domain.transports.scrapling._get_persistent_profile_dirs",
                     return_value=(Path("/tmp/edge-cdp-profile"),),
                 ),
             ):
@@ -160,11 +160,11 @@ class StateOverridesTests(unittest.TestCase):
         async def run_case() -> None:
             with (
                 patch(
-                    "transport_scrapling._cdp_get_cookie_jar",
+                    "skyscanner_multi_domain.transports.scrapling._cdp_get_cookie_jar",
                     return_value=[],
                 ),
                 patch(
-                    "transport_scrapling._get_persistent_profile_dirs",
+                    "skyscanner_multi_domain.transports.scrapling._get_persistent_profile_dirs",
                     return_value=(Path("/tmp/edge-cdp-profile"),),
                 ),
             ):
@@ -208,7 +208,7 @@ class CDPProbeTests(unittest.TestCase):
             },
         ]
 
-        with patch("transport_scrapling._cdp_get_json", return_value=tabs):
+        with patch("skyscanner_multi_domain.transports.scrapling._cdp_get_json", return_value=tabs):
             ws_urls = _get_matching_cdp_page_ws_urls(
                 region,
                 "https://www.skyscanner.cn/transport/flights/bjsa/ala/260429/?adultsv2=1",

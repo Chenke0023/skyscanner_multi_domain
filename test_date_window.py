@@ -1,6 +1,6 @@
 import unittest
 
-from date_window import (
+from skyscanner_multi_domain.planning.date_window import (
     build_date_window,
     build_round_trip_date_window,
     format_trip_date_label,

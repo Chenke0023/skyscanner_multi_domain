@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from scan_history import (
+from skyscanner_multi_domain.scan.history import (
     ScanHistoryStore,
     build_delta_summary_lines,
     build_fetch_quality_telemetry,

@@ -4,7 +4,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from desktop_ui_service import DesktopUIService
-from scan_history import ScanHistoryStore
+from skyscanner_multi_domain.scan.history import ScanHistoryStore
 
 
 def build_service(tmp_path: Path) -> DesktopUIService:

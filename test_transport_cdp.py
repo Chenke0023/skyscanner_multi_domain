@@ -5,8 +5,8 @@ import asyncio
 import json
 from unittest.mock import MagicMock, patch
 
-from skyscanner_models import RegionConfig
-from transport_cdp import (
+from skyscanner_multi_domain.models import RegionConfig
+from skyscanner_multi_domain.transports.cdp import (
     _get_matching_cdp_tabs,
     _verify_browser_session_persistence_async,
     _quote_from_cdp_payload,
@@ -33,7 +33,7 @@ def test_detect_cdp_version_accepts_first_valid_browser_payload() -> None:
         [(200, json.dumps({"Browser": "Edg/146.0.3856.84", "Protocol-Version": "1.3"}))]
     )
 
-    with patch("transport_cdp.http.client.HTTPConnection", return_value=localhost):
+    with patch("skyscanner_multi_domain.transports.cdp.http.client.HTTPConnection", return_value=localhost):
         info = detect_cdp_version()
 
     assert info is not None
@@ -48,7 +48,7 @@ def test_detect_cdp_version_skips_404_and_tries_next_host() -> None:
     loopback_v4 = _build_connection([(404, "")])
 
     with patch(
-        "transport_cdp.http.client.HTTPConnection",
+        "skyscanner_multi_domain.transports.cdp.http.client.HTTPConnection",
         side_effect=[localhost, loopback_v6, loopback_v4],
     ):
         info = detect_cdp_version()
@@ -150,26 +150,26 @@ def test_compare_via_pages_recovers_from_stale_tab_id() -> None:
         async def __aexit__(self, exc_type, exc, tb):
             return None
 
-    from transport_cdp import TabNotFoundError
+    from skyscanner_multi_domain.transports.cdp import TabNotFoundError
 
     async def run_case() -> None:
         with (
-            patch("transport_cdp.aiohttp.ClientSession", return_value=FakeSession()),
-            patch("transport_cdp.cdp_list_tabs", return_value=[fresh_tab]),
+            patch("skyscanner_multi_domain.transports.cdp.aiohttp.ClientSession", return_value=FakeSession()),
+            patch("skyscanner_multi_domain.transports.cdp.cdp_list_tabs", return_value=[fresh_tab]),
             patch(
-                "transport_cdp.cdp_navigate_tab",
+                "skyscanner_multi_domain.transports.cdp.cdp_navigate_tab",
                 side_effect=TabNotFoundError("Tab STALE not found"),
             ) as mock_navigate,
-            patch("transport_cdp.cdp_open_tab", return_value=fresh_tab) as mock_open,
-            patch("transport_cdp.cdp_close_tab"),
+            patch("skyscanner_multi_domain.transports.cdp.cdp_open_tab", return_value=fresh_tab) as mock_open,
+            patch("skyscanner_multi_domain.transports.cdp.cdp_close_tab"),
             patch(
-                "transport_cdp.cdp_eval",
+                "skyscanner_multi_domain.transports.cdp.cdp_eval",
                 return_value={
                     "url": target_url,
                     "text": "最優\nHK$3,305\n最便宜\nHK$3,072",
                 },
             ),
-            patch("transport_cdp.emit_trace", lambda **k: None),
+            patch("skyscanner_multi_domain.transports.cdp.emit_trace", lambda **k: None),
         ):
             quotes = await compare_via_pages(
                 args,
@@ -221,18 +221,18 @@ def test_compare_via_pages_creates_owned_tabs_and_closes_them() -> None:
 
     async def run_case() -> None:
         with (
-            patch("transport_cdp.aiohttp.ClientSession", return_value=FakeSession()),
-            patch("transport_cdp.cdp_list_tabs", return_value=[new_tab]),
-            patch("transport_cdp.cdp_open_tab", return_value=new_tab) as mock_open,
-            patch("transport_cdp.cdp_close_tab") as mock_close,
+            patch("skyscanner_multi_domain.transports.cdp.aiohttp.ClientSession", return_value=FakeSession()),
+            patch("skyscanner_multi_domain.transports.cdp.cdp_list_tabs", return_value=[new_tab]),
+            patch("skyscanner_multi_domain.transports.cdp.cdp_open_tab", return_value=new_tab) as mock_open,
+            patch("skyscanner_multi_domain.transports.cdp.cdp_close_tab") as mock_close,
             patch(
-                "transport_cdp.cdp_eval",
+                "skyscanner_multi_domain.transports.cdp.cdp_eval",
                 return_value={
                     "url": target_url,
                     "text": "最優\nHK$3,305\n最便宜\nHK$3,072",
                 },
             ),
-            patch("transport_cdp.emit_trace", lambda **k: None),
+            patch("skyscanner_multi_domain.transports.cdp.emit_trace", lambda **k: None),
         ):
             quotes = await compare_via_pages(
                 args,
@@ -256,12 +256,12 @@ def test_launch_browser_with_cdp_restarts_running_comet() -> None:
 
     with (
         patch(
-            "transport_cdp._select_browser_launch_target",
+            "skyscanner_multi_domain.transports.cdp._select_browser_launch_target",
             return_value=("comet", MagicMock(), MagicMock()),
         ),
-        patch("transport_cdp._comet_is_running", return_value=True),
-        patch("transport_cdp._kill_comet") as kill_comet,
-        patch("transport_cdp.subprocess.Popen", return_value=fake_process),
+        patch("skyscanner_multi_domain.transports.cdp._comet_is_running", return_value=True),
+        patch("skyscanner_multi_domain.transports.cdp._kill_comet") as kill_comet,
+        patch("skyscanner_multi_domain.transports.cdp.subprocess.Popen", return_value=fake_process),
     ):
         message = launch_browser_with_cdp(preferred_browser="comet")
 
@@ -299,23 +299,23 @@ def test_verify_browser_session_persistence_async_restarts_browser_and_confirms_
 
         with (
             patch(
-                "transport_cdp._launch_browser_process",
+                "skyscanner_multi_domain.transports.cdp._launch_browser_process",
                 side_effect=[first_process, second_process],
             ),
             patch(
-                "transport_cdp.wait_for_cdp",
+                "skyscanner_multi_domain.transports.cdp.wait_for_cdp",
                 return_value={"Browser": "Edg/146.0"},
             ),
-            patch("transport_cdp.wait_for_cdp_shutdown", return_value=True),
-            patch("transport_cdp._terminate_browser_process") as terminate_process,
-            patch("transport_cdp.aiohttp.ClientSession", return_value=FakeSession()),
-            patch("transport_cdp.cdp_navigate_tab"),
+            patch("skyscanner_multi_domain.transports.cdp.wait_for_cdp_shutdown", return_value=True),
+            patch("skyscanner_multi_domain.transports.cdp._terminate_browser_process") as terminate_process,
+            patch("skyscanner_multi_domain.transports.cdp.aiohttp.ClientSession", return_value=FakeSession()),
+            patch("skyscanner_multi_domain.transports.cdp.cdp_navigate_tab"),
             patch(
-                "transport_cdp._wait_for_page_tab",
+                "skyscanner_multi_domain.transports.cdp._wait_for_page_tab",
                 side_effect=[tab, tab, tab, tab],
             ),
             patch(
-                "transport_cdp.cdp_eval",
+                "skyscanner_multi_domain.transports.cdp.cdp_eval",
                 side_effect=[
                     "skyscanner_probe_session=token-123",
                     "skyscanner_probe_session=token-123",
