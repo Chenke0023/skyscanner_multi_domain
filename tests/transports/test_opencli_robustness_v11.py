@@ -2,9 +2,9 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-from unittest.mock import MagicMock, patch
+from typing import Any
+from unittest.mock import patch
 
-import pytest
 
 from skyscanner_multi_domain.models import RegionConfig, FlightQuote
 from skyscanner_multi_domain.scan.fetch_types import FetchAttempt
@@ -246,8 +246,6 @@ def test_opencli_time_budget_enforcement() -> None:
         from skyscanner_multi_domain.transports.opencli import (
             OpenCLIDomainScheduler, OpenCLITabSession,
         )
-        import argparse
-        import time
 
         args = argparse.Namespace(
             origin="BJS", destination="ALA", date="2026-05-20",
@@ -319,7 +317,6 @@ def test_wait_policy_wired_into_compare_via_opencli() -> None:
     and pass them to OpenCLIDomainScheduler."""
     async def run_test():
         from skyscanner_multi_domain.transports.opencli import compare_via_opencli, OpenCLIDomainScheduler
-        import argparse
 
         args = argparse.Namespace(
             origin="BJS", destination="ALA", date="2026-05-20",
@@ -383,7 +380,6 @@ def test_wait_policy_real_regions_hit_slow_domain_policy() -> None:
             compare_via_opencli, OpenCLIDomainScheduler, OpenCLITabSession,
         )
         from skyscanner_multi_domain.geo.regions import REGIONS
-        import argparse
 
         args = argparse.Namespace(
             origin="BJS", destination="ALA", date="2026-05-20",
@@ -507,7 +503,7 @@ def test_captcha_solver_client_backward_compatible() -> None:
     import asyncio as _asyncio
 
     async def run_test():
-        from captcha_solver import CaptchaSolverClient, BaseCaptchaSolver
+        from captcha_solver import CaptchaSolverClient
 
         # Old-style instantiation
         client = CaptchaSolverClient(
@@ -628,7 +624,6 @@ def test_scheduler_uses_wait_policy_extract_wait_steps() -> None:
         from skyscanner_multi_domain.transports.opencli import (
             OpenCLIDomainScheduler, OpenCLITabSession,
         )
-        import argparse
 
         args = argparse.Namespace(
             origin="BJS", destination="ALA", date="2026-05-20",
@@ -694,7 +689,6 @@ def test_scheduler_uses_wait_policy_max_region_time() -> None:
         from skyscanner_multi_domain.transports.opencli import (
             OpenCLIDomainScheduler, OpenCLITabSession,
         )
-        import argparse
 
         args = argparse.Namespace(
             origin="BJS", destination="ALA", date="2026-05-20",
@@ -1191,7 +1185,7 @@ def test_orchestrator_semantic_mismatch_triggers_cdp_not_scrapling() -> None:
     import asyncio
     from unittest.mock import AsyncMock, patch
     from skyscanner_multi_domain.scan.orchestrator import run_page_scan
-    from skyscanner_multi_domain.models import RegionConfig, FlightQuote
+    from skyscanner_multi_domain.models import FlightQuote
 
     async def run_test():
         # opencli returns semantic mismatch (has price but wrong route/currency)
@@ -1242,7 +1236,7 @@ def test_orchestrator_opencli_cdp_scrapling_full_fallback_chain() -> None:
     import asyncio
     from unittest.mock import AsyncMock, patch
     from skyscanner_multi_domain.scan.orchestrator import run_page_scan
-    from skyscanner_multi_domain.models import RegionConfig, FlightQuote
+    from skyscanner_multi_domain.models import FlightQuote
 
     async def run_test():
         opencli_quote = FlightQuote(
@@ -1311,7 +1305,7 @@ def test_orchestrator_confidence_gating_triggers_cdp_fallback() -> None:
     import asyncio
     from unittest.mock import AsyncMock, patch
     from skyscanner_multi_domain.scan.orchestrator import run_page_scan
-    from skyscanner_multi_domain.models import RegionConfig, FlightQuote
+    from skyscanner_multi_domain.models import FlightQuote
 
     async def run_test():
         opencli_quote = FlightQuote(
@@ -1367,7 +1361,7 @@ def test_orchestrator_confidence_gating_accepts_when_sufficient() -> None:
     import asyncio
     from unittest.mock import AsyncMock, patch
     from skyscanner_multi_domain.scan.orchestrator import run_page_scan
-    from skyscanner_multi_domain.models import RegionConfig, FlightQuote
+    from skyscanner_multi_domain.models import FlightQuote
 
     async def run_test():
         opencli_quote = FlightQuote(
@@ -1416,7 +1410,7 @@ def test_orchestrator_semantic_mismatch_cdp_fails_scrapling_succeeds() -> None:
     import asyncio
     from unittest.mock import AsyncMock, patch
     from skyscanner_multi_domain.scan.orchestrator import run_page_scan
-    from skyscanner_multi_domain.models import RegionConfig, FlightQuote
+    from skyscanner_multi_domain.models import FlightQuote
 
     async def run_test():
         opencli_quote = FlightQuote(
@@ -1476,7 +1470,7 @@ def test_orchestrator_no_flights_terminates_chain() -> None:
     import asyncio
     from unittest.mock import AsyncMock, patch
     from skyscanner_multi_domain.scan.orchestrator import run_page_scan
-    from skyscanner_multi_domain.models import RegionConfig, FlightQuote
+    from skyscanner_multi_domain.models import FlightQuote
 
     async def run_test():
         opencli_quote = FlightQuote(
@@ -1535,7 +1529,7 @@ def test_orchestrator_dual_region_different_fallback_outcomes() -> None:
     import asyncio
     from unittest.mock import AsyncMock, patch
     from skyscanner_multi_domain.scan.orchestrator import run_page_scan
-    from skyscanner_multi_domain.models import RegionConfig, FlightQuote
+    from skyscanner_multi_domain.models import FlightQuote
 
     async def run_test():
         opencli_quotes = [

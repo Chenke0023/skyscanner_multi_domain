@@ -7,7 +7,6 @@ returns a string.  No side effects — callers decide where to print/write.
 from __future__ import annotations
 
 import json
-from dataclasses import asdict
 from typing import Any
 
 

@@ -296,10 +296,10 @@ def _hydration_scripts_expression() -> str:
 
 
 def _navigation_trace_expression(requested_url: str) -> str:
-    return f"""
-(() => {{
-  const nav = performance.getEntriesByType("navigation")[0] || {{}};
-  return {{
+    return """
+(() => {
+  const nav = performance.getEntriesByType("navigation")[0] || {};
+  return {
     final_url: location.href,
     title: document.title,
     history_length: history.length,
@@ -308,8 +308,8 @@ def _navigation_trace_expression(requested_url: str) -> str:
     redirect_count: nav.redirectCount || 0,
     load_duration_ms: Math.round(nav.duration || 0),
     dom_complete_ms: Math.round(nav.domComplete || 0),
-  }};
-}})()
+  };
+})()
 """.strip()
 
 
@@ -650,7 +650,7 @@ async def compare_via_cdp_structured(
                     capture["failureStage"] = failure_stage
                     capture["stageErrors"].append({"stage": failure_stage, "error": "CDP tab has no webSocketDebuggerUrl"})
                 else:
-                    trace.append(f"screenshot_initial:start")
+                    trace.append("screenshot_initial:start")
                     screenshot_initial = await _capture_screenshot(ws_url)
                     trace.append("screenshot_initial:ok" if screenshot_initial else "screenshot_initial:empty")
 

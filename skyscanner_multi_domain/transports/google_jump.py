@@ -12,9 +12,7 @@ from __future__ import annotations
 import asyncio
 import random
 import re
-import time
-from typing import Any, Optional
-from urllib.parse import quote, urlencode, urlparse
+from urllib.parse import quote, urlencode
 
 from skyscanner_multi_domain.models import FlightQuote, RegionConfig
 from skyscanner_multi_domain.transports.context import get_transport_context
@@ -139,7 +137,7 @@ async def _cdp_navigate_via_google(
         if isinstance(result, dict) and "result" in result:
             links = result["result"].get("value", [])
             if links and isinstance(links, list):
-                skyscanner_links = [l for l in links if isinstance(l, str) and "skyscanner" in l.lower()]
+                skyscanner_links = [link for link in links if isinstance(link, str) and "skyscanner" in link.lower()]
                 if skyscanner_links:
                     # Click through the first Skyscanner link
                     chosen = skyscanner_links[0]

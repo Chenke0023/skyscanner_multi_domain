@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import random
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import Optional
 from urllib.parse import urlparse
@@ -119,13 +120,12 @@ class TransportContext:
     ):
         self.proxy = proxy or ProxyConfig()
         self.ua_rotator = ua_rotator or UARotator(seed=42)
-        self._executor: Optional["ThreadPoolExecutor"] = None  # type: ignore[name-defined]
+        self._executor: Optional[ThreadPoolExecutor] = None
         self._max_workers = max_workers
 
     @property
-    def executor(self) -> "ThreadPoolExecutor":  # type: ignore[name-defined]
+    def executor(self) -> ThreadPoolExecutor:
         if self._executor is None:
-            from concurrent.futures import ThreadPoolExecutor
             self._executor = ThreadPoolExecutor(max_workers=self._max_workers)
         return self._executor
 

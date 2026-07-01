@@ -6,7 +6,7 @@ import argparse
 import asyncio
 import json
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Optional
 from urllib.parse import urlparse
 
@@ -132,7 +132,7 @@ async def _run_opencli_async(
         )
     except FileNotFoundError as exc:
         raise OpenCLIBinaryMissingError(
-            f"opencli binary not found in PATH"
+            "opencli binary not found in PATH"
         ) from exc
     except OSError as exc:
         raise OpenCLIBinaryMissingError(

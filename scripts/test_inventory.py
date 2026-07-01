@@ -4,8 +4,6 @@
 from __future__ import annotations
 
 import ast
-import sys
-from collections import defaultdict
 from pathlib import Path
 
 TEST_DIR = Path(__file__).parent.parent
@@ -43,7 +41,6 @@ def parse_test_file(path: Path) -> dict:
         if isinstance(node, ast.ClassDef) and node.name.endswith("Tests"):
             stats["classes"] += 1
 
-    lines_lower = src.lower()
     stats["patch_calls"] = src.count("patch(") + src.count("patch.object(") + src.count("patch.dict(")
     stats["async_calls"] = src.count("async def test_") + src.count("AsyncMock")
     stats["import_root_shim"] = (
@@ -61,8 +58,6 @@ def parse_test_file(path: Path) -> dict:
 
 
 def print_table(rows: list[dict]) -> None:
-    cols = ["file", "tests", "classes", "lines", "patch_calls", "async_calls",
-            "sys_modules", "sleep", "temp_dir"]
     header = f"{'file':<36} {'tests':>5} {'cls':>4} {'lines':>6} {'patch':>6} {'async':>5} {'sys_mod':>8} {'sleep':>6} {'td':>4}"
     print(header)
     print("-" * len(header))

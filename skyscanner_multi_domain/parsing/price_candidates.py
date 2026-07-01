@@ -186,7 +186,6 @@ def extract_embedded_price_candidates(
     expected_currency: str | None = None,
 ) -> list[PriceCandidate]:
     text = str(raw_text or "")
-    lower = text.lower()
     candidates: list[PriceCandidate] = []
     for key in PRICE_KEYS:
         for match in re.finditer(re.escape(key), text, flags=re.IGNORECASE):
@@ -199,7 +198,7 @@ def extract_embedded_price_candidates(
                 formatted = JSON_FORMATTED_RE.search(window)
                 parsed = parse_price_text(formatted.group("value")) if formatted else None
             if parsed is not None:
-                currency, amount, raw = parsed
+                currency, amount, _ = parsed
             else:
                 amount_match = JSON_AMOUNT_RE.search(window)
                 currency_match = JSON_CURRENCY_RE.search(window)
@@ -209,7 +208,6 @@ def extract_embedded_price_candidates(
                 if amount is None:
                     continue
                 currency = currency_match.group("currency").upper()
-                raw = f"{currency} {amount:g}"
             source = "script_state_price" if "__NEXT_DATA__" in window or "hydration" in lower_window else "embedded_json_price"
             candidate = PriceCandidate(
                 amount=amount,

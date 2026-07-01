@@ -1,9 +1,6 @@
 """Tests for scan_orchestrator FailureClass/Action split, WAIT_RENDER, and trace flush."""
 
-import argparse
-import asyncio
 import json
-import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -11,7 +8,6 @@ from unittest.mock import patch
 
 from skyscanner_multi_domain.scan.orchestrator import (
     FailureAction,
-    FailureClass,
     can_fallback_to_browser,
     classify_failure,
     failure_action,
@@ -397,7 +393,7 @@ class TraceFallbackChainTests(unittest.IsolatedAsyncioTestCase):
                     results.append(FlightQuote(
                         region="CN", domain=region.domain,
                         price=2200.0, currency="CNY",
-                        source_url=f"https://example.test/CN",
+                        source_url="https://example.test/CN",
                         status="ok", confidence=0.91,
                         fetch_metadata={"elapsed_ms": 2000},
                     ))

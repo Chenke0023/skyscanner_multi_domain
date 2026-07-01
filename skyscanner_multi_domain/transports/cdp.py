@@ -324,7 +324,7 @@ async def cdp_open_tab(session: aiohttp.ClientSession, url: str) -> dict[str, An
 async def cdp_close_tab(
     session: aiohttp.ClientSession, tab_id: str, *, cdp_host: str = CDP_HTTP
 ) -> None:
-    async with session.get(f"{cdp_host}/json/close/{tab_id}") as response:
+    async with session.get(f"{cdp_host}/json/close/{tab_id}"):
         return
 
 
