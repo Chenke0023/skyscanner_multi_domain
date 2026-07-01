@@ -7,7 +7,7 @@ import pytest
 
 @pytest.fixture
 def region_cn():
-    from skyscanner_models import RegionConfig
+    from skyscanner_multi_domain.models import RegionConfig
     return RegionConfig(
         code="CN", name="中国",
         domain="https://www.skyscanner.cn",
@@ -17,7 +17,7 @@ def region_cn():
 
 @pytest.fixture
 def region_hk():
-    from skyscanner_models import RegionConfig
+    from skyscanner_multi_domain.models import RegionConfig
     return RegionConfig(
         code="HK", name="香港",
         domain="https://www.skyscanner.com.hk",
@@ -27,7 +27,7 @@ def region_hk():
 
 @pytest.fixture
 def region_sg():
-    from skyscanner_models import RegionConfig
+    from skyscanner_multi_domain.models import RegionConfig
     return RegionConfig(
         code="SG", name="Singapore",
         domain="https://www.skyscanner.sg",
@@ -37,7 +37,7 @@ def region_sg():
 
 @pytest.fixture
 def region_uk():
-    from skyscanner_models import RegionConfig
+    from skyscanner_multi_domain.models import RegionConfig
     return RegionConfig(
         code="UK", name="United Kingdom",
         domain="https://www.skyscanner.co.uk",
@@ -47,7 +47,7 @@ def region_uk():
 
 @pytest.fixture
 def region_id():
-    from skyscanner_models import RegionConfig
+    from skyscanner_multi_domain.models import RegionConfig
     return RegionConfig(
         code="ID", name="Indonesia",
         domain="https://www.skyscanner.co.id",

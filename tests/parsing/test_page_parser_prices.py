@@ -10,7 +10,7 @@ from skyscanner_neo import (
     _extract_scrapling_page_text,
     extract_page_quote,
 )
-from skyscanner_page_parser import slice_page_text_for_scan
+from skyscanner_multi_domain.parsing.page_parser import slice_page_text_for_scan
 
 
 class ExtractPageQuoteTests(unittest.TestCase):

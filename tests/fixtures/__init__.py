@@ -8,7 +8,7 @@ from pathlib import Path
 # ── Region fixtures ────────────────────────────────────────────────────────────
 
 def region_cn():
-    from skyscanner_models import RegionConfig
+    from skyscanner_multi_domain.models import RegionConfig
     return RegionConfig(
         code="CN", name="中国",
         domain="https://www.skyscanner.cn",
@@ -16,7 +16,7 @@ def region_cn():
     )
 
 def region_hk():
-    from skyscanner_models import RegionConfig
+    from skyscanner_multi_domain.models import RegionConfig
     return RegionConfig(
         code="HK", name="香港",
         domain="https://www.skyscanner.com.hk",
@@ -24,7 +24,7 @@ def region_hk():
     )
 
 def region_sg():
-    from skyscanner_models import RegionConfig
+    from skyscanner_multi_domain.models import RegionConfig
     return RegionConfig(
         code="SG", name="Singapore",
         domain="https://www.skyscanner.sg",
@@ -32,7 +32,7 @@ def region_sg():
     )
 
 def region_uk():
-    from skyscanner_models import RegionConfig
+    from skyscanner_multi_domain.models import RegionConfig
     return RegionConfig(
         code="UK", name="United Kingdom",
         domain="https://www.skyscanner.co.uk",
@@ -40,7 +40,7 @@ def region_uk():
     )
 
 def region_id():
-    from skyscanner_models import RegionConfig
+    from skyscanner_multi_domain.models import RegionConfig
     return RegionConfig(
         code="ID", name="Indonesia",
         domain="https://www.skyscanner.co.id",
@@ -89,7 +89,7 @@ class EmptyPage:
 # ── Quote fixtures ──────────────────────────────────────────────────────────────
 
 def quote_success(region="CN", price=2187.0, currency="CNY", domain="https://www.skyscanner.cn"):
-    from skyscanner_models import FlightQuote
+    from skyscanner_multi_domain.models import FlightQuote
     return FlightQuote(
         region=region, domain=domain,
         price=price, currency=currency,
@@ -98,7 +98,7 @@ def quote_success(region="CN", price=2187.0, currency="CNY", domain="https://www
     )
 
 def quote_failed(region="HK", status="page_parse_failed", error="页面正文未识别到 Best/Cheapest 价格"):
-    from skyscanner_models import FlightQuote
+    from skyscanner_multi_domain.models import FlightQuote
     return FlightQuote(
         region=region,
         domain="https://www.skyscanner.com.hk",

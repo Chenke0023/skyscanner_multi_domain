@@ -9,7 +9,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from scan_orchestrator import (
+from skyscanner_multi_domain.scan.orchestrator import (
     FailureAction,
     FailureClass,
     can_fallback_to_browser,
@@ -19,7 +19,7 @@ from scan_orchestrator import (
     SCRAPLING_FALLBACK_STATUSES,
     run_page_scan,
 )
-from skyscanner_models import FlightQuote
+from skyscanner_multi_domain.models import FlightQuote
 
 
 class FailureClassTests(unittest.TestCase):
@@ -95,7 +95,7 @@ class LegacySCRAPLING_FALLBACK_STATUSESTests(unittest.TestCase):
 class AttemptTraceFlushTests(unittest.TestCase):
     def test_flush_emits_record_to_disk(self) -> None:
         """flush() writes buffered records to disk even when < 50 records."""
-        import attempt_trace
+        from skyscanner_multi_domain.diagnostics import attempt_trace
 
         with tempfile.TemporaryDirectory() as tmp:
             log_dir = Path(tmp) / "logs" / "attempts"
@@ -122,7 +122,7 @@ class AttemptTraceFlushTests(unittest.TestCase):
 
     def test_flush_noop_when_empty(self) -> None:
         """flush() with empty buffer does not raise."""
-        import attempt_trace
+        from skyscanner_multi_domain.diagnostics import attempt_trace
         attempt_trace.flush()  # should not raise
 
 

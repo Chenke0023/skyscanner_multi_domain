@@ -8,8 +8,8 @@ import types
 import unittest
 from unittest.mock import patch
 
-from transport_scrapling import compare_via_scrapling
-from skyscanner_models import RegionConfig
+from skyscanner_multi_domain.transports.scrapling import compare_via_scrapling
+from skyscanner_multi_domain.models import RegionConfig
 
 
 class ScraplingProbePriorityTests(unittest.TestCase):
@@ -27,7 +27,7 @@ class ScraplingProbePriorityTests(unittest.TestCase):
         async def run_case() -> None:
             with (
                 patch(
-                    "transport_scrapling._probe_existing_cdp_page",
+                    "skyscanner_multi_domain.transports.scrapling._probe_existing_cdp_page",
                     return_value=types.SimpleNamespace(
                         quote=types.SimpleNamespace(
                             region="HK",
@@ -42,9 +42,9 @@ class ScraplingProbePriorityTests(unittest.TestCase):
                         page_text="最優 HK$3,305 最便宜 HK$3,072",
                     ),
                 ),
-                patch("transport_scrapling._probe_page_with_playwright") as playwright_probe,
+                patch("skyscanner_multi_domain.transports.scrapling._probe_page_with_playwright") as playwright_probe,
                 patch.dict(__import__("sys").modules, {"scrapling": None}),
-                patch("transport_scrapling.emit_trace", lambda **k: None),
+                patch("skyscanner_multi_domain.transports.scrapling.emit_trace", lambda **k: None),
             ):
                 quotes = await compare_via_scrapling(
                     args, [region],
@@ -76,11 +76,11 @@ class ScraplingProbePriorityTests(unittest.TestCase):
         async def run_case() -> None:
             with (
                 patch(
-                    "transport_scrapling._probe_existing_cdp_page",
+                    "skyscanner_multi_domain.transports.scrapling._probe_existing_cdp_page",
                     return_value=None,
                 ),
                 patch(
-                    "transport_scrapling._probe_page_with_playwright",
+                    "skyscanner_multi_domain.transports.scrapling._probe_page_with_playwright",
                     return_value=types.SimpleNamespace(
                         region="SG", domain="https://www.skyscanner.sg",
                         price=None, currency="SGD",
@@ -91,7 +91,7 @@ class ScraplingProbePriorityTests(unittest.TestCase):
                     ),
                 ),
                 patch.dict(__import__("sys").modules, {"scrapling": None}),
-                patch("transport_scrapling.emit_trace", lambda **k: None),
+                patch("skyscanner_multi_domain.transports.scrapling.emit_trace", lambda **k: None),
             ):
                 quotes = await compare_via_scrapling(
                     args, [region],
@@ -123,9 +123,9 @@ class ScraplingProbePriorityTests(unittest.TestCase):
 
         async def run_case() -> None:
             with (
-                patch("transport_scrapling._probe_existing_cdp_page", return_value=None),
+                patch("skyscanner_multi_domain.transports.scrapling._probe_existing_cdp_page", return_value=None),
                 patch(
-                    "transport_scrapling._probe_page_with_playwright",
+                    "skyscanner_multi_domain.transports.scrapling._probe_page_with_playwright",
                     return_value=types.SimpleNamespace(
                         region="SG", domain="https://www.skyscanner.sg",
                         price=None, currency="SGD",
@@ -135,7 +135,7 @@ class ScraplingProbePriorityTests(unittest.TestCase):
                         page_text="Show results by\nBest\n£123",
                     ),
                 ),
-                patch("transport_scrapling.emit_trace", lambda **k: None),
+                patch("skyscanner_multi_domain.transports.scrapling.emit_trace", lambda **k: None),
             ):
                 quotes = await compare_via_scrapling(
                     args, [region],

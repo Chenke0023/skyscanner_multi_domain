@@ -6,7 +6,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from skyscanner_models import FlightQuote
+from skyscanner_multi_domain.models import FlightQuote
 from skyscanner_neo import _persist_failure_log
 
 
