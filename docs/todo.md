@@ -12,8 +12,8 @@ Todo:
 
 - Keep `test_import_boundaries.py`.
 - Keep documented package module importability checks.
-- Package modules must not import root-level compatibility shims.
-- Root shims are only for legacy imports, old tests, and mock targets.
+- Package modules must not import root-level compatibility shims (enforced via the `ROOT_SHIMS` deny-list).
+- Root-level shims have been removed; all callers import `skyscanner_multi_domain.*` directly. Do not recreate shims.
 
 Acceptance:
 
@@ -384,7 +384,7 @@ npm --prefix webui run build
 ## Do Not Do Yet
 
 - Do not dynamically prune scan tasks.
-- Do not delete root shims.
+- Do not recreate root-level compatibility shims (they are removed; `ROOT_SHIMS` deny-list enforced).
 - Do not rewrite the GUI.
 - Do not add new features to legacy Tk.
 - Do not turn this into a standalone web SaaS.

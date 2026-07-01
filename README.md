@@ -37,14 +37,13 @@
 
 - `skyscanner_neo.py` — compatibility / legacy Neo entry。保留现有 Neo CLI、replay、URL mutation 兼容能力；新逻辑不要继续写入这里，中期再拆到 package。
 - `legacy/gui.py` / `gui.py` — deprecated Tk interface。只修启动级别问题，不再增加 SearchPlan UI、历史抽屉、失败修复 UI 或视觉优化。
-- 根目录 `app_paths.py`、`attempt_trace.py`、`date_window.py`、`fx_rates.py`、`skyscanner_models.py`、`scan_orchestrator.py`、`scan_history.py`、`search_plan.py`、`transport_*.py`、`skyscanner_page_parser.py`、`location_resolver.py`、`skyscanner_regions.py` — compatibility shims。旧测试和 mock target 仍会访问这些路径，新逻辑不得写入这里。
 
-### Compatibility shim policy
+### Compatibility shims (removed)
 
-- 保留 root-level shim 至少 2 个小版本，或直到所有 tests / mock targets 迁移完成。
-- 新代码不得 import root-level shim；新测试应优先 import package path。
-- 旧测试可以继续覆盖 root-level shim，以验证兼容路径。
-- 删除 shim 前必须跑 full pytest、CLI smoke 和 desktop import smoke。
+根目录的 compatibility shims（`app_paths.py`、`attempt_trace.py`、`date_window.py`、`fx_rates.py`、`skyscanner_models.py`、`scan_orchestrator.py`、`scan_history.py`、`search_plan.py`、`transport_*.py`、`skyscanner_page_parser.py`、`location_resolver.py`、`skyscanner_regions.py`）已移除。所有调用方（测试、`legacy/gui.py`）现直接 import `skyscanner_multi_domain.*` package path。
+
+- 新代码一律 import package path，不要再创建 root-level shim。
+- `test_import_boundaries.py` 保留 `ROOT_SHIMS` 作为 deny-list，防止 package 代码重新引入这些 flat root 名字。
 
 ## Engineering Rules
 
@@ -63,7 +62,7 @@
 
 当前推荐优先使用 opencli 驱动浏览器打开结果页、抽取正文并解析 Best / Cheapest 价格；opencli 未取到价格时会先 fallback 到 `page`，仍失败时再尝试 Scrapling legacy。
 
-历史 refactor、旧分支状态和迁移细节记录在 `docs/history/2026-04-refactor-notes.md`。当前开发以本文件的 active / legacy 边界为准。
+当前开发以本文件的 active / legacy 边界为准。根目录 compatibility shims 已移除，所有调用方直接 import `skyscanner_multi_domain.*`。
 
 当前任务优先级和验收标准记录在 `docs/todo.md`。下一阶段重点是 SearchPlan batch progress、桌面 WebView 阶段展示和结果可信度，不做动态剪枝。
 

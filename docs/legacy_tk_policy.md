@@ -23,4 +23,4 @@ All new end-user product UX must go through:
 - `desktop_ui_service.py`
 - `webui/`
 
-Removal can be considered only after WebView covers required user workflows, root-level shim migration is complete, two small releases pass without Tk fixes, and full pytest plus desktop import smoke pass.
+Removal can be considered only after WebView covers required user workflows and two small releases pass without Tk fixes; run full pytest plus desktop import smoke before removal.
