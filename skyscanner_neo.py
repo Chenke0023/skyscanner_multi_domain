@@ -25,24 +25,24 @@ import subprocess
 import sys
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable, Iterable, Optional
-from urllib.parse import parse_qsl, quote, urlencode, urlparse, urlunparse
+from typing import Any, Callable, Iterable, Optional  # noqa: F401  (re-exported)
+from urllib.parse import parse_qsl, quote, urlencode, urlparse, urlunparse  # noqa: F401  (re-exported)
 
 import aiohttp
 
 from skyscanner_multi_domain.runtime.paths import PROJECT_ROOT
 from skyscanner_multi_domain.models import FlightQuote, RegionConfig
 from skyscanner_multi_domain.parsing.page_parser import (
-    PAGE_TEXT_CAPTURE_LIMIT,
-    extract_page_quote,
+    PAGE_TEXT_CAPTURE_LIMIT,  # noqa: F401  (re-exported)
+    extract_page_quote,  # noqa: F401  (re-exported)
     first_currency,
     parse_float,
 )
 from skyscanner_multi_domain.geo.regions import (
     DEFAULT_REGIONS,
     REGIONS,
-    build_effective_region_codes,
-    get_selected_regions,
+    build_effective_region_codes,  # noqa: F401  (re-exported)
+    get_selected_regions,  # noqa: F401  (re-exported)
 )
 
 # ---------------------------------------------------------------------------

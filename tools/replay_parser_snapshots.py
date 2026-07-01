@@ -11,9 +11,9 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from skyscanner_multi_domain.geo.regions import REGIONS
-from skyscanner_multi_domain.models import RegionConfig
-from skyscanner_multi_domain.parsing.page_parser import extract_page_quote
+from skyscanner_multi_domain.geo.regions import REGIONS  # noqa: E402
+from skyscanner_multi_domain.models import RegionConfig  # noqa: E402
+from skyscanner_multi_domain.parsing.page_parser import extract_page_quote  # noqa: E402
 
 
 def load_snapshots(snapshot_dir: Path) -> list[dict[str, Any]]:

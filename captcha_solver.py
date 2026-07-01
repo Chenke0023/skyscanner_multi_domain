@@ -11,12 +11,9 @@ from __future__ import annotations
 
 import asyncio
 import base64
-import hashlib
-import json
 import os
-import re
 import time
-from typing import Any, Optional
+from typing import Any
 from urllib.parse import urljoin
 
 import httpx

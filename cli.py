@@ -79,7 +79,6 @@ from skyscanner_multi_domain.scan.config import (
 from skyscanner_neo import (
     DEFAULT_REGIONS,
     NeoCli,
-    REGIONS,
     build_effective_region_codes,
     detect_cdp_version,
     print_doctor,
@@ -933,7 +932,7 @@ class SimpleCLI:
     ) -> str:
         trip_mode = "往返" if return_date else "单程"
         lines = [
-            f"# Skyscanner 比价结果",
+            "# Skyscanner 比价结果",
             "",
             f"- 航线: `{origin} -> {destination}`",
             f"- 行程: `{trip_mode}`",
@@ -1897,8 +1896,8 @@ class SimpleCLI:
 
             async def scan_pair(
                 pair_index: int,
-                origin_airport: AirportCandidate,
-                destination_airport: AirportCandidate,
+                origin_airport: LocationRecord,
+                destination_airport: LocationRecord,
             ) -> tuple[int, list[SimplifiedQuoteRow]]:
                 route_label = f"{origin_airport.code} -> {destination_airport.code}"
                 printed_stages: set[str] = set()

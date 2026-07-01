@@ -1,0 +1,34 @@
+[project]
+name = "skyscanner-multi-domain"
+version = "0.1.0"
+description = "Skyscanner multi-market flight-price scanning engine, CLI, and desktop WebView app."
+requires-python = ">=3.12"
+
+# Tooling-only pyproject. The importable package lives in ./skyscanner_multi_domain/.
+# Runtime dependencies stay declared in requirements.txt; this file configures lint + test tooling.
+
+[tool.ruff]
+target-version = "py312"
+line-length = 120
+extend-exclude = [
+    "vendor",
+    "webui",
+    "build",
+    "dist",
+    "legacy",
+    ".pytest_cache",
+    "data",
+]
+
+[tool.ruff.lint]
+# Default rule set (E4, E7, E9, F) — matches what the project already enforces.
+# E501 (line-too-long) is intentionally not enabled; the codebase uses long lines.
+select = ["E4", "E7", "E9", "F"]
+
+[tool.ruff.lint.per-file-ignores]
+# Tests may import for side-effect / patch targets and use module-level side effects.
+"tests/**" = []
+
+[tool.pytest.ini_options]
+norecursedirs = "vendor"
+python_files = "test_*.py"

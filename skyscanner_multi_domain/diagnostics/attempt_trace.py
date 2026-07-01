@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 import threading
 from datetime import datetime, timezone
-from pathlib import Path
 
 from skyscanner_multi_domain.runtime.paths import LOGS_DIR
 

@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 import argparse
 import importlib.util
-import re
 import subprocess
 import threading
 import time
@@ -35,13 +34,10 @@ from desktop_logic import (
     _build_trend_sparkline,
     _build_window_summary_text,
     _collect_startup_issues,
-    _compute_market_reliability_label,
-    _compute_stability_label,
     _decision_price_key,
     _enrich_decision_rows,
     _find_cheapest_highlight_signatures,
     _format_history_record,
-    _is_live_source_kind,
     _load_query_state,
     _normalize_query_state,
     _order_grouped_by_trip_labels,
@@ -49,7 +45,6 @@ from desktop_logic import (
     _row_signature,
     _send_desktop_notification,
     _sort_combined_rows,
-    _split_trip_label,
     _upsert_quotes_by_date,
     _upsert_rows_by_date,
     _write_query_state,
@@ -70,7 +65,6 @@ from skyscanner_multi_domain.scan.history import (
     merge_rows_by_date,
     override_quotes_source_kind,
     override_rows_source_kind,
-    prioritize_region_codes,
     source_kind_label,
     summarize_query_history,
     ScanHistoryStore,

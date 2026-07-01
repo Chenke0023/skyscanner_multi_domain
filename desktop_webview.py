@@ -235,7 +235,7 @@ def main() -> None:
         )
         bridge = None
 
-    window = webview.create_window(
+    webview.create_window(
         "Skyscanner 多市场比价",
         url=window_url,
         js_api=bridge,

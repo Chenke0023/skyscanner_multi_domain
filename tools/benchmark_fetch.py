@@ -30,14 +30,14 @@ _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
-from skyscanner_multi_domain.runtime.paths import RUNTIME_DIR
-from skyscanner_multi_domain.models import FlightQuote, RegionConfig
-from skyscanner_multi_domain.geo.location_resolver import LocationResolver, LocationRecord
-from skyscanner_multi_domain.geo.regions import (
-    REGIONS, DEFAULT_REGIONS, build_effective_region_codes,
-)
-from skyscanner_multi_domain.scan.orchestrator import build_search_url, run_page_scan
-from skyscanner_multi_domain.scan.fallback_router import build_fallback_telemetry
+from skyscanner_multi_domain.runtime.paths import RUNTIME_DIR  # noqa: E402
+from skyscanner_multi_domain.models import RegionConfig  # noqa: E402
+from skyscanner_multi_domain.geo.location_resolver import LocationResolver, LocationRecord  # noqa: E402
+from skyscanner_multi_domain.geo.regions import (  # noqa: E402
+    REGIONS, build_effective_region_codes,  # noqa: E402
+)  # noqa: E402
+from skyscanner_multi_domain.scan.orchestrator import run_page_scan  # noqa: E402
+from skyscanner_multi_domain.scan.fallback_router import build_fallback_telemetry  # noqa: E402
 
 
 def _parse_args() -> argparse.Namespace:

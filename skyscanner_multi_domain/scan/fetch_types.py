@@ -13,7 +13,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Optional
+from typing import TYPE_CHECKING, Any, Optional
+
+if TYPE_CHECKING:
+    from skyscanner_multi_domain.models import FlightQuote, RegionConfig
 
 
 # ── FetchAttempt ──────────────────────────────────────────────────────────────
@@ -292,7 +295,6 @@ def fetch_attempt_to_quote(
     This is the single place where raw page text becomes a quote.
     Transport code should NOT call extract_page_quote directly.
     """
-    from skyscanner_multi_domain.models import FlightQuote
     from skyscanner_multi_domain.parsing.page_parser import extract_page_quote
 
     url = attempt.url or fallback_url

@@ -1,7 +1,6 @@
 """Generate macOS .icns app icon for Skyscanner 多市场比价."""
 from __future__ import annotations
 
-import math
 import subprocess
 import shutil
 from pathlib import Path
@@ -74,7 +73,6 @@ def _draw_airplane(draw: ImageDraw.Draw, cx: float, cy: float, scale: float) -> 
 def _generate_icon_image(size: int) -> Image.Image:
     """Generate a single icon image at the given size."""
     img = Image.new("RGBA", (size, size), (0, 0, 0, 0))
-    mask = _rounded_rect_mask(size)
 
     # Draw gradient background
     draw = ImageDraw.Draw(img)

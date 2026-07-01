@@ -324,7 +324,6 @@ def _normalize_route_code(code: str) -> str:
 
 def _extract_route_from_text(text: str) -> tuple[Optional[str], Optional[str]]:
     """Extract origin→destination from page text. Returns (origin, destination) or (None, None)."""
-    text_lower = text.lower()
     # Look for explicit route patterns
     for match in _ROUTE_CODE_PATTERN.finditer(text):
         o, d = _normalize_route_code(match.group(1)), _normalize_route_code(match.group(2))
@@ -1071,7 +1070,6 @@ def extract_page_quote_with_diagnostics(
         )
         return attach_parser_trust_metadata(quote, diagnostics), diagnostics
 
-    best_labels = REGION_BEST_LABELS.get(region.code, ()) or BEST_LABELS
     cheapest_labels = REGION_CHEAPEST_LABELS.get(region.code, ()) or CHEAPEST_LABELS
 
     best_search = best_candidate_search_for_region(scoped_text, region)

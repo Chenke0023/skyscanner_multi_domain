@@ -3,15 +3,12 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
-import time
-from unittest.mock import MagicMock, patch, call, AsyncMock
+from unittest.mock import MagicMock, patch, AsyncMock
 
-import pytest
 
 from skyscanner_multi_domain.models import RegionConfig, FlightQuote
 from skyscanner_multi_domain.transports.opencli import (
     compare_via_opencli,
-    OpenCLITabSession,
     OpenCLICommandResult,
 )
 
@@ -147,7 +144,7 @@ def test_fallback_diagnostic_persistence_v12_1() -> None:
         from skyscanner_multi_domain.scan.orchestrator import run_page_scan
         with patch("skyscanner_multi_domain.transports.opencli.compare_via_opencli") as mock_opencli, \
              patch("skyscanner_multi_domain.transports.cdp.compare_via_pages") as mock_pages, \
-             patch("skyscanner_multi_domain.transports.scrapling.compare_via_scrapling") as mock_scrapling, \
+             patch("skyscanner_multi_domain.transports.scrapling.compare_via_scrapling"), \
              patch("skyscanner_multi_domain.transports.cdp.detect_cdp_version", return_value={"version": "1.0"}), \
              patch("skyscanner_multi_domain.transports.cdp.ensure_cdp_ready"):
             
