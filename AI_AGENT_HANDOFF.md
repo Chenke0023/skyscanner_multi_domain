@@ -12,7 +12,7 @@ The desktop WebView app is the only active end-user product path:
 3. `desktop_ui_service.py` bridges UI actions to the scan engine.
 4. Core scan modules live under `skyscanner_multi_domain/`.
 
-The CLI remains supported as a developer entry for automation, smoke tests, debugging, SearchPlan inspection, and report export. The Tk GUI and root-level shims are legacy-only.
+The CLI remains supported as a developer entry for automation, smoke tests, debugging, SearchPlan inspection, and report export. The Tk GUI is legacy-only.
 
 ## 2. Directory Map
 
@@ -49,12 +49,11 @@ Core engine:
 - `skyscanner_multi_domain/diagnostics/attempt_trace.py` — attempt trace logging
 - `skyscanner_multi_domain/pricing/fx_rates.py` — FX conversion
 
-Compatibility shims:
+Compatibility shims (removed):
 
-- Root-level `app_paths.py`, `attempt_trace.py`, `date_window.py`, `fx_rates.py`, `skyscanner_models.py`, `scan_orchestrator.py`, `scan_history.py`, `search_plan.py`, `transport_*.py`, `skyscanner_page_parser.py`, `location_resolver.py`, and `skyscanner_regions.py` re-export from the package modules.
-- Keep these shims for compatibility with old imports, tests, and mock targets; do not add new logic there.
-- New code must import package paths, not root-level shims. New tests should prefer package paths unless they explicitly verify compatibility.
-- Keep shims for at least two small versions or until all tests/mock targets are migrated. Before removing them, run full pytest, CLI smoke, and desktop import smoke.
+- The root-level shims (`app_paths.py`, `attempt_trace.py`, `date_window.py`, `fx_rates.py`, `skyscanner_models.py`, `scan_orchestrator.py`, `scan_history.py`, `search_plan.py`, `transport_*.py`, `skyscanner_page_parser.py`, `location_resolver.py`, `skyscanner_regions.py`) have been removed.
+- All callers — tests and `legacy/gui.py` — now import package paths (`skyscanner_multi_domain.*`) directly.
+- `test_import_boundaries.py` keeps a `ROOT_SHIMS` deny-list so package code never re-introduces these flat root names. Do not recreate root-level shims; new code must import package paths.
 
 Legacy:
 
@@ -63,7 +62,7 @@ Legacy:
 
 Historical notes:
 
-- Old refactor notes and branch history are in `docs/history/2026-04-refactor-notes.md`.
+- Root-level compatibility shims have been removed; see section 2.
 
 ## 3. Data Flow
 
@@ -96,7 +95,7 @@ Current SearchPlan behavior is intentionally conservative:
 
 - Do not add new user-facing features to `legacy/gui.py` or `gui.py`.
 - Follow `docs/legacy_tk_policy.md`; legacy Tk is frozen for compatibility only.
-- Do not put new core logic into root-level compatibility shims.
+- Do not recreate root-level compatibility shims; import package paths (`skyscanner_multi_domain.*`) directly.
 - Do not add new product logic to `skyscanner_neo.py`; move new Neo-related code into package modules first.
 - Do not turn `webui/` into a standalone cloud/web product.
 - Do not introduce SearchPlan pruning until explainability, plan metadata, and telemetry are stable.
@@ -145,5 +144,5 @@ The fuller execution backlog is in `docs/todo.md`.
 
 - Browser scraping is slow and unstable; avoid high concurrency as a default.
 - History data may contain old rows without plan metadata; code must tolerate missing `plan_*` fields.
-- Root-level shims are compatibility only. Updating logic in both shim and package will cause drift.
-- Some tests intentionally import old root-level names to verify compatibility.
+- Root-level compatibility shims have been removed; `test_import_boundaries.py` enforces a `ROOT_SHIMS` deny-list so package code never re-introduces flat root imports. Do not recreate shims.
+- Tests live under `tests/` (module-organized) plus four root-level entry/structural tests (`test_cli`, `test_desktop_ui_service`, `test_failure_replay`, `test_import_boundaries`).
