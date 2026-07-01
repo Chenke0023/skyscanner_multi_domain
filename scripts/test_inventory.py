@@ -9,7 +9,9 @@ from collections import defaultdict
 from pathlib import Path
 
 TEST_DIR = Path(__file__).parent.parent
-TEST_FILES = sorted(TEST_DIR.glob("test_*.py"))
+TEST_FILES = sorted(
+    [*TEST_DIR.glob("test_*.py"), *TEST_DIR.glob("tests/**/test_*.py")]
+)
 
 
 def parse_test_file(path: Path) -> dict:
