@@ -1,10 +1,10 @@
 """
 Skyscanner Neo compatibility layer and legacy capture-based tooling.
 
-Primary scan paths (Scrapling + CDP fallback) have moved to:
-- transport_scrapling.py
-- transport_cdp.py
-- scan_orchestrator.py
+Primary scan paths (Scrapling + CDP fallback) live in the package:
+- skyscanner_multi_domain/transports/scrapling.py
+- skyscanner_multi_domain/transports/cdp.py
+- skyscanner_multi_domain/scan/orchestrator.py
 
 This module retains:
 - NeoCli wrapper and Neo-based request execution
