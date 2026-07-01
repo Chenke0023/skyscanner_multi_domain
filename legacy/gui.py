@@ -26,21 +26,21 @@ import tkinter as tk
 from tkinter import messagebox, ttk
 from typing import Any
 
-from app_paths import get_gui_state_file, get_reports_dir
+from skyscanner_multi_domain.runtime.paths import get_gui_state_file, get_reports_dir
 from cli import SimpleCLI
 from skyscanner_multi_domain.scan.output_rows import CombinedQuoteRow
-from date_window import (
+from skyscanner_multi_domain.planning.date_window import (
     build_date_window,
     build_round_trip_date_window,
     format_trip_date_label,
 )
-from location_resolver import (
+from skyscanner_multi_domain.geo.location_resolver import (
     AIRPORT_DATASET_PATH,
     COUNTRY_ROUTE_DEFAULT_AIRPORT_LIMIT,
     LOCATION_MAPPINGS_PATH,
     LocationRecord,
 )
-from scan_history import (
+from skyscanner_multi_domain.scan.history import (
     AlertConfig,
     annotate_rows_with_history,
     build_history_series,
