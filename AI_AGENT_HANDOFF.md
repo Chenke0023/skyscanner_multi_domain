@@ -118,13 +118,24 @@ python tools/replay_parser_snapshots.py logs/snapshots/opencli --json
 
 ## 6. Current Next Tasks
 
-- Keep `desktop_ui_service -> cli.SimpleCLI` as explicit P1 debt; do not expand desktop reuse of `SimpleCLI`.
+- Keep `desktop_ui_service -> cli.SimpleCLI` as retired P1 debt; prevent regressions that reintroduce the import.
 - Add richer WebView warning drill-down with evidence snippets per row.
-- Build failed-market repair actions beyond queue retry.
-- Start `desktop_ui_service -> cli.SimpleCLI` extraction toward a package query service.
+- Failed-market repair actions now support queue retry, run retry, extend wait, open manual-review links, and skip current repair tasks.
+- Continue shrinking `cli.py`: query/planning lives in `skyscanner_multi_domain.scan.query_service.QueryService`, and desktop result processing lives in `skyscanner_multi_domain.scan.result_service.ResultService`.
+- CI now runs ruff, scoped mypy, frontend build, release smoke, and pytest via `.github/workflows/ci.yml`; mypy currently covers 43 source files across runtime/pricing/geo/diagnostics/parsing/selected planning/scan support/orchestration/primary transport modules plus CLI, desktop, and Neo entry points.
+- Broad swallowed exceptions in primary runtime/transport paths now log at debug/warning instead of disappearing silently; the current audit has no bare `except` handlers and 53 broad handlers remaining.
+- Market reliability now feeds SearchPlan ordering from recent success, parser confidence, historical win rate, fallback dependence, and challenge/loading risk without reducing the task set.
+- Neo capture URL/payload/header helpers now live in `skyscanner_multi_domain.scan.url_builder`; `skyscanner_neo.py` remains a compatibility CLI and re-export layer.
+- User-confirmed price loop baseline records confirmed/mismatched WebView rows to `runtime/price_confirmations.jsonl` and shows confirmation counts in Trust UX.
+- Release hygiene baseline is in place: version 1.2.0, `CHANGELOG.md`, quick README install/run path, and `scripts/release_smoke.py`.
 - Only after explainability, batch progress, and telemetry are stable, consider conservative user-confirmed early stop in fast mode.
 
 Recently completed:
+
+- Extracted location resolution, route planning, and query-payload building from `cli.SimpleCLI` into `skyscanner_multi_domain.scan.query_service.QueryService`; `desktop_ui_service` now routes all query/location work through `self.query`.
+- Extracted desktop result processing and markdown persistence into `skyscanner_multi_domain.scan.result_service.ResultService`; `desktop_ui_service.py` no longer imports `cli`.
+- Enabled Ruff Bugbear (`B`) and expanded the scoped mypy gate to 41 source files.
+- Audited bare `except ...: pass` handlers and replaced broad silent catches in captcha, runtime paths, orchestrator, CDP, structured CDP, Google jump, OpenCLI, and Scrapling paths with logging.
 
 - Parser diagnostics/confidence metadata now flows through `FlightQuote` and scan/report rows.
 - CLI Markdown reports show a `扫描结论` section, confidence/source/warning columns, and warning/evidence details.
@@ -137,6 +148,11 @@ Recently completed:
 - OpenCLI failure snapshots and `tools/replay_parser_snapshots.py` provide an offline parser recovery loop.
 - Repair Mode can build failed-market repair plans without rescanning successful markets; challenge tasks are manual review by default.
 - WebView state exposes fetch quality, parser recovery, snapshot, candidate, fallback, and repair-plan fields for Trust UX.
+- SearchPlan market reliability score now reflects parser confidence, fallback dependence, and challenge/loading risk in addition to success and win history.
+- Extracted Neo capture selection, URL rewriting, payload mutation, header preparation, and response quote extraction into `skyscanner_multi_domain.scan.url_builder` with compatibility re-exports from `skyscanner_neo.py`.
+- WebView repair panel actions now call `apply_repair_action` for class-specific queue retry, selected-region rerun, extended-wait rerun, challenge link opening, and per-task skip.
+- WebView success rows now expose `确认` / `不符` actions backed by `skyscanner_multi_domain.scan.confirmation.PriceConfirmationStore`.
+- Added release smoke checks for version consistency, changelog coverage, README install path, PyInstaller bundle version wiring, and built WebView assets.
 
 The fuller execution backlog is in `docs/todo.md`.
 

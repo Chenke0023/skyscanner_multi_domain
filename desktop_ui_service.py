@@ -13,8 +13,15 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-from skyscanner_multi_domain.runtime.paths import get_gui_state_file, get_reports_dir
-from cli import DEFAULT_LAUNCHD_INTERVAL_MINUTES, SimpleCLI, install_auto_refresh_launchd, uninstall_auto_refresh_launchd
+from skyscanner_multi_domain.runtime.launchd import (
+    DEFAULT_LAUNCHD_INTERVAL_MINUTES,
+    install_auto_refresh_launchd,
+    uninstall_auto_refresh_launchd,
+)
+from skyscanner_multi_domain.runtime.paths import PROJECT_ROOT, get_gui_state_file, get_reports_dir
+from skyscanner_multi_domain.scan.confirmation import ConfirmationStatus, PriceConfirmationStore, sample_from_row
+from skyscanner_multi_domain.scan.query_service import QueryService
+from skyscanner_multi_domain.scan.result_service import ResultService
 from skyscanner_multi_domain.scan.output_rows import CombinedQuoteRow
 from skyscanner_multi_domain.planning.date_window import format_trip_date_label
 from desktop_logic import (
@@ -70,7 +77,7 @@ from skyscanner_multi_domain.scan.history import (
     ScanHistoryStore,
 )
 from skyscanner_multi_domain.planning.search_plan import build_ordered_trip_dates, rank_route_pairs
-from skyscanner_multi_domain.scan.repair import build_repair_plan
+from skyscanner_multi_domain.scan.repair import RepairTask, build_repair_plan
 from skyscanner_neo import (
     DEFAULT_REGIONS,
     NeoCli,
@@ -107,11 +114,14 @@ def _serialize_history_record(record: Any) -> dict[str, Any]:
 class DesktopUIService:
     def __init__(self) -> None:
         self._lock = threading.RLock()
-        self.cli = SimpleCLI()
+        self.query = QueryService()
+        self.results = ResultService()
+        self.confirmations = PriceConfirmationStore()
         self.history_store = ScanHistoryStore()
         self._cancel_event = threading.Event()
         self._state_path = get_gui_state_file()
         self._pending_retry_targets: dict[tuple[str, str, str], CombinedQuoteRow] = {}
+        self._skipped_repair_targets: set[tuple[str, str, str, str]] = set()
         self._history_records_for_current_query: list[Any] = []
         self._previous_scan_record: Any | None = None
         self._current_alert_config: AlertConfig | None = None
@@ -204,7 +214,7 @@ class DesktopUIService:
         }
 
     def check_environment(self) -> dict[str, Any]:
-        neo = NeoCli(self.cli.project_root)
+        neo = NeoCli(PROJECT_ROOT)
         scrapling_ready = importlib.util.find_spec("scrapling") is not None
         cdp = detect_cdp_version()
         if cdp:
@@ -215,7 +225,7 @@ class DesktopUIService:
             f"Scrapling 主抓取: {'已安装' if scrapling_ready else '未安装'}",
             f"Neo CLI: {'已找到' if neo.available else '未找到'}",
             cdp_line,
-            f"项目目录: {self.cli.project_root}",
+            f"项目目录: {PROJECT_ROOT}",
         ]
         issues = _collect_startup_issues()
         with self._lock:
@@ -268,6 +278,11 @@ class DesktopUIService:
                 price = row.get("cheapest_cny_price")
                 price_text = f"¥{float(price):,.2f}" if isinstance(price, (int, float)) else "-"
                 link = str(row.get("link") or "-")
+                source_kind = row.get("source_kind")
+                source_label = str(
+                    row.get("source_label")
+                    or source_kind_label(source_kind if isinstance(source_kind, str) else None)
+                )
                 lines.append(
                     "| "
                     + " | ".join(
@@ -279,7 +294,7 @@ class DesktopUIService:
                             price_text,
                             str(row.get("stability_label") or "-"),
                             str(row.get("market_reliability_label") or "-"),
-                            str(row.get("source_label") or source_kind_label(row.get("source_kind"))),
+                            source_label,
                             f"[打开结果页]({link})",
                         ]
                     )
@@ -295,7 +310,7 @@ class DesktopUIService:
                             str(float(price)) if isinstance(price, (int, float)) else "",
                             str(row.get("stability_label") or "-"),
                             str(row.get("market_reliability_label") or "-"),
-                            str(row.get("source_label") or source_kind_label(row.get("source_kind"))),
+                            source_label,
                             link,
                         ]
                     )
@@ -460,6 +475,68 @@ class DesktopUIService:
             self._pending_retry_targets = {}
         return {"queuedRegions": queued_regions}
 
+    def apply_repair_action(self, payload: dict[str, Any]) -> dict[str, Any]:
+        action = str(payload.get("action") or "queue_retry").strip()
+        failure_class = str(payload.get("failureClass") or "").strip()
+        region = str(payload.get("region") or payload.get("regionCode") or "").strip().upper()
+        with self._lock:
+            tasks = self._matching_repair_tasks_locked(failure_class=failure_class, region=region)
+            if not tasks:
+                raise ValueError("没有匹配的失败市场修复任务。")
+            if action == "queue_retry":
+                queued = self._queue_repair_tasks_locked(tasks)
+                self._log_locked(f"已加入补扫队列: {', '.join(queued)}")
+                return {"action": action, "queuedRegions": self._queued_retry_regions_locked(), "matched": len(tasks)}
+            if action == "run_retry":
+                queued = self._queue_repair_tasks_locked(tasks)
+                selected = self._queued_retry_regions_locked()
+            elif action == "extend_wait":
+                queued = self._queue_repair_tasks_locked(tasks)
+                selected = self._queued_retry_regions_locked()
+                current_wait = int(self._form_state.get("wait") or "10")
+                self._form_state["wait"] = str(min(max(current_wait + 8, 18), 45))
+                self._persist_query_state_locked()
+            elif action == "open_links":
+                opened = 0
+                for task in tasks:
+                    if task.url and self.open_link(task.url):
+                        opened += 1
+                self._log_locked(f"已打开 {opened} 个失败市场链接供人工检查。")
+                return {"action": action, "opened": opened, "matched": len(tasks)}
+            elif action == "skip":
+                for task in tasks:
+                    self._skipped_repair_targets.add(self._repair_task_key(task))
+                self._refresh_result_views_locked()
+                self._log_locked(f"已跳过 {len(tasks)} 个失败市场修复任务。")
+                return {"action": action, "skipped": len(tasks), "matched": len(tasks)}
+            else:
+                raise ValueError(f"未知修复动作: {action}")
+        self.start_scan(
+            {
+                "rerunScopeOverride": "selected_regions",
+                "selectedRegionCodes": selected,
+                "allowBrowserFallback": action == "extend_wait",
+            }
+        )
+        with self._lock:
+            self._pending_retry_targets = {}
+        return {"action": action, "queuedRegions": queued, "selectedRegionCodes": selected, "matched": len(tasks)}
+
+    def record_price_confirmation(self, payload: dict[str, Any]) -> dict[str, Any]:
+        status: ConfirmationStatus = "mismatched" if str(payload.get("status") or "") == "mismatched" else "confirmed"
+        row_payload = payload.get("row")
+        if not isinstance(row_payload, dict):
+            raise ValueError("缺少需要确认的结果行。")
+        sample = sample_from_row(row_payload, status=status, note=str(payload.get("note") or ""))
+        self.confirmations.append(sample)
+        with self._lock:
+            self._refresh_result_views_locked()
+            self._log_locked(
+                f"已记录价格{'不匹配' if status == 'mismatched' else '确认'}样本: "
+                f"{sample.region_name or sample.region_code} {sample.date}"
+            )
+            return {"ok": True, "summary": self.confirmations.summary()}
+
     def cancel_scan(self) -> dict[str, Any]:
         with self._lock:
             self._cancel_event.set()
@@ -529,11 +606,11 @@ class DesktopUIService:
                     allow_browser_fallback=allow_browser_fallback,
                 )
             else:
-                origin_resolved = self.cli.resolve_location(
+                origin_resolved = self.query.resolve_location(
                     origin,
                     prefer_metro=not self._form_state["exact_airport"],
                 )
-                destination_resolved = self.cli.resolve_location(destination, prefer_metro=False)
+                destination_resolved = self.query.resolve_location(destination, prefer_metro=False)
                 regions = build_effective_region_codes(
                     origin_country=origin_resolved.country,
                     destination_country=destination_resolved.country,
@@ -541,7 +618,7 @@ class DesktopUIService:
                 )
                 if not regions:
                     raise ValueError("无法生成可用地区代码。")
-                query_payload = self.cli.build_point_query_payload(
+                query_payload = self.query.build_point_query_payload(
                     origin_input=origin,
                     destination_input=destination,
                     origin_label=origin_resolved.query or origin_resolved.name or origin_resolved.code,
@@ -616,7 +693,7 @@ class DesktopUIService:
             origin_points,
             destination_points,
             regions,
-        ) = self.cli.build_expanded_route_plan(
+        ) = self.query.build_expanded_route_plan(
             origin_value=origin,
             destination_value=destination,
             origin_is_country=self._form_state["origin_country"],
@@ -627,7 +704,7 @@ class DesktopUIService:
         )
         if not regions:
             raise ValueError("无法生成可用地区代码。")
-        query_payload = self.cli.build_expanded_query_payload(
+        query_payload = self.query.build_expanded_query_payload(
             origin_value=origin,
             destination_value=destination,
             origin_label=origin_label,
@@ -856,12 +933,12 @@ class DesktopUIService:
         if use_country_mode:
             return [
                 LocationRecord(name=item.name, code=item.code, kind="country")
-                for item in self.cli.location_resolver.search_countries(
+                for item in self.query.location_resolver.search_countries(
                     value,
                     limit=MAX_LOCATION_SUGGESTIONS,
                 )
             ]
-        return self.cli.location_resolver.search_locations(
+        return self.query.location_resolver.search_locations(
             value,
             prefer_metro=prefer_metro,
             limit=MAX_LOCATION_SUGGESTIONS,
@@ -879,8 +956,8 @@ class DesktopUIService:
             return ""
         if self._field_uses_country_mode(field):
             try:
-                country = self.cli.resolve_country(raw)
-                _resolved, airports = self.cli.location_resolver.get_country_route_airports(
+                country = self.query.resolve_country(raw)
+                _resolved, airports = self.query.location_resolver.get_country_route_airports(
                     raw,
                     limit=COUNTRY_ROUTE_DEFAULT_AIRPORT_LIMIT,
                 )
@@ -891,8 +968,8 @@ class DesktopUIService:
             except ValueError as exc:
                 return str(exc)
         try:
-            code = self.cli.normalize_location(raw, prefer_metro=prefer_metro)
-            kind = self.cli.location_resolver.describe_code_kind(code)
+            code = self.query.normalize_location(raw, prefer_metro=prefer_metro)
+            kind = self.query.location_resolver.describe_code_kind(code)
             return f"{label}将使用 {kind}: {code}"
         except ValueError as exc:
             return str(exc)
@@ -905,16 +982,16 @@ class DesktopUIService:
         ]
         try:
             if self._form_state["origin_country"]:
-                origin_country = self.cli.resolve_country(self._form_state["origin"]).code
+                origin_country = self.query.resolve_country(self._form_state["origin"]).code
             else:
-                origin_country = self.cli.resolve_location(
+                origin_country = self.query.resolve_location(
                     self._form_state["origin"],
                     prefer_metro=not self._form_state["exact_airport"],
                 ).country
             if self._form_state["destination_country"]:
-                destination_country = self.cli.resolve_country(self._form_state["destination"]).code
+                destination_country = self.query.resolve_country(self._form_state["destination"]).code
             else:
-                destination_country = self.cli.resolve_location(
+                destination_country = self.query.resolve_location(
                     self._form_state["destination"],
                     prefer_metro=False,
                 ).country
@@ -933,7 +1010,7 @@ class DesktopUIService:
             if code.strip()
         ]
         if self._form_state["origin_country"] or self._form_state["destination_country"]:
-            return self.cli.build_expanded_query_payload(
+            return self.query.build_expanded_query_payload(
                 origin_value=self._form_state["origin"],
                 destination_value=self._form_state["destination"],
                 origin_label=self._form_state["origin"] or "出发地",
@@ -950,7 +1027,7 @@ class DesktopUIService:
                 destination_is_country=bool(self._form_state["destination_country"]),
                 airport_limit=COUNTRY_ROUTE_DEFAULT_AIRPORT_LIMIT,
             )
-        return self.cli.build_point_query_payload(
+        return self.query.build_point_query_payload(
             origin_input=self._form_state["origin"],
             destination_input=self._form_state["destination"],
             origin_label=self._form_state["origin"] or "出发地",
@@ -1031,14 +1108,14 @@ class DesktopUIService:
         cells = []
         for departure in departures:
             for return_date in return_dates:
-                winner = summary.get(departure, {}).get(return_date)
+                round_trip_winner = summary.get(departure, {}).get(return_date)
                 cells.append(
                     {
                         "tripLabel": f"{departure} -> {return_date}",
                         "departure": departure,
                         "returnDate": return_date,
-                        "price": winner.get("cheapest_cny_price") if winner else None,
-                        "regionName": winner.get("region_name") if winner else None,
+                        "price": round_trip_winner.get("cheapest_cny_price") if round_trip_winner else None,
+                        "regionName": round_trip_winner.get("region_name") if round_trip_winner else None,
                     }
                 )
         return {
@@ -1192,12 +1269,24 @@ class DesktopUIService:
             if isinstance(quote, dict)
         ]
         repair_plan = build_repair_plan(flat_quotes)
+        repair_tasks = [
+            task
+            for task in repair_plan.tasks
+            if self._repair_task_key(task) not in self._skipped_repair_targets
+        ]
+        repair_summary = dict(repair_plan.summary)
+        repair_summary["total_repair_tasks"] = len(repair_tasks)
+        repair_summary["automatic_repair_tasks"] = sum(1 for task in repair_tasks if task.automatic)
+        repair_summary["manual_review_tasks"] = sum(1 for task in repair_tasks if not task.automatic)
+        repair_summary["by_action"] = self._count_repair_tasks_by(repair_tasks, "recommended_action")
+        repair_summary["by_failure_class"] = self._count_repair_tasks_by(repair_tasks, "original_failure_class")
         return {
             "fetchQualityTelemetry": build_fetch_quality_telemetry(quote_snapshots),
             "parserRecoveryTelemetry": build_parser_recovery_telemetry(quote_snapshots),
             "snapshotSummary": build_snapshot_summary(quote_snapshots),
+            "priceConfirmationSummary": self.confirmations.summary(),
             "repairPlan": {
-                "summary": repair_plan.summary,
+                "summary": repair_summary,
                 "tasks": [
                     {
                         "region": task.region,
@@ -1209,7 +1298,7 @@ class DesktopUIService:
                         "recommended_action": task.recommended_action,
                         "automatic": task.automatic,
                     }
-                    for task in repair_plan.tasks
+                    for task in repair_tasks
                 ],
             },
         }
@@ -1330,19 +1419,21 @@ class DesktopUIService:
 
             best_winner = min(best_candidates, key=lambda row: _price_value(row, "best_cny_price")) if best_candidates else None
             cheapest_winner = min(cheapest_candidates, key=lambda row: _price_value(row, "cheapest_cny_price")) if cheapest_candidates else None
-            if best_winner and isinstance(best_winner.get("best_cny_price"), (int, float)):
+            best_price = best_winner.get("best_cny_price") if best_winner else None
+            if best_winner and isinstance(best_price, (int, float)):
                 self._log_locked(
                     "最佳: ¥{price:,.2f} 来自 {region} ({date}, {route})".format(
-                        price=float(best_winner["best_cny_price"]),
+                        price=float(best_price),
                         region=best_winner["region_name"],
                         date=best_winner.get("date") or "-",
                         route=best_winner.get("route") or "-",
                     )
                 )
-            if cheapest_winner and isinstance(cheapest_winner.get("cheapest_cny_price"), (int, float)):
+            cheapest_price = cheapest_winner.get("cheapest_cny_price") if cheapest_winner else None
+            if cheapest_winner and isinstance(cheapest_price, (int, float)):
                 self._log_locked(
                     "最低价: ¥{price:,.2f} 来自 {region} ({date}, {route})".format(
-                        price=float(cheapest_winner["cheapest_cny_price"]),
+                        price=float(cheapest_price),
                         region=cheapest_winner["region_name"],
                         date=cheapest_winner.get("date") or "-",
                         route=cheapest_winner.get("route") or "-",
@@ -1476,6 +1567,57 @@ class DesktopUIService:
                 if str(row.get("region_code") or "").strip()
             }
         )
+
+    def _matching_repair_tasks_locked(self, *, failure_class: str = "", region: str = "") -> list[RepairTask]:
+        quote_snapshots = deepcopy(self._quote_snapshots_by_date)
+        flat_quotes = [
+            quote
+            for _trip_label, quotes in quote_snapshots
+            for quote in quotes
+            if isinstance(quote, dict)
+        ]
+        tasks = build_repair_plan(flat_quotes).tasks
+        return [
+            task
+            for task in tasks
+            if self._repair_task_key(task) not in self._skipped_repair_targets
+            and (not failure_class or task.original_failure_class == failure_class)
+            and (not region or task.region.upper() == region)
+        ]
+
+    def _queue_repair_tasks_locked(self, tasks: list[RepairTask]) -> list[str]:
+        queued: list[str] = []
+        for task in tasks:
+            region_code = task.region.strip().upper()
+            if not region_code:
+                continue
+            retry_key = (task.date_label, task.route_label, region_code)
+            self._pending_retry_targets[retry_key] = {
+                "date": task.date_label,
+                "route": task.route_label,
+                "region_code": region_code,
+                "region_name": region_code,
+            }
+            if region_code not in queued:
+                queued.append(region_code)
+        return queued
+
+    @staticmethod
+    def _repair_task_key(task: RepairTask) -> tuple[str, str, str, str]:
+        return (
+            task.date_label,
+            task.route_label,
+            task.region.strip().upper(),
+            task.original_status,
+        )
+
+    @staticmethod
+    def _count_repair_tasks_by(tasks: list[RepairTask], field_name: str) -> dict[str, int]:
+        counts: dict[str, int] = {}
+        for task in tasks:
+            value = str(getattr(task, field_name) or "")
+            counts[value] = counts.get(value, 0) + 1
+        return counts
 
     def _snapshot_state_locked(self) -> dict[str, Any]:
         origin_hint = self._set_location_hint_locked(
@@ -1624,6 +1766,7 @@ class DesktopUIService:
                     *,
                     status: str,
                     log_message: str,
+                    plan_progress: dict[str, Any] | None = None,
                 ) -> None:
                     nonlocal rows_progress, quote_progress
                     async with progress_lock:
@@ -1639,6 +1782,7 @@ class DesktopUIService:
                             rows_by_date=list(rows_progress),
                             status=status,
                             log_message=log_message,
+                            plan_progress=plan_progress,
                         )
 
                 async def scan_trip(
@@ -1699,7 +1843,7 @@ class DesktopUIService:
                             )
                             output = None
                             if cached_rows:
-                                output = self.cli.save_simplified_results(
+                                output = self.results.save_simplified_results(
                                     cached_rows,
                                     origin_code,
                                     destination_code,
@@ -1723,7 +1867,7 @@ class DesktopUIService:
                                     [
                                         (
                                             trip_label,
-                                            self.cli.simplify_quotes(
+                                            self.results.simplify_quotes(
                                                 quote_dicts,
                                                 route_label=f"{origin_code} -> {destination_code}",
                                             ),
@@ -1822,7 +1966,7 @@ class DesktopUIService:
                                 log_message=f"{trip_label} 未拿到可展示结果。",
                             )
                             return (date_idx, trip_label, [], [], None)
-                        output = self.cli.save_simplified_results(
+                        output = self.results.save_simplified_results(
                             rows,
                             origin_code,
                             destination_code,
@@ -1880,7 +2024,7 @@ class DesktopUIService:
             if save_combined and rows_by_date:
                 start_date, start_return_date = trip_dates[0]
                 end_date, end_return_date = trip_dates[-1]
-                combined_output = self.cli.save_window_results(
+                combined_output = self.results.save_window_results(
                     rows_by_date,
                     origin_code,
                     destination_code,
@@ -1973,6 +2117,7 @@ class DesktopUIService:
                     *,
                     status: str,
                     log_message: str,
+                    plan_progress: dict[str, Any] | None = None,
                 ) -> None:
                     nonlocal rows_progress, quote_progress
                     async with progress_lock:
@@ -1988,6 +2133,7 @@ class DesktopUIService:
                             rows_by_date=list(rows_progress),
                             status=status,
                             log_message=log_message,
+                            plan_progress=plan_progress,
                         )
 
                 async def scan_trip(
@@ -2036,7 +2182,7 @@ class DesktopUIService:
                                 status=f"{trip_label} 无需重扫，已复用历史结果。",
                                 log_message=f"{trip_label} 没有失败市场，直接复用缓存结果。",
                             )
-                            output = self.cli.save_simplified_results(
+                            output = self.results.save_simplified_results(
                                 cached_rows,
                                 origin_label,
                                 destination_label,
@@ -2052,14 +2198,14 @@ class DesktopUIService:
                                 [
                                     (
                                         trip_label,
-                                        self.cli._sort_simplified_rows(list(best_rows_by_region.values())),
+                                        self.results.sort_simplified_rows(list(best_rows_by_region.values())),
                                     )
                                 ],
                                 latest_record.rows_by_date if latest_record else None,
                             )
                             merged_rows_by_date = merge_rows_by_date(cached_rows_by_date, live_rows_by_date)
                             rows = get_rows_for_trip_label(merged_rows_by_date, trip_label)
-                            return rows, self.cli.rows_to_quote_snapshots(rows)
+                            return rows, self.results.rows_to_quote_snapshots(rows)
 
                         pair_semaphore = asyncio.Semaphore(_GUI_AIRPORT_PAIR_CONCURRENCY)
 
@@ -2096,8 +2242,8 @@ class DesktopUIService:
                                         if isinstance(quote, dict)
                                     ]
                                     if quote_dicts:
-                                        rows = self.cli._with_route_plan_metadata(
-                                            self.cli.simplify_quotes(
+                                        rows = self.results.with_route_plan_metadata(
+                                            self.results.simplify_quotes(
                                                 quote_dicts,
                                                 route_label=route_label,
                                             ),
@@ -2106,7 +2252,7 @@ class DesktopUIService:
                                         )
                                         for row in rows:
                                             region_name = str(row.get("region_name") or "-")
-                                            best_rows_by_region[region_name] = self.cli._pick_better_row(
+                                            best_rows_by_region[region_name] = self.results.pick_better_row(
                                                 best_rows_by_region.get(region_name),
                                                 row,
                                             )
@@ -2191,8 +2337,8 @@ class DesktopUIService:
                                 route_reason = f"路线候选排序 {pair_index + 1}"
                                 return (
                                     route_label,
-                                    self.cli._with_route_plan_metadata(
-                                        self.cli.simplify_quotes(
+                                    self.results.with_route_plan_metadata(
+                                        self.results.simplify_quotes(
                                             quotes_to_dicts(quotes),
                                             route_label=route_label,
                                         ),
@@ -2214,7 +2360,7 @@ class DesktopUIService:
                                 completed_pairs += 1
                                 for row in rows:
                                     region_name = str(row.get("region_name") or "-")
-                                    best_rows_by_region[region_name] = self.cli._pick_better_row(
+                                    best_rows_by_region[region_name] = self.results.pick_better_row(
                                         best_rows_by_region.get(region_name),
                                         row,
                                     )
@@ -2245,7 +2391,7 @@ class DesktopUIService:
                         if not rows:
                             self._log(f"行程 {trip_label} 未拿到可展示的扩展路线结果。")
                             return (date_idx, trip_label, [], [], None)
-                        output = self.cli.save_simplified_results(
+                        output = self.results.save_simplified_results(
                             rows,
                             origin_label,
                             destination_label,
@@ -2305,7 +2451,7 @@ class DesktopUIService:
             if save_combined and rows_by_date:
                 start_date, start_return_date = trip_dates[0]
                 end_date, end_return_date = trip_dates[-1]
-                combined_output = self.cli.save_window_results(
+                combined_output = self.results.save_window_results(
                     rows_by_date,
                     origin_label,
                     destination_label,

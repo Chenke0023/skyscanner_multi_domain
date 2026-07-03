@@ -126,6 +126,12 @@ class DesktopBridge:
     def run_retry_queue(self) -> dict[str, Any]:
         return self.service.run_retry_queue()
 
+    def apply_repair_action(self, payload: dict[str, Any]) -> dict[str, Any]:
+        return self.service.apply_repair_action(payload)
+
+    def record_price_confirmation(self, payload: dict[str, Any]) -> dict[str, Any]:
+        return self.service.record_price_confirmation(payload)
+
 
 def _error_page_uri(title: str, body: str, detail: str = "") -> str:
     html = f"""<!doctype html>
@@ -215,12 +221,12 @@ def main() -> None:
     frontend_index = _frontend_index_path()
     try:
         import webview
-    except ImportError:
+    except ImportError as exc:
         if _run_legacy_gui_if_explicitly_enabled():
             return
         raise SystemExit(
             "缺少 pywebview，无法启动桌面 Web UI。请安装依赖后重试；如需临时打开旧 Tk 界面，可设置 SKYSCANNER_ALLOW_LEGACY_GUI=1。"
-        )
+        ) from exc
 
     if frontend_index.exists():
         asset_server = _FrontendAssetServer(frontend_index.parent)

@@ -66,6 +66,26 @@
 
 当前任务优先级和验收标准记录在 `docs/todo.md`。下一阶段重点是 SearchPlan batch progress、桌面 WebView 阶段展示和结果可信度，不做动态剪枝。
 
+## 快速安装 / 运行
+
+源码运行：
+
+```bash
+python3 -m pip install -r requirements.txt
+cd webui && npm install && npm run build && cd ..
+python3 desktop_webview.py
+```
+
+构建可分发 macOS App：
+
+```bash
+python3 scripts/generate_icon.py
+python3 -m pip install pyinstaller
+./scripts/build_macos_standalone_app.sh
+```
+
+版本号统一由 `data/version.txt` 管理；发布说明记录在 `CHANGELOG.md`。
+
 ## 启动方式
 
 ### macOS App（推荐）

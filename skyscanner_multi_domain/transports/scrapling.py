@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import argparse
+import importlib
+import logging
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 import http.client
@@ -26,6 +28,8 @@ from skyscanner_multi_domain.parsing.challenge import (
     coerce_page_snippet,
 )
 from skyscanner_multi_domain.geo.regions import REGION_HOST_ALIASES
+
+logger = logging.getLogger(__name__)
 
 
 PLAYWRIGHT_PROBE_TEXT_LIMIT = 12000
@@ -164,8 +168,8 @@ def _cdp_get_json(path: str, port: int = BROWSER_CDP_PORT) -> Any:
             try:
                 if connection is not None:
                     connection.close()
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug("Failed to close Scrapling CDP connection", exc_info=exc)
     return None
 
 
@@ -395,8 +399,8 @@ def _extract_scrapling_page_text(page: Any) -> str:
             ]
             if visible_lines:
                 return "\n".join(visible_lines)
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug("Failed to extract visible text with BeautifulSoup", exc_info=exc)
 
     css_method = getattr(page, "css", None)
     if callable(css_method):
@@ -554,43 +558,44 @@ async def _probe_page_with_playwright(
                                 page_text=outcome.page_text,
                                 state_overrides={"user_data_dir": str(profile_dir)},
                             )
-                except Exception:
-                    pass
+                except Exception as exc:
+                    logger.debug("Persistent profile probe failed for %s", profile_dir, exc_info=exc)
                 finally:
                     try:
                         if context is not None:
                             await context.close()
-                    except Exception:
-                        pass
+                    except Exception as exc:
+                        logger.debug("Failed to close persistent probe context", exc_info=exc)
 
             browser = None
             context = None
-            page = None
+            launched_page: Any = None
             try:
                 browser = await playwright.chromium.launch(headless=True)
                 context = await browser.new_context(
                     locale=region.locale,
                     extra_http_headers=headers,
                 )
-                page = await context.new_page()
-                return await probe_page(page)
+                launched_page = await context.new_page()
+                return await probe_page(launched_page)
             finally:
                 try:
-                    if page is not None:
-                        await page.close()
-                except Exception:
-                    pass
+                    if launched_page is not None:
+                        await launched_page.close()
+                except Exception as exc:
+                    logger.debug("Failed to close Scrapling probe page", exc_info=exc)
                 try:
                     if context is not None:
                         await context.close()
-                except Exception:
-                    pass
+                except Exception as exc:
+                    logger.debug("Failed to close Scrapling probe context", exc_info=exc)
                 try:
                     if browser is not None:
                         await browser.close()
-                except Exception:
-                    pass
-    except Exception:
+                except Exception as exc:
+                    logger.debug("Failed to close Scrapling probe browser", exc_info=exc)
+    except Exception as exc:
+        logger.debug("Playwright profile probe failed", exc_info=exc)
         return None
 
     return None
@@ -617,11 +622,14 @@ async def compare_via_scrapling(
         from skyscanner_multi_domain.scan.orchestrator import _persist_failure_log as _pfl
         persist_failure_log = _pfl
 
+    captcha_solver_client_cls: Any = None
+    captcha_solver_error_cls: type[BaseException] = Exception
     try:
-        from captcha_solver import CaptchaSolverClient, CaptchaSolverError
-    except ImportError:
-        CaptchaSolverClient = None
-        CaptchaSolverError = Exception
+        captcha_module = importlib.import_module("captcha_solver")
+        captcha_solver_client_cls = captcha_module.CaptchaSolverClient
+        captcha_solver_error_cls = getattr(captcha_module, "CaptchaSolverError", Exception)
+    except ImportError as exc:
+        logger.debug("captcha_solver module is unavailable", exc_info=exc)
 
     timeout_ms = max(int(getattr(args, "timeout", 30) * 1000), 10000)
     wait_ms = max(int(getattr(args, "page_wait", 8) * 1000), 3000)
@@ -655,7 +663,7 @@ async def compare_via_scrapling(
 
         def _handle_probe_outcome(
             outcome: Any, source: str
-        ) -> FlightQuote | None:
+        ) -> FlightQuote:
             """Process a probe outcome: emit trace, persist failures, notify
             callbacks, and return the quote if it's a terminal result."""
             nonlocal page_text
@@ -799,17 +807,17 @@ async def compare_via_scrapling(
                 currency=quote.currency if quote else region.currency,
             )
 
-        stealth_attempts = (
-            {"solve_cloudflare": False, "wait_ms": wait_ms},
-            {"solve_cloudflare": True, "wait_ms": max(wait_ms, 8000)},
-            {"solve_cloudflare": True, "wait_ms": max(wait_ms * 2, 15000)},
+        stealth_attempts: tuple[tuple[bool, int], ...] = (
+            (False, wait_ms),
+            (True, max(wait_ms, 8000)),
+            (True, max(wait_ms * 2, 15000)),
         )
 
         attempt_index = 0
         source_kind = "scrapling_stealth"
-        for attempt in (stealth_attempts if FETCH_STAGE_STEALTH in pipeline_stages else ()):
+        for solve_cloudflare, attempt_wait_ms in (stealth_attempts if FETCH_STAGE_STEALTH in pipeline_stages else ()):
             attempt_index = _next_attempt()
-            cf_suffix = "_cf" if attempt["solve_cloudflare"] else ""
+            cf_suffix = "_cf" if solve_cloudflare else ""
             source_kind = f"scrapling_stealth{cf_suffix}"
             state_overrides = await _resolve_scrapling_state_overrides(
                 region,
@@ -820,8 +828,8 @@ async def compare_via_scrapling(
             used_cdp, used_profile = _state_usage(state_overrides)
             try:
                 page = await fetch_with_stealth(
-                    solve_cloudflare=attempt["solve_cloudflare"],
-                    wait_override_ms=attempt["wait_ms"],
+                    solve_cloudflare=solve_cloudflare,
+                    wait_override_ms=attempt_wait_ms,
                     state_overrides=state_overrides,
                 )
             except Exception as exc:
@@ -869,8 +877,8 @@ async def compare_via_scrapling(
             ):
                 try:
                     dom_page = await fetch_with_stealth(
-                        solve_cloudflare=attempt["solve_cloudflare"],
-                        wait_override_ms=max(attempt["wait_ms"], 12000),
+                        solve_cloudflare=solve_cloudflare,
+                        wait_override_ms=max(attempt_wait_ms, 12000),
                         load_dom_override=True,
                         network_idle_override=True,
                         state_overrides=state_overrides,
@@ -892,14 +900,14 @@ async def compare_via_scrapling(
                             used_cdp=used_cdp, used_profile=used_profile,
                             load_dom=True,
                             network_idle=True,
-                            wait_override_ms=max(attempt["wait_ms"], 12000),
+                            wait_override_ms=max(attempt_wait_ms, 12000),
                             final_quote=latest_quote,
                             final_page_text=dom_page_text,
                         )
                         if latest_quote.price is not None:
                             break
-                except Exception:
-                    pass
+                except Exception as exc:
+                    logger.debug("DOM retry after captcha failed for %s", region.code, exc_info=exc)
 
             if has_captcha and detected_captcha_type != "cloudflare":
                 latest_quote = build_captcha_quote(
@@ -934,11 +942,11 @@ async def compare_via_scrapling(
             and captcha_type in {"cloudflare", "recaptcha", "hcaptcha"}
             and latest_quote is not None
             and latest_quote.price is None
-            and CaptchaSolverClient is not None
+            and captcha_solver_client_cls is not None
             and FETCH_STAGE_CAPTCHA in pipeline_stages
         ):
             try:
-                captcha_solver = CaptchaSolverClient()
+                captcha_solver = captcha_solver_client_cls()
                 health = await captcha_solver.health_check()
                 if health.get("status") == "healthy":
                     token = None
@@ -977,7 +985,7 @@ async def compare_via_scrapling(
                                 final_page_text=page_text,
                             )
                 await captcha_solver.close()
-            except CaptchaSolverError as exc:
+            except captcha_solver_error_cls as exc:
                 latest_quote = FlightQuote(
                     region=region.code,
                     domain=region.domain,
@@ -988,8 +996,8 @@ async def compare_via_scrapling(
                     error=f"Captcha解决失败 ({captcha_type}): {exc}",
                     source_kind="live",
                 )
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug("Failed to build captcha failure quote for %s", region.code, exc_info=exc)
 
         if (latest_quote is None or latest_quote.price is None) and FETCH_STAGE_HTTP in pipeline_stages:
             try:

@@ -123,7 +123,7 @@ def evaluate_early_stop_candidate(
     ]
     verified_markets = {quote.region for quote in priced}
     executed_tasks = len(completed_quotes)
-    evidence = {
+    evidence: dict[str, Any] = {
         "executed_tasks": executed_tasks,
         "verified_markets": len(verified_markets),
         "high_confidence_prices": len(high_confidence),

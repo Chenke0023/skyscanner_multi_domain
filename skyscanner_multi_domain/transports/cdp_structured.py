@@ -10,7 +10,9 @@ from __future__ import annotations
 import argparse
 import asyncio
 import base64
+import binascii
 import json
+import logging
 import time
 from dataclasses import asdict
 from datetime import datetime, timezone
@@ -33,6 +35,8 @@ from skyscanner_multi_domain.transports.cdp import (
     cdp_open_tab,
     TabNotFoundError,
 )
+
+logger = logging.getLogger(__name__)
 
 
 class CdpStageError(RuntimeError):
@@ -456,7 +460,7 @@ async def wait_for_result_state(
 
     while time.monotonic() < deadline:
         try:
-            state = await _safe_eval(ws_url, "page_state_eval", _page_state_expression(), default=None)
+            state = await _safe_eval(ws_url, "page_state_eval", _page_state_expression())
             if state is None:
                 await asyncio.sleep(poll_interval)
                 continue
@@ -468,10 +472,10 @@ async def wait_for_result_state(
                 if classified in terminal_states:
                     return state, snapshots
 
-        except CdpStageError:
-            pass
-        except Exception:
-            pass
+        except CdpStageError as exc:
+            logger.debug("CDP page state poll stage failed", exc_info=exc)
+        except Exception as exc:
+            logger.debug("CDP page state poll failed", exc_info=exc)
 
         await asyncio.sleep(poll_interval)
 
@@ -545,7 +549,7 @@ async def _capture_screenshot(ws_url: str) -> bytes | None:
         data = str((result or {}).get("data") or "")
         if data:
             return base64.b64decode(data)
-    except Exception:
+    except (asyncio.TimeoutError, aiohttp.ClientError, binascii.Error, KeyError, TypeError, ValueError):
         return None
     return None
 
@@ -633,8 +637,8 @@ async def compare_via_cdp_structured(
                 if not ws_url and tab_id:
                     try:
                         tabs = await cdp_list_tabs(session)
-                        tab = next((item for item in tabs if item.get("id") == tab_id), None)
-                        ws_url = str((tab or {}).get("webSocketDebuggerUrl", ""))
+                        tab = next((item for item in tabs if item.get("id") == tab_id), {})
+                        ws_url = str(tab.get("webSocketDebuggerUrl", ""))
                     except Exception as exc:  # noqa: BLE001
                         failure_stage = failure_stage or "target_select"
                         capture["stageErrors"].append({"stage": "target_select", "error": str(exc)})
@@ -736,7 +740,7 @@ async def compare_via_cdp_structured(
                 for tab_id in owned_tab_ids:
                     try:
                         await cdp_close_tab(session, tab_id)
-                    except Exception:
-                        pass
+                    except Exception as exc:
+                        logger.debug("Failed to close owned structured CDP tab %s", tab_id, exc_info=exc)
 
     return quotes

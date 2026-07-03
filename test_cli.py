@@ -8,15 +8,17 @@ from cli import (
     SimpleCLI,
     _build_args_from_saved_query,
     _is_ac_power_connected,
-    _build_decision_summary,
-    _build_warning_detail_section,
-    _confidence_label,
-    _failed_reason_counts,
-    _price_source_label,
-    _row_cny_value,
-    _warnings_summary,
     build_parser,
     run_failure_replay_command,
+)
+from skyscanner_multi_domain.scan.result_service import (
+    build_decision_summary as _build_decision_summary,
+    build_warning_detail_section as _build_warning_detail_section,
+    confidence_label as _confidence_label,
+    _failed_reason_counts,
+    price_source_label as _price_source_label,
+    _row_cny_value,
+    warnings_summary as _warnings_summary,
 )
 
 

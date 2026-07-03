@@ -1,0 +1,40 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+      - cdp-structured-experiment
+
+jobs:
+  python:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+          python -m pip install ruff pytest mypy
+      - name: Lint
+        run: python -m ruff check .
+      - name: Type check
+        run: python -m mypy
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: webui/package-lock.json
+      - name: Build frontend
+        run: |
+          cd webui
+          npm ci
+          npm run build
+      - name: Release smoke
+        run: python scripts/release_smoke.py
+      - name: Test
+        run: python -m pytest -q

@@ -3,7 +3,10 @@ from __future__ import annotations
 import os
 import shutil
 import sys
+import logging
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 
 APP_SLUG = "skyscanner_multi_domain"
@@ -52,8 +55,8 @@ def _load_build_source_root() -> Path | None:
         root = str(data.get("source_root", "")).strip()
         if root:
             return Path(root)
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.debug("Failed to load build source root from %s", manifest_path, exc_info=exc)
     return None
 
 
@@ -96,6 +99,11 @@ def get_gui_state_file() -> Path:
 def get_scan_history_file() -> Path:
     ensure_runtime_dirs()
     return RUNTIME_DIR / "scan_history.sqlite3"
+
+
+def get_price_confirmation_file() -> Path:
+    ensure_runtime_dirs()
+    return RUNTIME_DIR / "price_confirmations.jsonl"
 
 
 def get_browser_profile_dir(browser_name: str) -> Path:

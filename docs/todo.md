@@ -22,33 +22,45 @@ python -m pytest -q test_import_boundaries.py
 python -m pytest -q
 ```
 
-### 2. Record `desktop_ui_service -> cli.SimpleCLI` as explicit debt
+### 2. Keep `desktop_ui_service -> cli.SimpleCLI` removal guarded
 
-Status: known P1 debt, not a current blocker.
+Status: implemented. Desktop no longer imports `cli`.
 
 Current issue:
 
 ```text
-desktop_ui_service.py -> cli.SimpleCLI
+desktop_ui_service.py -> cli.SimpleCLI  (removed)
 ```
 
 Target direction:
 
 ```text
-cli.py -> shared QueryService
-desktop_ui_service.py -> shared QueryService
+cli.py -> skyscanner_multi_domain.scan.query_service.QueryService
+desktop_ui_service.py -> skyscanner_multi_domain.scan.query_service.QueryService
+desktop_ui_service.py -> skyscanner_multi_domain.scan.result_service.ResultService
 ```
+
+Done:
+
+- Extracted location resolution + query-payload building into
+  `skyscanner_multi_domain/scan/query_service.py`.
+- `SimpleCLI` delegates the query slice to `QueryService`.
+- `desktop_ui_service.py` calls `self.query.*` for all location/query work;
+  no query-slice calls remain on `self.cli`.
+- Extracted desktop result-processing and markdown persistence into
+  `skyscanner_multi_domain/scan/result_service.py`.
+- `desktop_ui_service.py` now uses `self.results.*`; no `cli` import remains.
 
 Todo:
 
-- Do not expand desktop reuse of `SimpleCLI`.
-- Move shared request building and scan orchestration into package code before adding new cross-entry behavior.
-- Eventually introduce `skyscanner_multi_domain/app/query_service.py` or an equivalent package module.
+- Do not reintroduce desktop reuse of `SimpleCLI`.
+- Continue shrinking duplicated CLI result helpers by delegating more CLI paths to
+  `ResultService`.
 
 Acceptance:
 
 - Documentation names the dependency and target direction.
-- New desktop features do not add more calls through `SimpleCLI`.
+- `test_import_boundaries.py` asserts `desktop_ui_service.py` does not import `cli`.
 
 ## P1: SearchPlan Explain And Batches
 
@@ -162,17 +174,23 @@ Acceptance:
 
 ### 8. Remove `desktop_ui_service -> cli.SimpleCLI`
 
-Status: planned.
+Status: implemented for the desktop boundary.
 
 Target:
 
 ```text
-skyscanner_multi_domain/app/query_service.py
+skyscanner_multi_domain/scan/query_service.py   (done)
+skyscanner_multi_domain/scan/result_service.py  (done)
 ```
 
 Todo:
 
 - Extract non-CLI behavior from `SimpleCLI`.
+  - Done: location resolution, route planning, query-payload building
+    (now in `skyscanner_multi_domain/scan/query_service.py`).
+  - Done: desktop result-processing (`simplify_quotes`, `save_simplified_results`,
+    `save_window_results`, `rows_to_quote_snapshots`, row ranking helpers)
+    (now in `skyscanner_multi_domain/scan/result_service.py`).
 - Keep `cli.py` focused on argparse, printing, and export.
 - Have `desktop_ui_service.py` call package service code.
 
@@ -180,16 +198,21 @@ Acceptance:
 
 - `desktop_logic.py` does not import `cli`.
 - `desktop_ui_service.py` does not import `cli`.
-- Add `test_desktop_ui_service_does_not_import_cli` when the dependency is removed.
+- `test_desktop_ui_service_no_longer_imports_cli` guards the boundary.
 
 ### 9. Define `skyscanner_neo.py` lifecycle
 
-Status: documented as compatibility / legacy.
+Status: compatibility / legacy with package extraction in progress.
 
 Todo:
 
 - Short term: do not add new product logic.
 - Mid term: move replay and URL mutation into package modules.
+  - Done: capture selection, URL rewriting, payload mutation, header
+    preparation, and capture response quote extraction live in
+    `skyscanner_multi_domain/scan/url_builder.py`.
+  - `skyscanner_neo.py` re-exports the moved helpers for backward
+    compatibility.
 - Long term: turn root `skyscanner_neo.py` into a shim or move active legacy code under `legacy/`.
 
 Candidate split:
@@ -226,12 +249,23 @@ Current implementation:
 
 ### 12. Failed-market repair panel
 
-Status: planned.
+Status: implemented baseline.
 
 Todo:
 
 - Classify failed markets: loading, parse, network, challenge, browser missing.
 - Offer actions: retry, extend wait, open browser, skip.
+
+Current implementation:
+
+- `scan/repair.py` classifies failed markets into parse, timeout/loading,
+  challenge, no-flight, network, and other repair classes.
+- WebView trust state exposes grouped repair tasks and failure-class counts.
+- The WebView repair panel can queue class-specific retry tasks, run the retry
+  queue, extend wait for loading/empty-shell failures, open challenge links for
+  manual review, and skip current repair tasks without mutating scan history.
+- Retry/extend actions rerun selected regions only; challenge remains manual
+  review and is not bypassed automatically.
 
 ## P2: Telemetry And Quality
 
@@ -325,7 +359,7 @@ Current implementation:
 
 ### 16. Market reliability score
 
-Status: planned.
+Status: implemented baseline.
 
 Inputs:
 
@@ -341,9 +375,20 @@ Uses:
 - result confidence
 - UI risk hints
 
+Current implementation:
+
+- `SearchPlan` market ranking now combines historical win rate, recent success,
+  parser confidence, fallback dependence, and challenge/loading risk.
+- `MarketCandidate.reliability` stores the combined reliability score.
+- `MarketCandidate.score_breakdown` includes `market_reliability`, and market
+  reasons call out low reliability, fallback dependence, and challenge/loading
+  risk when they are material.
+- The planner still preserves the full route/date/market task set; reliability
+  only changes task order and explanations.
+
 ### 17. User-confirmed price loop
 
-Status: planned.
+Status: implemented baseline.
 
 Todo:
 
@@ -351,35 +396,87 @@ Todo:
 - Store confirmed / mismatched local sample.
 - Promote confirmed samples into parser fixtures.
 
+Current implementation:
+
+- Successful WebView result rows expose `确认` and `不符` actions.
+- `desktop_ui_service.record_price_confirmation` stores confirmed or mismatched
+  local samples in `runtime/price_confirmations.jsonl` via
+  `skyscanner_multi_domain.scan.confirmation.PriceConfirmationStore`.
+- Trust summary shows confirmed/total sample counts.
+- The stored sample keeps row/date/route/market/link, CNY prices, confidence,
+  price source, parser warnings, evidence text, status, and note fields.
+- Promoting confirmed samples into parser fixtures remains future work.
+
 ## P3: Release And CI
 
 ### 18. Release hygiene
 
+Status: implemented baseline.
+
+Done:
+
+- Version number is centralized in `data/version.txt` and mirrored in
+  `pyproject.toml` and `webui/package.json`.
+- `CHANGELOG.md` records release notes.
+- `README.md` has a short install/run path for source and macOS app builds.
+- `scripts/release_smoke.py` validates release metadata, PyInstaller data
+  wiring, bundle version handling, and built WebView assets.
+- CI runs frontend build and release smoke after Python lint/type checks.
+
 Todo:
 
-- GitHub Release
-- version number
-- changelog
-- macOS app build smoke
-- simplified README install/run path
+- Create the actual GitHub Release after the branch is ready to tag.
+- Run a full macOS app build smoke on a release machine before attaching the app
+  artifact.
 
 ### 19. CI
+
+Status: implemented baseline in `.github/workflows/ci.yml`.
 
 Minimum:
 
 ```bash
+python -m ruff check .
+python -m mypy
 python -m pytest -q
-python -m py_compile cli.py desktop_webview.py desktop_ui_service.py
-npm --prefix webui run build
 ```
+
+Current scope:
+
+- Ruff now includes Bugbear (`B`) in addition to `E4/E7/E9/F`.
+- mypy is enabled for 43 source files across runtime, pricing, geo, diagnostics,
+  parsing, selected planning modules, scan support/orchestration modules, and
+  the primary transport implementations plus CLI, desktop, and Neo entry points.
+- CI also runs `npm ci && npm run build` for `webui/` and
+  `python scripts/release_smoke.py`.
+- Full-project mypy remains future work; the first gate prevents the new shared
+  and support modules from drifting without claiming the legacy app is fully typed.
+
+### 20. Swallowed exception audit
+
+Status: in progress.
+
+Done:
+
+- Replaced broad `except Exception: pass` in the main runtime/transport paths
+  with debug or warning logs so cleanup/probe failures are no longer completely
+  invisible.
+- Reduced the broad-handler count from the initial 56 to 53 while preserving
+  transport boundary behavior.
+- Removed remaining bare `except` handlers; none are present in the current audit.
+
+Todo:
+
+- Continue reducing broad `except Exception` handlers by replacing generic
+  catches with transport-specific exception types where practical.
 
 ## Suggested Next Five Tasks
 
-1. Keep the explicit `desktop_ui_service -> cli.SimpleCLI` debt visible.
+1. Keep the removed `desktop_ui_service -> cli.SimpleCLI` boundary guarded.
 2. Run a real-world benchmark comparing main vs OpenCLI v2 on the same route/date/market set.
 3. Add richer WebView warning drill-down with evidence snippets, candidate sources, and fallback chain details.
-4. Build failed-market repair actions beyond queue retry.
-5. Start `desktop_ui_service -> cli.SimpleCLI` extraction toward a package query service.
+4. Continue shrinking `cli.py` by delegating CLI result output to `ResultService`.
+5. Prepare the actual GitHub Release/tag once the working tree is ready.
 
 ## Do Not Do Yet
 

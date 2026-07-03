@@ -6,6 +6,7 @@ import argparse
 import asyncio
 import http.client
 import json
+import logging
 import os
 import secrets
 import shutil
@@ -35,6 +36,8 @@ from skyscanner_multi_domain.parsing.page_parser import (
 )
 from skyscanner_multi_domain.geo.regions import REGION_HOST_ALIASES
 from skyscanner_multi_domain.parsing.challenge import build_captcha_quote, check_captcha_in_page
+
+logger = logging.getLogger(__name__)
 
 CDP_HTTP = "http://localhost:9222"
 CDP_HOST_CANDIDATES = ("localhost", "::1", "127.0.0.1")
@@ -86,8 +89,8 @@ def detect_cdp_version(port: int = 9222) -> Optional[dict[str, Any]]:
         finally:
             try:
                 connection.close()
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug("Failed to close CDP version connection", exc_info=exc)
 
         if isinstance(payload, dict) and payload.get("Browser"):
             return payload
@@ -136,7 +139,7 @@ def _comet_is_running() -> bool:
             capture_output=True, text=True, timeout=5,
         )
         return result.returncode == 0 and bool(result.stdout.strip())
-    except Exception:
+    except (OSError, subprocess.SubprocessError):
         return False
 
 
@@ -150,8 +153,8 @@ def _kill_comet() -> bool:
         if result.returncode == 0:
             time.sleep(1.5)
             return True
-    except Exception:
-        pass
+    except (OSError, subprocess.SubprocessError) as exc:
+        logger.debug("Failed to terminate existing Comet process", exc_info=exc)
     return False
 
 
@@ -365,6 +368,7 @@ async def cdp_navigate_tab(
                         f"Navigation failed: {json.dumps(result['error'])}"
                     )
                 return ws_url
+    raise RuntimeError(f"Navigation response was not received for tab {tab_id}")
 
 
 async def cdp_list_tabs(session: aiohttp.ClientSession, host: str = CDP_HTTP) -> list[dict[str, Any]]:
@@ -862,14 +866,14 @@ async def compare_via_pages(
                 for tab_id in owned_tab_ids:
                     try:
                         await cdp_close_tab(session, tab_id)
-                    except Exception:
-                        pass
+                    except Exception as exc:
+                        logger.debug("Failed to close owned CDP tab %s", tab_id, exc_info=exc)
 
         ordered_quotes: list[FlightQuote] = []
         for region in selected_regions:
-            quote = latest_quotes.get(region.code)
-            if quote is not None:
-                ordered_quotes.append(quote)
+            region_quote = latest_quotes.get(region.code)
+            if region_quote is not None:
+                ordered_quotes.append(region_quote)
 
         for quote in ordered_quotes:
             emit_trace(

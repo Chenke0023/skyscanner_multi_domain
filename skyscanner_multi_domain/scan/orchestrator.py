@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import inspect
 import json
+import logging
 import re
 from datetime import datetime
 from enum import Enum
@@ -34,6 +36,8 @@ from skyscanner_multi_domain.planning.search_plan import (
 )
 from skyscanner_multi_domain.geo.regions import REGIONS, get_selected_regions
 
+logger = logging.getLogger(__name__)
+
 FAILURE_LOG_TEXT_LIMIT = 12000
 
 # ── FailureClass taxonomy ─────────────────────────────────────────────────────
@@ -51,6 +55,7 @@ FailureClass = Literal[
     "unsupported",     # route not supported by this market
     "browser_missing", # CDP transport: no browser tab for domain
     "transport_error", # opencli / page eval internal error
+    "semantic_mismatch", # parsed itinerary/currency does not match requested route
     "other",           # everything else
 ]
 
@@ -271,8 +276,8 @@ def _persist_failure_log(
                 "parser_snapshot",
                 page_parse_diagnostics_to_dict(diagnostics),
             )
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug("Failed to attach parser snapshot to failure log", exc_info=exc)
 
     # Add failure class to extra for richer failure logs
     failure_class = classify_failure(quote.status)
@@ -677,7 +682,7 @@ async def run_page_scan(
 
             # ── v3: trace primary scrapling attempt ─────────────────
             planner = AttemptPlanner(config=config)
-            for region, quote in zip(batch_regions, quotes):
+            for region, quote in zip(batch_regions, quotes, strict=False):
                 plan = planner.plan(quote)
                 emit_attempt_trace(
                     trace_ctx=trace_ctx,
@@ -697,7 +702,7 @@ async def run_page_scan(
             # WAIT_RENDER retry (v2 logic, preserved)
             wait_render_regions = [
                 region
-                for region, quote in zip(batch_regions, quotes)
+                for region, quote in zip(batch_regions, quotes, strict=False)
                 if quote.price is None and should_retry_wait_render(quote.status)
             ]
             if wait_render_regions:
@@ -773,7 +778,7 @@ async def run_page_scan(
             quote_by_region: dict[str, FlightQuote] = {q.region: q for q in quotes}
             cdp_targets: list[tuple[RegionConfig, FlightQuote]] = []
 
-            for region, quote in zip(batch_regions, quotes):
+            for region, quote in zip(batch_regions, quotes, strict=False):
                 plan = planner.plan(quote)
                 if "cdp" in plan.transports_remaining:
                     cdp_targets.append((region, quote))
@@ -882,7 +887,7 @@ async def run_page_scan(
 
             # ── v3: trace primary opencli attempt ────────────────────
             planner = AttemptPlanner(config=config)
-            for region, quote in zip(batch_regions, quotes):
+            for region, quote in zip(batch_regions, quotes, strict=False):
                 plan = planner.plan(quote)
                 emit_attempt_trace(
                     trace_ctx=trace_ctx,
@@ -910,7 +915,7 @@ async def run_page_scan(
             scrapling_targets: list[tuple[RegionConfig, FlightQuote]] = []
             google_jump_targets: list[tuple[RegionConfig, FlightQuote]] = []
 
-            for region, quote in zip(batch_regions, quotes):
+            for region, quote in zip(batch_regions, quotes, strict=False):
                 plan = planner.plan(quote)
                 # Route by transports_remaining, not just primary action,
                 # because a single plan may include both CDP and Scrapling
@@ -955,8 +960,8 @@ async def run_page_scan(
                                 plan=gj_plan,
                             )
                             quote_by_region[region.code] = gj_quote
-                    except Exception:
-                        pass
+                    except Exception as exc:
+                        logger.debug("Google Jump fallback failed for %s", region.code, exc_info=exc)
 
             # Try CDP fallback
             if cdp_targets:
@@ -1131,7 +1136,7 @@ async def run_page_scan(
                 keep_tabs=keep_tabs,
             )
             planner = AttemptPlanner(config=config)
-            for region, quote in zip(selected_regions, structured_quotes):
+            for region, quote in zip(selected_regions, structured_quotes, strict=False):
                 plan = planner.plan(quote)
                 emit_attempt_trace(
                     trace_ctx=trace_ctx,
@@ -1150,7 +1155,7 @@ async def run_page_scan(
                 )
             fallback_regions = [
                 region
-                for region, quote in zip(selected_regions, structured_quotes)
+                for region, quote in zip(selected_regions, structured_quotes, strict=False)
                 if quote.price is None
             ]
             fallback_by_region: dict[str, FlightQuote] = {}
@@ -1202,7 +1207,7 @@ async def run_page_scan(
             quotes = apply_plan_metadata(quotes)
             # trace page/CDP transport
             planner = AttemptPlanner(config=config)
-            for region, quote in zip(selected_regions, quotes):
+            for region, quote in zip(selected_regions, quotes, strict=False):
                 plan = planner.plan(quote)
                 emit_attempt_trace(
                     trace_ctx=trace_ctx,
@@ -1282,20 +1287,25 @@ async def run_page_scan(
                         [region_by_code[code] for code in chunk_codes if code in region_by_code]
                     )
 
-                merged_quotes: list[FlightQuote] = []
+                scrapling_merged_quotes: list[FlightQuote] = []
+                scrapling_progress_tasks: set[asyncio.Task[None]] = set()
 
-                async def on_region_complete_wrapper(region: RegionConfig, quote: FlightQuote) -> None:
-                    nonlocal merged_quotes
+                def on_region_complete_wrapper(region: RegionConfig, quote: FlightQuote) -> None:
+                    nonlocal scrapling_merged_quotes
                     apply_plan_metadata([quote])
                     if on_region_complete is not None:
                         on_region_complete(region, quote)
-                    merged_quotes = merge_quotes_by_region(merged_quotes, [quote])
-                    await emit_progress(
-                        stage="region_update",
-                        quotes=list(merged_quotes),
-                        completed_regions=[q.region for q in merged_quotes],
-                        used_cached_preview=preview_record is not None,
+                    scrapling_merged_quotes = merge_quotes_by_region(scrapling_merged_quotes, [quote])
+                    progress_task = asyncio.create_task(
+                        emit_progress(
+                            stage="region_update",
+                            quotes=list(scrapling_merged_quotes),
+                            completed_regions=[q.region for q in scrapling_merged_quotes],
+                            used_cached_preview=preview_record is not None,
+                        )
                     )
+                    scrapling_progress_tasks.add(progress_task)
+                    progress_task.add_done_callback(scrapling_progress_tasks.discard)
 
                 for batch_index, batch_regions in enumerate(batches):
                     if not batch_regions:
@@ -1306,11 +1316,11 @@ async def run_page_scan(
                         on_region_complete=on_region_complete_wrapper,
                     )
                     batch_quotes = apply_plan_metadata(batch_quotes)
-                    merged_quotes = merge_quotes_by_region(merged_quotes, batch_quotes)
+                    scrapling_merged_quotes = merge_quotes_by_region(scrapling_merged_quotes, batch_quotes)
                     await emit_progress(
                         stage="quick_live" if batch_index == 0 else "background_live",
-                        quotes=merged_quotes,
-                        completed_regions=[quote.region for quote in merged_quotes],
+                        quotes=scrapling_merged_quotes,
+                        completed_regions=[quote.region for quote in scrapling_merged_quotes],
                         used_cached_preview=preview_record is not None,
                     )
 
@@ -1340,14 +1350,16 @@ async def run_page_scan(
                                 keep_tabs=keep_tabs,
                             )
                             batch_fallback_quotes = apply_plan_metadata(batch_fallback_quotes)
-                            merged_quotes = merge_quotes_by_region(merged_quotes, batch_fallback_quotes)
+                            scrapling_merged_quotes = merge_quotes_by_region(scrapling_merged_quotes, batch_fallback_quotes)
                             await emit_progress(
                                 stage="background_live",
-                                quotes=merged_quotes,
-                                completed_regions=[quote.region for quote in merged_quotes],
+                                quotes=scrapling_merged_quotes,
+                                completed_regions=[quote.region for quote in scrapling_merged_quotes],
                                 used_cached_preview=preview_record is not None,
                             )
-                quotes = merged_quotes
+                if scrapling_progress_tasks:
+                    await asyncio.gather(*scrapling_progress_tasks)
+                quotes = scrapling_merged_quotes
             else:
                 quotes = await run_scrapling_pass(
                     selected_regions,
@@ -1361,7 +1373,7 @@ async def run_page_scan(
                 is_final=True,
             )
         elif normalized_transport == "opencli":
-            merged_quotes: list[FlightQuote] = []
+            opencli_merged_quotes: list[FlightQuote] = []
             completed_regions: list[str] = []
             scanned_region_codes: set[str] = set()
             region_by_code = {region.code: region for region in selected_regions}
@@ -1378,7 +1390,7 @@ async def run_page_scan(
                     continue
                 await emit_progress(
                     stage="plan_batch_start",
-                    quotes=apply_plan_metadata(list(merged_quotes)),
+                    quotes=apply_plan_metadata(list(opencli_merged_quotes)),
                     completed_regions=completed_regions,
                     batch=batch,
                     batch_index=batch_index,
@@ -1390,7 +1402,7 @@ async def run_page_scan(
                     enable_fallbacks=allow_browser_fallback,
                 )
                 batch_quotes = apply_plan_metadata(batch_quotes)
-                merged_quotes = merge_quotes_by_region(merged_quotes, batch_quotes)
+                opencli_merged_quotes = merge_quotes_by_region(opencli_merged_quotes, batch_quotes)
                 for quote in batch_quotes:
                     # Point 1: opencli_not_attempted must not be treated as successfully scanned in batches.
                     # This allows them to be picked up in the remaining_regions (deep補掃) pass.
@@ -1400,7 +1412,7 @@ async def run_page_scan(
                             completed_regions.append(quote.region)
                 await emit_progress(
                     stage="plan_batch_complete",
-                    quotes=apply_plan_metadata(list(merged_quotes)),
+                    quotes=apply_plan_metadata(list(opencli_merged_quotes)),
                     completed_regions=completed_regions,
                     batch=batch,
                     batch_index=batch_index,
@@ -1422,7 +1434,7 @@ async def run_page_scan(
                 )
                 await emit_progress(
                     stage="plan_batch_start",
-                    quotes=apply_plan_metadata(list(merged_quotes)),
+                    quotes=apply_plan_metadata(list(opencli_merged_quotes)),
                     completed_regions=completed_regions,
                     batch=fallback_batch,
                     batch_index=fallback_batch.batch_id,
@@ -1434,14 +1446,14 @@ async def run_page_scan(
                     enable_fallbacks=allow_browser_fallback,
                 )
                 remaining_quotes = apply_plan_metadata(remaining_quotes)
-                merged_quotes = merge_quotes_by_region(merged_quotes, remaining_quotes)
+                opencli_merged_quotes = merge_quotes_by_region(opencli_merged_quotes, remaining_quotes)
                 for quote in remaining_quotes:
                     scanned_region_codes.add(quote.region)
                     if quote.region not in completed_regions:
                         completed_regions.append(quote.region)
                 await emit_progress(
                     stage="plan_batch_complete",
-                    quotes=apply_plan_metadata(list(merged_quotes)),
+                    quotes=apply_plan_metadata(list(opencli_merged_quotes)),
                     completed_regions=completed_regions,
                     batch=fallback_batch,
                     batch_index=fallback_batch.batch_id,
@@ -1452,7 +1464,7 @@ async def run_page_scan(
             missing_regions = selected_region_codes_set - scanned_region_codes
             if missing_regions:
                 raise RuntimeError(f"SearchPlan batch scan missed regions: {sorted(missing_regions)}")
-            quotes = apply_plan_metadata(merged_quotes)
+            quotes = apply_plan_metadata(opencli_merged_quotes)
             await emit_progress(
                 stage="final",
                 quotes=quotes,

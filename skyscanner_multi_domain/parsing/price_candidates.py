@@ -204,9 +204,10 @@ def extract_embedded_price_candidates(
                 currency_match = JSON_CURRENCY_RE.search(window)
                 if not amount_match or not currency_match:
                     continue
-                amount = parse_amount(amount_match.group("amount"))
-                if amount is None:
+                parsed_amount = parse_amount(amount_match.group("amount"))
+                if parsed_amount is None:
                     continue
+                amount = parsed_amount
                 currency = currency_match.group("currency").upper()
             source = "script_state_price" if "__NEXT_DATA__" in window or "hydration" in lower_window else "embedded_json_price"
             candidate = PriceCandidate(

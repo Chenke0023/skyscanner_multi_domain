@@ -134,6 +134,7 @@ export type UIState = {
       fetchQualityTelemetry?: Record<string, unknown>;
       parserRecoveryTelemetry?: Record<string, unknown>;
       snapshotSummary?: Record<string, unknown>;
+      priceConfirmationSummary?: Record<string, unknown>;
       repairPlan?: {
         summary?: Record<string, unknown>;
         tasks?: Array<Record<string, unknown>>;

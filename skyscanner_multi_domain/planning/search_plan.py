@@ -104,6 +104,9 @@ class SearchStats:
     route_win_rate: dict[str, float]
     market_success_rate: dict[str, float]
     market_win_rate: dict[str, float]
+    market_average_confidence: dict[str, float]
+    market_fallback_rate: dict[str, float]
+    market_problem_rate: dict[str, float]
 
 
 def collect_search_stats(previous_rows_by_date: RowsByDate | None) -> SearchStats:
@@ -113,6 +116,10 @@ def collect_search_stats(previous_rows_by_date: RowsByDate | None) -> SearchStat
     market_total: dict[str, int] = {}
     market_success: dict[str, int] = {}
     market_wins: dict[str, int] = {}
+    market_confidence_total: dict[str, float] = {}
+    market_confidence_count: dict[str, int] = {}
+    market_fallback: dict[str, int] = {}
+    market_problem: dict[str, int] = {}
 
     for _trip_label, rows in previous_rows_by_date or []:
         priced_rows: list[dict[str, object]] = []
@@ -128,6 +135,14 @@ def collect_search_stats(previous_rows_by_date: RowsByDate | None) -> SearchStat
                 market_total[market] = market_total.get(market, 0) + 1
                 if has_price:
                     market_success[market] = market_success.get(market, 0) + 1
+                confidence = _numeric_confidence(row.get("confidence"))
+                if confidence is not None:
+                    market_confidence_total[market] = market_confidence_total.get(market, 0.0) + confidence
+                    market_confidence_count[market] = market_confidence_count.get(market, 0) + 1
+                if _uses_fallback(row):
+                    market_fallback[market] = market_fallback.get(market, 0) + 1
+                if _has_market_problem(row):
+                    market_problem[market] = market_problem.get(market, 0) + 1
             if has_price:
                 priced_rows.append(row)
 
@@ -148,6 +163,9 @@ def collect_search_stats(previous_rows_by_date: RowsByDate | None) -> SearchStat
         route_win_rate=_rates(route_wins, route_total),
         market_success_rate=_rates(market_success, market_total),
         market_win_rate=_rates(market_wins, market_total),
+        market_average_confidence=_averages(market_confidence_total, market_confidence_count),
+        market_fallback_rate=_rates(market_fallback, market_total),
+        market_problem_rate=_rates(market_problem, market_total),
     )
 
 
@@ -239,7 +257,7 @@ def build_market_candidates(
 ) -> list[MarketCandidate]:
     ordered_codes = dedupe_region_codes(region_codes)
     stats = collect_search_stats(previous_rows_by_date)
-    route_relevant = set()
+    route_relevant: set[str] = set()
     for country in (origin_country, destination_country):
         if country:
             route_relevant.update(COUNTRY_TO_REGION_CODES.get(country.upper(), ()))
@@ -252,23 +270,33 @@ def build_market_candidates(
         manual_score = 1.0 if code in manual_regions else 0.0
         success_rate = stats.market_success_rate.get(code, 0.5)
         win_rate = stats.market_win_rate.get(code, 0.0)
+        confidence_score = stats.market_average_confidence.get(code, 0.72)
+        fallback_rate = stats.market_fallback_rate.get(code, 0.0)
+        problem_rate = stats.market_problem_rate.get(code, 0.0)
+        reliability_score = _market_reliability_score(
+            success_rate=success_rate,
+            confidence_score=confidence_score,
+            win_rate=win_rate,
+            fallback_rate=fallback_rate,
+            problem_rate=problem_rate,
+        )
         usability_score = _currency_usability_score(code)
         position_score = 1.0 / (index + 1)
         score = (
-            0.24 * baseline_score
-            + 0.32 * route_score
-            + 0.18 * win_rate
-            + 0.14 * success_rate
-            + 0.08 * usability_score
+            0.22 * baseline_score
+            + 0.30 * route_score
+            + 0.17 * win_rate
+            + 0.16 * reliability_score
+            + 0.07 * usability_score
             + 0.05 * manual_score
             + 0.03 * position_score
         )
         score_breakdown = {
-            "baseline_region": 0.24 * baseline_score,
-            "origin_destination_region": 0.32 * route_score,
-            "history_win_rate": 0.18 * win_rate,
-            "recent_success_rate": 0.14 * success_rate,
-            "currency_usability": 0.08 * usability_score,
+            "baseline_region": 0.22 * baseline_score,
+            "origin_destination_region": 0.30 * route_score,
+            "history_win_rate": 0.17 * win_rate,
+            "market_reliability": 0.16 * reliability_score,
+            "currency_usability": 0.07 * usability_score,
             "user_selected_region": 0.05 * manual_score,
             "input_order": 0.03 * position_score,
         }
@@ -276,8 +304,17 @@ def build_market_candidates(
             MarketCandidate(
                 region_code=code,
                 rank=0,
-                reason=_market_reason(code, baseline_score, route_score, manual_score, win_rate),
-                reliability=success_rate,
+                reason=_market_reason(
+                    code,
+                    baseline_score,
+                    route_score,
+                    manual_score,
+                    win_rate,
+                    reliability_score,
+                    fallback_rate,
+                    problem_rate,
+                ),
+                reliability=reliability_score,
                 historical_win_rate=win_rate,
                 score=score,
                 score_breakdown=score_breakdown,
@@ -601,8 +638,58 @@ def _rates(successes: dict[str, int], totals: dict[str, int]) -> dict[str, float
     }
 
 
+def _averages(totals: dict[str, float], counts: dict[str, int]) -> dict[str, float]:
+    return {
+        key: totals.get(key, 0.0) / count
+        for key, count in counts.items()
+        if count > 0
+    }
+
+
+def _numeric_confidence(value: object) -> float | None:
+    if isinstance(value, (int, float)):
+        return max(0.0, min(float(value), 1.0))
+    return None
+
+
+def _uses_fallback(row: dict[str, object]) -> bool:
+    source_kind = str(row.get("source_kind") or "").strip().lower()
+    price_source = str(row.get("price_source") or "").strip().lower()
+    if source_kind in {"browser_fallback", "cdp_reuse", "cached"}:
+        return True
+    return price_source in {"first_price_fallback", "recovered_best", "manual_confirmed"}
+
+
+def _has_market_problem(row: dict[str, object]) -> bool:
+    status = str(row.get("status") or row.get("failure_reason") or "").strip().lower()
+    if any(marker in status for marker in ("challenge", "captcha", "loading", "timeout")):
+        return True
+    warnings = row.get("parser_warnings")
+    return isinstance(warnings, list) and bool(warnings)
+
+
+def _market_reliability_score(
+    *,
+    success_rate: float,
+    confidence_score: float,
+    win_rate: float,
+    fallback_rate: float,
+    problem_rate: float,
+) -> float:
+    raw_score = (
+        0.48 * success_rate
+        + 0.34 * confidence_score
+        + 0.12 * win_rate
+        + 0.06
+        - 0.16 * fallback_rate
+        - 0.22 * problem_rate
+    )
+    return max(0.0, min(raw_score, 1.0))
+
+
 def _currency_usability_score(region_code: str) -> float:
-    currency = REGIONS.get(region_code).currency if region_code in REGIONS else ""
+    region = REGIONS.get(region_code)
+    currency = region.currency if region is not None else ""
     return {
         "CNY": 1.0,
         "HKD": 0.9,
@@ -622,6 +709,9 @@ def _market_reason(
     route_score: float,
     manual_score: float,
     win_rate: float,
+    reliability_score: float,
+    fallback_rate: float,
+    problem_rate: float,
 ) -> str:
     reasons: list[str] = []
     if baseline_score:
@@ -632,6 +722,14 @@ def _market_reason(
         reasons.append("用户手动追加")
     if win_rate > 0:
         reasons.append(f"历史低价胜率 {win_rate:.0%}")
+    if reliability_score >= 0.75:
+        reasons.append(f"可靠度 {reliability_score:.0%}")
+    elif reliability_score < 0.45:
+        reasons.append(f"可靠度偏低 {reliability_score:.0%}")
+    if fallback_rate >= 0.5:
+        reasons.append(f"兜底依赖 {fallback_rate:.0%}")
+    if problem_rate >= 0.34:
+        reasons.append(f"验证/加载风险 {problem_rate:.0%}")
     return "，".join(reasons) if reasons else "候选对照市场"
 
 

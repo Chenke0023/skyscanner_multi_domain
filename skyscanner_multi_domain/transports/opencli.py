@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import logging
 import time
 from dataclasses import dataclass
 from typing import Any, Optional
@@ -20,6 +21,8 @@ from skyscanner_multi_domain.parsing.page_parser import sanity_check_quote
 from skyscanner_multi_domain.parsing.readiness import classify_opencli_page_readiness_with_confidence
 from skyscanner_multi_domain.scan.fetch_types import FetchAttempt, fetch_attempt_to_quote
 from skyscanner_multi_domain.scan.wait_policy import normalize_domain
+
+logger = logging.getLogger(__name__)
 
 TAB_WAIT_TIMEOUT = 20
 TAB_POLL_INTERVAL = 2.0
@@ -143,7 +146,7 @@ async def _run_opencli_async(
         stdout_bytes, stderr_bytes = await asyncio.wait_for(
             proc.communicate(), timeout=effective_timeout,
         )
-    except asyncio.TimeoutError:
+    except asyncio.TimeoutError as exc:
         proc.kill()
         stdout_bytes, stderr_bytes = await proc.communicate()
         result = OpenCLICommandResult(
@@ -156,7 +159,7 @@ async def _run_opencli_async(
         raise OpenCLITimeoutError(
             f"opencli command timed out after {effective_timeout}s: {' '.join(args)}",
             result=result,
-        )
+        ) from exc
 
     result = OpenCLICommandResult(
         returncode=proc.returncode or 0,
@@ -205,8 +208,8 @@ async def _tab_close_async(tab_id: str) -> None:
     """Close a specific tab."""
     try:
         await _run_opencli_async(["browser", "tab", "close", tab_id], timeout=5)
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.debug("Failed to close OpenCLI tab %s", tab_id, exc_info=exc)
 
 
 async def _tab_wait_interactive_async(tab_id: str, timeout: float = TAB_WAIT_TIMEOUT) -> bool:
@@ -224,8 +227,8 @@ async def _tab_wait_interactive_async(tab_id: str, timeout: float = TAB_WAIT_TIM
                 return True
             if page_state == "error":
                 return False
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug("Failed while waiting for OpenCLI tab %s", tab_id, exc_info=exc)
     return False
 
 
@@ -483,21 +486,21 @@ class OpenCLIDomainScheduler:
         # Flatten while preserving selected_regions order
         all_quotes: dict[str, FlightQuote] = {}
         for group_quotes in group_results:
-            for quote in group_quotes:
-                all_quotes[quote.region] = quote
+            for group_quote in group_quotes:
+                all_quotes[group_quote.region] = group_quote
 
-        ordered_quotes = []
+        ordered_quotes: list[FlightQuote] = []
         for region in selected_regions:
-            quote = all_quotes.get(region.code)
-            if quote is None:
-                quote = FlightQuote(
+            region_quote = all_quotes.get(region.code)
+            if region_quote is None:
+                region_quote = FlightQuote(
                     region=region.code, domain=region.domain,
                     price=None, currency=region.currency,
                     source_url=url_by_region.get(region.code, ""),
                     status="opencli_not_attempted",
                     error="Scheduler did not produce a quote for this region",
                 )
-            ordered_quotes.append(quote)
+            ordered_quotes.append(region_quote)
 
         telemetry = {
             "opencli_execution_mode": "domain_aware_parallel",
@@ -562,7 +565,13 @@ class OpenCLIDomainScheduler:
                 attempt: Optional[FetchAttempt] = None
                 success = False
 
-                def _error_to_attempt(exc: Exception, phase: str) -> FetchAttempt:
+                def _error_to_attempt(
+                    exc: Exception,
+                    phase: str,
+                    *,
+                    region: RegionConfig = region,
+                    url: str = url,
+                ) -> FetchAttempt:
                     if isinstance(exc, OpenCLIError):
                         return FetchAttempt(
                             transport="opencli",
@@ -677,8 +686,8 @@ class OpenCLIDomainScheduler:
                             },
                             region=region, quote=quote, page_text=page_text,
                         )
-                    except Exception:
-                        pass
+                    except Exception as exc:
+                        logger.debug("Failed to persist OpenCLI failure trace for %s", region.code, exc_info=exc)
 
                 if persist_failures and quote.price is None:
                     from skyscanner_multi_domain.scan.orchestrator import _persist_failure_log as _pfl
