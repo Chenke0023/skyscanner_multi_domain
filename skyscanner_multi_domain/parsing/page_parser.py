@@ -357,7 +357,7 @@ def _extract_date_from_text(text: str, expected_year: str = "") -> Optional[str]
                         mo_num = {"jan":1,"feb":2,"mar":3,"apr":4,"may":5,"jun":6,
                                   "jul":7,"aug":8,"sep":9,"oct":10,"nov":11,"dec":12}.get(mon[:3].lower(), 1)
                         date_str = f"{y}-{mo_num:0>2}-{d:0>2}"
-                    elif "月" in pattern.pattern or "日" in pattern.pattern:
+                    elif len(parts) == 2 and ("月" in pattern.pattern or "日" in pattern.pattern):
                         d, y = parts
                         date_str = f"{y}-01-{d:0>2}"
                     else:

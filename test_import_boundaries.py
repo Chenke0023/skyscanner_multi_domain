@@ -43,11 +43,14 @@ DOCUMENTED_PACKAGE_MODULES = {
     "skyscanner_multi_domain.planning.date_window",
     "skyscanner_multi_domain.planning.search_plan",
     "skyscanner_multi_domain.pricing.fx_rates",
+    "skyscanner_multi_domain.runtime.launchd",
     "skyscanner_multi_domain.runtime.paths",
     "skyscanner_multi_domain.scan.history",
     "skyscanner_multi_domain.scan.orchestrator",
     "skyscanner_multi_domain.scan.output_rows",
+    "skyscanner_multi_domain.scan.query_service",
     "skyscanner_multi_domain.scan.repair",
+    "skyscanner_multi_domain.scan.result_service",
     "skyscanner_multi_domain.transports.cdp",
     "skyscanner_multi_domain.transports.opencli",
     "skyscanner_multi_domain.transports.scrapling",
@@ -80,13 +83,15 @@ def test_desktop_logic_does_not_import_cli() -> None:
     assert "cli" not in imports
 
 
-def test_desktop_ui_service_cli_dependency_is_explicit_debt_only() -> None:
+def test_desktop_ui_service_no_longer_imports_cli() -> None:
     imports = _imports_for(ROOT / "desktop_ui_service.py")
-    assert "cli" in imports
+    assert "cli" not in imports
     handoff = (ROOT / "AI_AGENT_HANDOFF.md").read_text(encoding="utf-8")
     todo = (ROOT / "docs" / "todo.md").read_text(encoding="utf-8")
     assert "desktop_ui_service -> cli.SimpleCLI" in handoff
     assert "desktop_ui_service -> cli.SimpleCLI" in todo
+    assert "ResultService" in handoff
+    assert "ResultService" in todo
 
 
 def test_runtime_paths_importable() -> None:

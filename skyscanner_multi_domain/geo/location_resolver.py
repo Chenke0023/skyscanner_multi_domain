@@ -242,10 +242,10 @@ class LocationResolver:
         self._country_code_set = set(self._country_records_by_code)
         self._airports_by_country: dict[str, list[LocationRecord]] = {}
         for airport_code in sorted(self._airport_code_set):
-            record = self._pick_record_for_code(airport_code, kind="airport")
-            if record is None or not record.country:
+            airport_record = self._pick_record_for_code(airport_code, kind="airport")
+            if airport_record is None or not airport_record.country:
                 continue
-            self._airports_by_country.setdefault(record.country.upper(), []).append(record)
+            self._airports_by_country.setdefault(airport_record.country.upper(), []).append(airport_record)
 
     def normalize_location(self, value: str, prefer_metro: bool) -> str:
         return self.resolve_location(value, prefer_metro=prefer_metro).code

@@ -86,6 +86,14 @@ def _decision_price_key(row: CombinedQuoteRow, mode: str = "cheapest") -> tuple[
     )
 
 
+def _numeric_or_inf(value: object) -> float:
+    return float(value) if isinstance(value, (int, float)) else float("inf")
+
+
+def _numeric_or_none(value: object) -> float | None:
+    return float(value) if isinstance(value, (int, float)) else None
+
+
 def _compute_stability_label(
     row: CombinedQuoteRow,
     history_records: list[Any],
@@ -228,7 +236,7 @@ def _build_market_delta_explanation(
     ranked = sorted(priced_rows, key=_decision_price_key)
     winner = ranked[0]
     runner_up = ranked[1]
-    spread = float(runner_up["cheapest_cny_price"]) - float(winner["cheapest_cny_price"])
+    spread = _numeric_or_inf(runner_up.get("cheapest_cny_price")) - _numeric_or_inf(winner.get("cheapest_cny_price"))
     explanation = (
         f"{winner.get('region_name') or '-'} 比 {runner_up.get('region_name') or '-'} 低 ¥{spread:,.2f}"
         if spread >= 0.01
@@ -274,13 +282,14 @@ def _build_recommendation_payload(
     runner_up = recommendations[1] if len(recommendations) > 1 else None
     spread_text = "当前没有第二候选。"
     if runner_up is not None and isinstance(runner_up.get("cheapest_cny_price"), (int, float)):
-        spread = float(runner_up["cheapest_cny_price"]) - float(winner_price)
+        spread = _numeric_or_inf(runner_up.get("cheapest_cny_price")) - float(winner_price)
         spread_text = (
             f"比次优方案低 ¥{spread:,.2f}。"
             if spread >= 0.01
             else "与次优方案几乎持平。"
         )
-    source_text = str(winner.get("source_label") or source_kind_label(winner.get("source_kind")))
+    source_kind = winner.get("source_kind")
+    source_text = str(winner.get("source_label") or source_kind_label(source_kind if isinstance(source_kind, str) else None))
     reliability = str(winner.get("market_reliability_label") or "-")
     stability = str(winner.get("stability_label") or "-")
     return {
@@ -400,7 +409,7 @@ def _build_window_summary_text(
     runner_up = ranked[1] if len(ranked) > 1 else None
     spread_text = ""
     if runner_up is not None and isinstance(runner_up.get("cheapest_cny_price"), (int, float)):
-        spread = float(runner_up["cheapest_cny_price"]) - float(winner["cheapest_cny_price"])
+        spread = _numeric_or_inf(runner_up.get("cheapest_cny_price")) - _numeric_or_inf(winner.get("cheapest_cny_price"))
         spread_text = f"；比次优组合低 ¥{spread:,.2f}" if spread >= 0.01 else "；与次优组合几乎持平"
     history_summary = summarize_query_history(history_records) if history_records else None
     trend_text = ""
@@ -410,7 +419,7 @@ def _build_window_summary_text(
         )
     return (
         f"窗口最低价: {winner.get('date') or '-'} · {winner.get('region_name') or '-'} · "
-        f"¥{float(winner['cheapest_cny_price']):,.2f}{spread_text}{trend_text}"
+        f"¥{_numeric_or_inf(winner.get('cheapest_cny_price')):,.2f}{spread_text}{trend_text}"
     )
 
 
@@ -514,18 +523,18 @@ def _build_cheapest_conclusion(rows: list[CombinedQuoteRow]) -> dict[str, str | 
         sorted_rows = sorted(
             cheapest_candidates,
             key=lambda row: (
-                float(row.get("cheapest_cny_price")),
+                _numeric_or_inf(row.get("cheapest_cny_price")),
                 str(row.get("date") or ""),
                 str(row.get("region_name") or ""),
             ),
         )
         winner = sorted_rows[0]
         runner_up = sorted_rows[1] if len(sorted_rows) > 1 else None
-        winner_price = float(winner["cheapest_cny_price"])
+        winner_price = _numeric_or_inf(winner.get("cheapest_cny_price"))
         delta_text = "当前只有 1 条可比较的最低价结果。"
         history_delta = str(winner.get("delta_label") or "").strip()
         if runner_up is not None:
-            runner_up_price = float(runner_up["cheapest_cny_price"])
+            runner_up_price = _numeric_or_inf(runner_up.get("cheapest_cny_price"))
             delta = runner_up_price - winner_price
             if delta >= 0.01:
                 delta_text = f"比下一低价再省 ¥{delta:,.2f}。"
@@ -603,11 +612,11 @@ def _find_cheapest_highlight_signatures(
     ]
     if not cheapest_candidates:
         return set()
-    minimum_price = min(float(row["cheapest_cny_price"]) for row in cheapest_candidates)
+    minimum_price = min(_numeric_or_inf(row.get("cheapest_cny_price")) for row in cheapest_candidates)
     return {
         _row_signature(row)
         for row in cheapest_candidates
-        if abs(float(row["cheapest_cny_price"]) - minimum_price) < 0.0001
+        if abs(_numeric_or_inf(row.get("cheapest_cny_price")) - minimum_price) < 0.0001
     }
 
 
@@ -623,13 +632,9 @@ def _sort_combined_rows(rows: list[CombinedQuoteRow]) -> list[CombinedQuoteRow]:
         rows,
         key=lambda row: (
             row.get("cheapest_cny_price") is None,
-            float(row.get("cheapest_cny_price"))
-            if isinstance(row.get("cheapest_cny_price"), (int, float))
-            else float("inf"),
+            _numeric_or_inf(row.get("cheapest_cny_price")),
             row.get("best_cny_price") is None,
-            float(row.get("best_cny_price"))
-            if isinstance(row.get("best_cny_price"), (int, float))
-            else float("inf"),
+            _numeric_or_inf(row.get("best_cny_price")),
             str(row.get("updated_at") or ""),
             str(row.get("region_name") or ""),
         ),

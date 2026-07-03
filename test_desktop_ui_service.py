@@ -4,12 +4,14 @@ from pathlib import Path
 from unittest.mock import patch
 
 from desktop_ui_service import DesktopUIService
+from skyscanner_multi_domain.scan.confirmation import PriceConfirmationStore
 from skyscanner_multi_domain.scan.history import ScanHistoryStore
 
 
 def build_service(tmp_path: Path) -> DesktopUIService:
     service = DesktopUIService()
     service._state_path = tmp_path / "gui_last_query.json"
+    service.confirmations = PriceConfirmationStore(tmp_path / "price_confirmations.jsonl")
     service.history_store = ScanHistoryStore(tmp_path / "scan_history.sqlite3")
     service._refresh_history_lists()
     return service
@@ -113,6 +115,87 @@ def test_queue_failure_region_updates_retry_queue(tmp_path: Path) -> None:
     assert payload["queuedRegions"] == ["HK"]
     state = service.get_ui_state()
     assert state["alerts"]["pendingRetryRegions"] == ["HK"]
+
+
+def test_apply_repair_action_queues_matching_failure_class(tmp_path: Path) -> None:
+    service = build_service(tmp_path)
+    service._quote_snapshots_by_date = [
+        (
+            "2026-06-01",
+            [
+                {"region": "HK", "status": "page_parse_failed", "source_url": "https://example.test/hk"},
+                {"region": "SG", "status": "opencli_timeout", "source_url": "https://example.test/sg"},
+            ],
+        )
+    ]
+
+    payload = service.apply_repair_action({"action": "queue_retry", "failureClass": "parse_failed"})
+
+    assert payload["matched"] == 1
+    assert payload["queuedRegions"] == ["HK"]
+    assert service.get_ui_state()["alerts"]["pendingRetryRegions"] == ["HK"]
+
+
+def test_apply_repair_action_skip_removes_current_repair_task(tmp_path: Path) -> None:
+    service = build_service(tmp_path)
+    service._quote_snapshots_by_date = [
+        (
+            "2026-06-01",
+            [{"region": "HK", "status": "page_parse_failed", "source_url": "https://example.test/hk"}],
+        )
+    ]
+
+    before = service.get_ui_state()["results"]["trust"]["repairPlan"]["summary"]
+    payload = service.apply_repair_action({"action": "skip", "failureClass": "parse_failed"})
+    after = service.get_ui_state()["results"]["trust"]["repairPlan"]["summary"]
+
+    assert before["total_repair_tasks"] == 1
+    assert payload["skipped"] == 1
+    assert after["total_repair_tasks"] == 0
+
+
+def test_apply_repair_action_extend_wait_starts_selected_region_scan(tmp_path: Path) -> None:
+    service = build_service(tmp_path)
+    service._form_state["wait"] = "10"
+    service._quote_snapshots_by_date = [
+        (
+            "2026-06-01",
+            [{"region": "SG", "status": "page_loading", "source_url": "https://example.test/sg"}],
+        )
+    ]
+
+    with patch.object(service, "start_scan", return_value={"ok": True}) as start_scan:
+        payload = service.apply_repair_action({"action": "extend_wait", "failureClass": "still_loading"})
+
+    assert payload["action"] == "extend_wait"
+    assert service._form_state["wait"] == "18"
+    start_payload = start_scan.call_args.args[0]
+    assert start_payload["rerunScopeOverride"] == "selected_regions"
+    assert start_payload["selectedRegionCodes"] == ["SG"]
+    assert start_payload["allowBrowserFallback"] is True
+
+
+def test_record_price_confirmation_persists_sample_and_updates_trust_summary(tmp_path: Path) -> None:
+    service = build_service(tmp_path)
+    row = {
+        "date": "2026-06-01",
+        "route": "PEK -> HKG",
+        "region_code": "HK",
+        "region_name": "香港",
+        "link": "https://example.test/hk",
+        "cheapest_cny_price": 900.0,
+        "confidence": 0.9,
+        "price_source": "cheapest_block",
+    }
+
+    result = service.record_price_confirmation({"row": row, "status": "confirmed"})
+    state = service.get_ui_state()
+
+    assert result["summary"]["confirmed"] == 1
+    assert state["results"]["trust"]["priceConfirmationSummary"]["total"] == 1
+    samples = service.confirmations.load()
+    assert samples[0].region_code == "HK"
+    assert samples[0].status == "confirmed"
 
 
 def test_desktop_progress_includes_active_plan_phase(tmp_path: Path) -> None:

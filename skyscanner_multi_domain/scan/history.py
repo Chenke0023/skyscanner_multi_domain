@@ -128,13 +128,9 @@ def prioritize_region_codes(region_codes: Iterable[str], previous_rows_by_date: 
     ranked_rows.sort(
         key=lambda row: (
             row.get("cheapest_cny_price") is None,
-            float(row.get("cheapest_cny_price"))
-            if isinstance(row.get("cheapest_cny_price"), (int, float))
-            else float("inf"),
+            _numeric_or_inf(row.get("cheapest_cny_price")),
             row.get("best_cny_price") is None,
-            float(row.get("best_cny_price"))
-            if isinstance(row.get("best_cny_price"), (int, float))
-            else float("inf"),
+            _numeric_or_inf(row.get("best_cny_price")),
         )
     )
     winners: list[str] = []
@@ -146,6 +142,10 @@ def prioritize_region_codes(region_codes: Iterable[str], previous_rows_by_date: 
         if code not in winners:
             winners.append(code)
     return winners
+
+
+def _numeric_or_inf(value: Any) -> float:
+    return float(value) if isinstance(value, (int, float)) else float("inf")
 
 
 def get_failed_region_codes(
@@ -378,9 +378,7 @@ def build_delta_summary_lines(rows_by_date: RowsByDate) -> list[str]:
         changed_rows.sort(
             key=lambda row: (
                 row.get("cheapest_cny_price") is None,
-                float(row.get("cheapest_cny_price"))
-                if isinstance(row.get("cheapest_cny_price"), (int, float))
-                else float("inf"),
+                _numeric_or_inf(row.get("cheapest_cny_price")),
                 str(row.get("region_name") or ""),
             )
         )
@@ -410,7 +408,7 @@ def build_plan_telemetry(quotes_by_date: QuotesByDate) -> dict[str, Any]:
     best_quote = min(valid_quotes, key=_quote_price_key) if valid_quotes else None
     first_valid = min(
         valid_quotes,
-        key=lambda quote: _optional_int(quote.get("plan_rank")),
+        key=lambda quote: _optional_int(quote.get("plan_rank")) or 10**9,
     ) if valid_quotes else None
 
     return {
@@ -746,9 +744,7 @@ def build_history_series(
             ]
             priced_rows.sort(
                 key=lambda row: (
-                    float(row.get("cheapest_cny_price"))
-                    if isinstance(row.get("cheapest_cny_price"), (int, float))
-                    else float("inf"),
+                    _numeric_or_inf(row.get("cheapest_cny_price")),
                     str(row.get("region_name") or ""),
                 )
             )
@@ -805,9 +801,7 @@ def summarize_query_history(records: list["ScanRecord"]) -> QueryHistorySummary:
                 continue
             priced_rows.sort(
                 key=lambda row: (
-                    float(row.get("cheapest_cny_price"))
-                    if isinstance(row.get("cheapest_cny_price"), (int, float))
-                    else float("inf"),
+                    _numeric_or_inf(row.get("cheapest_cny_price")),
                     str(row.get("region_name") or ""),
                 )
             )
@@ -1034,6 +1028,8 @@ class ScanHistoryStore:
                     _serialize_grouped_rows(quotes_by_date),
                 ),
             )
+            if cursor.lastrowid is None:
+                raise RuntimeError("scan insert did not return a row id")
             return int(cursor.lastrowid)
 
     def is_favorite_query_key(self, query_key: str) -> bool:

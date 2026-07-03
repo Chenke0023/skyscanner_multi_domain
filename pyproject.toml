@@ -1,6 +1,6 @@
 [project]
 name = "skyscanner-multi-domain"
-version = "0.1.0"
+version = "1.2.0"
 description = "Skyscanner multi-market flight-price scanning engine, CLI, and desktop WebView app."
 requires-python = ">=3.12"
 
@@ -21,9 +21,9 @@ extend-exclude = [
 ]
 
 [tool.ruff.lint]
-# Default rule set (E4, E7, E9, F) — matches what the project already enforces.
+# Baseline correctness rules plus bugbear checks.
 # E501 (line-too-long) is intentionally not enabled; the codebase uses long lines.
-select = ["E4", "E7", "E9", "F"]
+select = ["E4", "E7", "E9", "F", "B"]
 
 [tool.ruff.lint.per-file-ignores]
 # Tests may import for side-effect / patch targets and use module-level side effects.
@@ -32,3 +32,53 @@ select = ["E4", "E7", "E9", "F"]
 [tool.pytest.ini_options]
 norecursedirs = "vendor"
 python_files = "test_*.py"
+
+[tool.mypy]
+python_version = "3.12"
+files = [
+    "skyscanner_multi_domain/runtime",
+    "skyscanner_multi_domain/pricing",
+    "skyscanner_multi_domain/geo",
+    "skyscanner_multi_domain/diagnostics",
+    "skyscanner_multi_domain/parsing/readiness.py",
+    "skyscanner_multi_domain/parsing/challenge.py",
+    "skyscanner_multi_domain/parsing/dom_parser.py",
+    "skyscanner_multi_domain/parsing/hydration_parser.py",
+    "skyscanner_multi_domain/parsing/network_parser.py",
+    "skyscanner_multi_domain/parsing/page_parser.py",
+    "skyscanner_multi_domain/parsing/price_candidates.py",
+    "skyscanner_multi_domain/parsing/quote_merge.py",
+    "skyscanner_multi_domain/parsing/structured_price_scanner.py",
+    "skyscanner_multi_domain/planning/date_window.py",
+    "skyscanner_multi_domain/planning/execution_policy.py",
+    "skyscanner_multi_domain/planning/search_plan.py",
+    "skyscanner_multi_domain/scan/config.py",
+    "skyscanner_multi_domain/scan/confirmation.py",
+    "skyscanner_multi_domain/scan/fetch_types.py",
+    "skyscanner_multi_domain/scan/fallback_router.py",
+    "skyscanner_multi_domain/scan/history.py",
+    "skyscanner_multi_domain/scan/orchestrator.py",
+    "skyscanner_multi_domain/scan/output_rows.py",
+    "skyscanner_multi_domain/scan/query_service.py",
+    "skyscanner_multi_domain/scan/repair.py",
+    "skyscanner_multi_domain/scan/result_service.py",
+    "skyscanner_multi_domain/scan/url_builder.py",
+    "skyscanner_multi_domain/scan/wait_policy.py",
+    "skyscanner_multi_domain/transports/cdp.py",
+    "skyscanner_multi_domain/transports/cdp_structured.py",
+    "skyscanner_multi_domain/transports/opencli.py",
+    "skyscanner_multi_domain/transports/scrapling.py",
+    "cli.py",
+    "desktop_logic.py",
+    "desktop_ui_service.py",
+    "skyscanner_neo.py",
+]
+exclude = [
+    "vendor/",
+    "legacy/",
+    "webui/",
+]
+ignore_missing_imports = true
+follow_imports = "silent"
+check_untyped_defs = true
+warn_unused_ignores = false

@@ -71,6 +71,65 @@ def test_build_market_candidates_uses_history_wins() -> None:
     assert candidates[0].region_code == "HK"
 
 
+def test_build_market_candidates_penalizes_low_confidence_fallback_and_challenge_history() -> None:
+    rows_by_date = [
+        (
+            "2026-05-20",
+            [
+                {
+                    "region_code": "HK",
+                    "cheapest_cny_price": 1200.0,
+                    "confidence": 0.35,
+                    "price_source": "first_price_fallback",
+                    "source_kind": "browser_fallback",
+                    "status": "page_challenge",
+                    "route": "PEK -> ALA",
+                },
+                {
+                    "region_code": "SG",
+                    "cheapest_cny_price": 1300.0,
+                    "confidence": 0.94,
+                    "price_source": "cheapest_block",
+                    "source_kind": "opencli",
+                    "status": "ok",
+                    "route": "PEK -> ALA",
+                },
+            ],
+        ),
+        (
+            "2026-05-21",
+            [
+                {
+                    "region_code": "HK",
+                    "confidence": 0.2,
+                    "price_source": "first_price_fallback",
+                    "source_kind": "browser_fallback",
+                    "status": "still_loading",
+                    "route": "PEK -> ALA",
+                },
+                {
+                    "region_code": "SG",
+                    "cheapest_cny_price": 1320.0,
+                    "confidence": 0.9,
+                    "price_source": "cheapest_block",
+                    "source_kind": "opencli",
+                    "status": "ok",
+                    "route": "PEK -> ALA",
+                },
+            ],
+        ),
+    ]
+
+    candidates = build_market_candidates(["HK", "SG"], rows_by_date)
+    by_code = {candidate.region_code: candidate for candidate in candidates}
+
+    assert [candidate.region_code for candidate in candidates] == ["SG", "HK"]
+    assert by_code["SG"].reliability > by_code["HK"].reliability
+    assert "market_reliability" in by_code["HK"].score_breakdown
+    assert "兜底依赖" in by_code["HK"].reason
+    assert {candidate.region_code for candidate in candidates} == {"HK", "SG"}
+
+
 def test_rank_route_pairs_prefers_earlier_airport_candidates() -> None:
     origins = [
         LocationRecord(name="Beijing", code="PEK", kind="airport", airport_type="large_airport"),

@@ -24,6 +24,8 @@ type DesktopApiShape = {
   uninstall_background_auto_refresh(): Promise<Record<string, unknown>>;
   queue_failure_region(payload: Record<string, unknown>): Promise<Record<string, unknown>>;
   run_retry_queue(): Promise<Record<string, unknown>>;
+  apply_repair_action(payload: Record<string, unknown>): Promise<Record<string, unknown>>;
+  record_price_confirmation(payload: Record<string, unknown>): Promise<Record<string, unknown>>;
 };
 
 declare global {
@@ -204,6 +206,14 @@ class MockDesktopApi implements DesktopApiShape {
   }
 
   async run_retry_queue(): Promise<Record<string, unknown>> {
+    return {};
+  }
+
+  async apply_repair_action(): Promise<Record<string, unknown>> {
+    return {};
+  }
+
+  async record_price_confirmation(): Promise<Record<string, unknown>> {
     return {};
   }
 }

@@ -11,12 +11,15 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import logging
 import os
 import time
 from typing import Any
 from urllib.parse import urljoin
 
 import httpx
+
+logger = logging.getLogger(__name__)
 
 
 class CaptchaSolverError(Exception):
@@ -357,7 +360,7 @@ class MultiBackendCaptchaSolver(BaseCaptchaSolver):
     async def health_check(self) -> dict[str, Any]:
         results: dict[str, Any] = {"status": "healthy", "backends": {}}
         all_unhealthy = True
-        for i, backend in enumerate(self.backends):
+        for backend in self.backends:
             try:
                 hc = await backend.health_check()
                 results["backends"][type(backend).__name__] = hc
@@ -401,8 +404,8 @@ class MultiBackendCaptchaSolver(BaseCaptchaSolver):
         for backend in self.backends:
             try:
                 await backend.close()
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug("Failed to close captcha backend %s", type(backend).__name__, exc_info=exc)
 
 
 # ── Backward-compatible CaptchaSolverClient ──────────────────────────────────

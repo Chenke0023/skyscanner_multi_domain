@@ -412,16 +412,31 @@ function DataTable({
   onOpenLink,
   highlightFailure,
   onQueueRetry,
+  onConfirmPrice,
 }: {
   columns: Array<{ key: string; label: string; align?: "right" | "left" }>;
   rows: ResultRow[];
   onOpenLink: (url: string) => void;
   highlightFailure?: boolean;
   onQueueRetry?: (row: ResultRow) => void;
+  onConfirmPrice?: (row: ResultRow, status: "confirmed" | "mismatched") => void;
 }) {
+  const [expandedKey, setExpandedKey] = useState<string | null>(null);
+
   if (!rows.length) {
     return <EmptyState text={highlightFailure ? "当前没有失败市场。" : "当前没有可展示结果。"} />;
   }
+
+  const rowKey = (row: ResultRow, index: number) =>
+    `${String(row.date)}-${String(row.route)}-${String(row.region_code)}-${index}`;
+
+  const hasDrillDown = (row: ResultRow) =>
+    Boolean(
+      (row.parser_warnings && row.parser_warnings.length > 0) ||
+        row.evidence_text ||
+        row.candidate_sources?.length ||
+        row.fallback_attempts?.length,
+    );
 
   return (
     <div className="table-shell">
@@ -438,6 +453,8 @@ function DataTable({
         </thead>
         <tbody>
           {rows.map((row, index) => {
+            const key = rowKey(row, index);
+            const expanded = expandedKey === key;
             const rowClassName = highlightFailure
               ? row.isReuseReady
                 ? "failure-row reuse"
@@ -448,41 +465,112 @@ function DataTable({
                   ? "price-row changed"
                   : "price-row";
             return (
-              <tr key={`${String(row.date)}-${String(row.route)}-${String(row.region_code)}-${index}`} className={rowClassName}>
-                {columns.map((column) => (
-                  <td key={column.key} className={column.align === "right" ? "align-right" : ""}>
-                    {column.key.includes("price") ? (
-                      formatMoney(row[column.key])
-                    ) : column.key === "confidence" ? (
-                      <span className={`trust-badge ${confidenceClass(row.confidence)}`}>
-                        {confidenceLabel(row.confidence)}
-                      </span>
-                    ) : column.key === "price_source" ? (
-                      <span className="source-badge">{priceSourceLabel(row.price_source)}</span>
-                    ) : column.key === "parser_warnings" ? (
-                      <span className={warningsSummary(row.parser_warnings) === "-" ? "muted-cell" : "warning-cell"}>
-                        {warningsSummary(row.parser_warnings)}
-                      </span>
-                    ) : (
-                      String(row[column.key] ?? "-")
-                    )}
+              <>
+                <tr key={key} className={rowClassName}>
+                  {columns.map((column) => (
+                    <td key={column.key} className={column.align === "right" ? "align-right" : ""}>
+                      {column.key.includes("price") ? (
+                        formatMoney(row[column.key])
+                      ) : column.key === "confidence" ? (
+                        <span className={`trust-badge ${confidenceClass(row.confidence)}`}>
+                          {confidenceLabel(row.confidence)}
+                        </span>
+                      ) : column.key === "price_source" ? (
+                        <span className="source-badge">{priceSourceLabel(row.price_source)}</span>
+                      ) : column.key === "parser_warnings" ? (
+                        <span className={warningsSummary(row.parser_warnings) === "-" ? "muted-cell" : "warning-cell"}>
+                          {warningsSummary(row.parser_warnings)}
+                        </span>
+                      ) : (
+                        String(row[column.key] ?? "-")
+                      )}
+                    </td>
+                  ))}
+                  <td>
+                    <div className="row-actions">
+                      {typeof row.link === "string" && row.link.startsWith("http") ? (
+                        <button className="toolbar-button" onClick={() => onOpenLink(String(row.link))} type="button">
+                          打开
+                        </button>
+                      ) : null}
+                      {highlightFailure && onQueueRetry ? (
+                        <button className="toolbar-button" onClick={() => onQueueRetry(row)} type="button">
+                          加入补扫
+                        </button>
+                      ) : null}
+                      {!highlightFailure && onConfirmPrice ? (
+                        <>
+                          <button className="toolbar-button" onClick={() => onConfirmPrice(row, "confirmed")} type="button">
+                            确认
+                          </button>
+                          <button className="toolbar-button" onClick={() => onConfirmPrice(row, "mismatched")} type="button">
+                            不符
+                          </button>
+                        </>
+                      ) : null}
+                      {hasDrillDown(row) ? (
+                        <button
+                          className="toolbar-button"
+                          onClick={() => setExpandedKey(expanded ? null : key)}
+                          type="button"
+                        >
+                          {expanded ? "收起" : "详情"}
+                        </button>
+                      ) : null}
+                    </div>
                   </td>
-                ))}
-                <td>
-                  <div className="row-actions">
-                    {typeof row.link === "string" && row.link.startsWith("http") ? (
-                      <button className="toolbar-button" onClick={() => onOpenLink(String(row.link))} type="button">
-                        打开
-                      </button>
-                    ) : null}
-                    {highlightFailure && onQueueRetry ? (
-                      <button className="toolbar-button" onClick={() => onQueueRetry(row)} type="button">
-                        加入补扫
-                      </button>
-                    ) : null}
-                  </div>
-                </td>
-              </tr>
+                </tr>
+                {expanded ? (
+                  <tr className="warning-detail-row" key={`${key}-detail`}>
+                    <td colSpan={columns.length + 1}>
+                      <div className="warning-detail-panel">
+                        {row.parser_warnings && row.parser_warnings.length > 0 ? (
+                          <div className="warning-detail-section">
+                            <strong>完整警告</strong>
+                            <ul>
+                              {row.parser_warnings.map((warning, widx) => (
+                                <li key={widx}>{String(warning)}</li>
+                              ))}
+                            </ul>
+                          </div>
+                        ) : null}
+                        {row.evidence_text ? (
+                          <div className="warning-detail-section">
+                            <strong>证据片段</strong>
+                            <p>{String(row.evidence_text)}</p>
+                          </div>
+                        ) : null}
+                        {row.candidate_sources && row.candidate_sources.length > 0 ? (
+                          <div className="warning-detail-section">
+                            <strong>候选来源</strong>
+                            <ul>
+                              {row.candidate_sources.map((source, sidx) => (
+                                <li key={sidx}>{String(source)}</li>
+                              ))}
+                            </ul>
+                          </div>
+                        ) : null}
+                        {row.fallback_attempts && row.fallback_attempts.length > 0 ? (
+                          <div className="warning-detail-section">
+                            <strong>Fallback chain</strong>
+                            <p>
+                              {row.fallback_attempts
+                                .map((attempt) => String(attempt.transport ?? attempt.status ?? "?"))
+                                .join(" -> ")}
+                            </p>
+                          </div>
+                        ) : null}
+                        <div className="warning-detail-meta">
+                          <span>Readiness: {String(row.readiness ?? "-")}</span>
+                          <span>来源: {priceSourceLabel(row.price_source)}</span>
+                          <span>候选数: {String(row.price_candidates_count ?? 0)}</span>
+                          <span>选中位次: {String(row.selected_candidate_rank ?? "-")}</span>
+                        </div>
+                      </div>
+                    </td>
+                  </tr>
+                ) : null}
+              </>
             );
           })}
         </tbody>
@@ -496,6 +584,7 @@ function FetchSummaryCard({ trust }: { trust: UIState["results"]["trust"] }) {
   const parser = trust?.parserRecoveryTelemetry ?? {};
   const snapshot = trust?.snapshotSummary ?? {};
   const repair = trust?.repairPlan?.summary ?? {};
+  const confirmation = trust?.priceConfirmationSummary ?? {};
   const total = numberValue(fetch.fetch_total_regions);
   if (!total) return null;
   const items = [
@@ -508,6 +597,7 @@ function FetchSummaryCard({ trust }: { trust: UIState["results"]["trust"] }) {
     ["Candidates", numberValue(parser.price_candidate_total)],
     ["Snapshots", numberValue(snapshot.snapshot_recommended_count)],
     ["Repair", numberValue(repair.total_repair_tasks)],
+    ["Confirmed", `${numberValue(confirmation.confirmed)} / ${numberValue(confirmation.total)}`],
   ];
   return (
     <section className="trust-summary-panel">
@@ -527,11 +617,19 @@ function FetchSummaryCard({ trust }: { trust: UIState["results"]["trust"] }) {
   );
 }
 
-function FailureReasonPanel({ trust }: { trust: UIState["results"]["trust"] }) {
+function FailureReasonPanel({
+  trust,
+  onAction,
+}: {
+  trust: UIState["results"]["trust"];
+  onAction: (payload: Record<string, unknown>) => void;
+}) {
   const byClass = trust?.repairPlan?.summary?.by_failure_class;
   const tasks = trust?.repairPlan?.tasks ?? [];
   if (!tasks.length && (!byClass || typeof byClass !== "object")) return null;
   const entries = byClass && typeof byClass === "object" ? Object.entries(byClass) : [];
+  const actionable = entries.filter(([, count]) => Number(count) > 0);
+  const waitFailureClass = actionable.find(([failureClass]) => failureClass === "still_loading" || failureClass === "empty_shell")?.[0];
   return (
     <section className="trust-detail-panel">
       <h4>失败市场修复</h4>
@@ -541,9 +639,31 @@ function FailureReasonPanel({ trust }: { trust: UIState["results"]["trust"] }) {
         ))}
       </div>
       <div className="repair-action-row">
-        <button className="toolbar-button" type="button">重试 parse_failed</button>
-        <button className="toolbar-button" type="button">重试 timeout</button>
-        <button className="toolbar-button" type="button">打开 challenge 链接</button>
+        {actionable.slice(0, 4).map(([failureClass]) => (
+          <button
+            className="toolbar-button"
+            key={`queue-${failureClass}`}
+            onClick={() => onAction({ action: "queue_retry", failureClass })}
+            type="button"
+          >
+            加入 {failureClass}
+          </button>
+        ))}
+        {waitFailureClass ? (
+          <button className="toolbar-button" onClick={() => onAction({ action: "extend_wait", failureClass: waitFailureClass })} type="button">
+            延长等待
+          </button>
+        ) : null}
+        {actionable.some(([failureClass]) => failureClass === "challenge") ? (
+          <button className="toolbar-button" onClick={() => onAction({ action: "open_links", failureClass: "challenge" })} type="button">
+            打开验证链接
+          </button>
+        ) : null}
+        {actionable.length ? (
+          <button className="toolbar-button" onClick={() => onAction({ action: "skip" })} type="button">
+            本轮跳过
+          </button>
+        ) : null}
       </div>
     </section>
   );
@@ -798,6 +918,34 @@ function App() {
       setIsPending(false);
       resetActionMessage();
     }
+  };
+
+  const handleRepairAction = async (payload: Record<string, unknown>) => {
+    setIsPending(true);
+    try {
+      const result = await desktopApi.apply_repair_action(payload);
+      const nextState = await desktopApi.get_ui_state();
+      setUiState(nextState);
+      setForm(nextState.form);
+      setActionMessage(result.action === "run_retry" || result.action === "extend_wait" ? "已开始修复补扫。" : "修复动作已应用。");
+    } catch (error) {
+      setActionMessage(error instanceof Error ? error.message : "修复动作失败。");
+    } finally {
+      setIsPending(false);
+      resetActionMessage();
+    }
+  };
+
+  const handlePriceConfirmation = async (row: ResultRow, status: "confirmed" | "mismatched") => {
+    try {
+      await desktopApi.record_price_confirmation({ row, status });
+      const nextState = await desktopApi.get_ui_state();
+      setUiState(nextState);
+      setActionMessage(status === "confirmed" ? "已记录确认样本。" : "已记录价格不符样本。");
+    } catch (error) {
+      setActionMessage(error instanceof Error ? error.message : "记录确认样本失败。");
+    }
+    resetActionMessage();
   };
 
   const handleEnvironmentCheck = async () => {
@@ -1151,6 +1299,7 @@ function App() {
                         ]}
                         rows={filteredResults.successRows}
                         onOpenLink={(url) => desktopApi.open_link(url)}
+                        onConfirmPrice={handlePriceConfirmation}
                       />
                     </div>
 
@@ -1159,13 +1308,13 @@ function App() {
                         失败市场 <small>{filteredResults.failureRows.length}</small>
                         <button
                           className="text-button"
-                          onClick={() => desktopApi.run_retry_queue().then(() => handleStartScan({ rerunScopeOverride: "selected_regions", allowBrowserFallback: false }))}
+                          onClick={() => handleRepairAction({ action: "run_retry" })}
                           type="button"
                         >
                           运行补扫队列
                         </button>
                       </h4>
-                      <FailureReasonPanel trust={uiState.results.trust} />
+                      <FailureReasonPanel trust={uiState.results.trust} onAction={handleRepairAction} />
                       <DataTable
                         columns={[
                           { key: "date", label: "日期" },

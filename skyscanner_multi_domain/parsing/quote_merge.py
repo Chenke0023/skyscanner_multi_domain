@@ -63,7 +63,7 @@ def _quote_from_evidence(
 
 def _evidence_ranking(evidences: list[QuoteEvidence], selected: QuoteEvidence | None) -> list[dict[str, object]]:
     selected_id = id(selected) if selected is not None else None
-    ranking = []
+    ranking: list[dict[str, object]] = []
     for evidence in sorted(evidences, key=lambda item: (item.confidence, item.price or 0), reverse=True):
         ranking.append(
             {
@@ -81,7 +81,7 @@ def _evidence_ranking(evidences: list[QuoteEvidence], selected: QuoteEvidence | 
 
 def _rejected_candidates(evidences: list[QuoteEvidence], selected: QuoteEvidence | None) -> list[dict[str, object]]:
     selected_id = id(selected) if selected is not None else None
-    rejected = []
+    rejected: list[dict[str, object]] = []
     for evidence in sorted(evidences, key=lambda item: (item.confidence, item.price or 0), reverse=True):
         if id(evidence) == selected_id:
             continue
