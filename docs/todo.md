@@ -56,6 +56,11 @@ Todo:
 - Do not reintroduce desktop reuse of `SimpleCLI`.
 - Continue shrinking duplicated CLI result helpers by delegating more CLI paths to
   `ResultService`.
+  - Removed the thin `SimpleCLI` result wrapper methods for quote
+    simplification, markdown/report persistence, route metadata, and snapshot
+    conversion; CLI call sites now call `ResultService` directly.
+  - Removed remaining thin query/result wrappers for query payload building,
+    row sorting, and best-row selection.
 
 Acceptance:
 
@@ -66,7 +71,7 @@ Acceptance:
 
 ### 3. SearchPlan explain output
 
-Status: implemented baseline.
+Status: implemented.
 
 Current implementation:
 
@@ -84,9 +89,12 @@ python cli.py page -o 北京 -d 阿拉木图 -t 2026-05-20 --date-window 1 --sho
 
 The command prints the plan and does not start a live scan.
 
+Verified 2026-07-07: the command prints market/date/route ordering, batches,
+and task priorities, then exits without starting a live scan.
+
 ### 4. SearchPlan outputs full execution plan
 
-Status: implemented baseline.
+Status: implemented.
 
 Current structures:
 
@@ -107,15 +115,11 @@ Acceptance:
 - `sum(len(batch.tasks) for batch in plan.batches) == len(plan.tasks)`.
 - `test_plan_task_count_unchanged_in_phase_two` passes.
 
+Verified by `tests/planning/test_search_plan.py`.
+
 ### 5. Batch execution progress for opencli path
 
-Status: implemented baseline.
-
-Todo:
-
-- Have scan orchestration emit batch phase progress as each `ScanBatch` starts/finishes.
-- Surface batch phase in CLI progress.
-- Surface batch phase in desktop WebView service payloads.
+Status: implemented.
 
 Do not:
 
@@ -133,13 +137,18 @@ Notes:
 
 - SearchPlan batches now emit `plan_batch_start` and `plan_batch_complete`.
 - Progress payload includes `active_plan_phase` and `plan_batch_*` fields.
+- CLI progress prints SearchPlan batch start/complete lines.
+- Desktop WebView service state and status updates include the active phase,
+  batch index/count, reason, and completion flag.
+- `test_opencli_emits_search_plan_batch_progress_without_dropping_regions`
+  guards that batch progress is emitted without reducing the result set.
 - No pruning, early stopping, or task skipping is enabled.
 
 ## P1: Result Trust And Evidence
 
 ### 6. Parser diagnostics in result objects
 
-Status: implemented baseline.
+Status: implemented.
 
 Current implementation:
 
@@ -156,7 +165,7 @@ Acceptance:
 
 ### 7. Decision report
 
-Status: implemented baseline for CLI Markdown reports.
+Status: implemented for CLI Markdown reports.
 
 Current implementation:
 
@@ -192,6 +201,11 @@ Todo:
     `save_window_results`, `rows_to_quote_snapshots`, row ranking helpers)
     (now in `skyscanner_multi_domain/scan/result_service.py`).
 - Keep `cli.py` focused on argparse, printing, and export.
+  - `cli.py` now keeps result rendering wrappers out of `SimpleCLI`; direct
+    result operations are routed through `self._result_service` or
+    `ResultService` helpers.
+  - Query payload construction now calls `self._query_service` directly instead
+    of preserving pass-through `SimpleCLI` methods.
 - Have `desktop_ui_service.py` call package service code.
 
 Acceptance:
@@ -239,7 +253,7 @@ Acceptance:
 
 ### 11. Desktop WebView scan phase display
 
-Status: implemented baseline.
+Status: implemented.
 
 Current implementation:
 
@@ -249,12 +263,7 @@ Current implementation:
 
 ### 12. Failed-market repair panel
 
-Status: implemented baseline.
-
-Todo:
-
-- Classify failed markets: loading, parse, network, challenge, browser missing.
-- Offer actions: retry, extend wait, open browser, skip.
+Status: implemented.
 
 Current implementation:
 
@@ -266,12 +275,14 @@ Current implementation:
   manual review, and skip current repair tasks without mutating scan history.
 - Retry/extend actions rerun selected regions only; challenge remains manual
   review and is not bypassed automatically.
+- `tests/scan/test_scan_repair.py` covers repair classification, no-flight
+  exclusion, manual challenge review, status filtering, and serialization.
 
 ## P2: Telemetry And Quality
 
 ### 13. Search Efficiency, Recovery UX & Report v3
 
-Status: implemented scaffold/baseline.
+Status: implemented.
 
 Current implementation:
 
@@ -285,6 +296,10 @@ Current implementation:
 - History persists exact-mode execution policy telemetry.
 - WebView state exposes fetch quality, parser recovery, snapshot summary, repair plan, candidate metadata, fallback attempts, readiness, confidence, source, evidence, and warnings.
 - WebView shows fetch trust summary, failure repair grouping, repair action buttons, and parser evidence snippets.
+- WebView result drill-down now keeps fallback transport, status/action, and
+  error/reason in the fallback chain instead of showing transport names only.
+- WebView test coverage now asserts fallback detail text appears in the evidence
+  panel and row drill-down.
 - Markdown decision reports mark Exact Mode/full scan and include candidate sources/fallback chain when available.
 - `docs/legacy_tk_policy.md` freezes legacy Tk.
 - Import-boundary tests prevent legacy Tk from importing new trust/recovery modules.
@@ -299,7 +314,7 @@ Policy:
 
 ### 14. OpenCLI Fetch Reliability & Parser Recovery v2
 
-Status: implemented baseline.
+Status: implemented.
 
 Current implementation:
 
@@ -328,6 +343,15 @@ Current implementation:
 - FlightQuote carries candidate count, selected rank, and candidate sources.
 - OpenCLI saves bounded snapshots for parse failures, no-flight failures, low-confidence recovery, and candidate-bearing failures.
 - `tools/replay_parser_snapshots.py` replays snapshot JSON files through the parser.
+- `tools/benchmark_fetch.py --compare-transports page,opencli` can run the
+  same route/date/market inputs across multiple transports and output one JSON
+  comparison report.
+- Benchmark runs have a hard `--max-run-seconds` guard so a slow transport
+  returns a timeout row instead of hanging the comparison script.
+- 2026-07-07 local smoke: `page,opencli` benchmark on 北京 -> 阿拉木图
+  (`2026-05-20`, 1 run, 5 regions, max 10s/run) saved
+  `runtime/benchmarks/bench_北京_阿拉木图_20260520_20260707_121522.json`;
+  page found 5/5 prices in 5.7s, OpenCLI timed out at 10s with 0/5.
 
 Policy:
 
@@ -339,7 +363,7 @@ Policy:
 
 ### 15. SearchPlan telemetry
 
-Status: implemented baseline in history/details.
+Status: implemented in history/details.
 
 Track:
 
@@ -359,7 +383,7 @@ Current implementation:
 
 ### 16. Market reliability score
 
-Status: implemented baseline.
+Status: implemented.
 
 Inputs:
 
@@ -388,13 +412,7 @@ Current implementation:
 
 ### 17. User-confirmed price loop
 
-Status: implemented baseline.
-
-Todo:
-
-- Add "open and confirm price".
-- Store confirmed / mismatched local sample.
-- Promote confirmed samples into parser fixtures.
+Status: implemented.
 
 Current implementation:
 
@@ -405,13 +423,20 @@ Current implementation:
 - Trust summary shows confirmed/total sample counts.
 - The stored sample keeps row/date/route/market/link, CNY prices, confidence,
   price source, parser warnings, evidence text, status, and note fields.
-- Promoting confirmed samples into parser fixtures remains future work.
+- `PriceConfirmationStore.export_confirmed_parser_fixtures(...)` exports
+  confirmed samples with evidence text into JSON parser-fixture payloads;
+  mismatched or evidence-less samples are skipped.
+- CLI `export-confirmations` exports the confirmed parser fixtures from the
+  runtime confirmation store into `tests/fixtures/price_confirmations/` or a
+  caller-provided `--output-dir`.
+- `tests/scan/test_confirmation.py` covers confirmation storage and fixture
+  export.
 
 ## P3: Release And CI
 
 ### 18. Release hygiene
 
-Status: implemented baseline.
+Status: implemented for v1.2.1 release readiness.
 
 Done:
 
@@ -422,16 +447,18 @@ Done:
 - `scripts/release_smoke.py` validates release metadata, PyInstaller data
   wiring, bundle version handling, and built WebView assets.
 - CI runs frontend build and release smoke after Python lint/type checks.
-
-Todo:
-
-- Create the actual GitHub Release after the branch is ready to tag.
-- Run a full macOS app build smoke on a release machine before attaching the app
-  artifact.
+- 2026-07-07 local release gates passed for v1.2.1:
+  `python -m ruff check .`,
+  `python -m mypy`, `python -m pytest -q`, `npm test -- --run &&
+  npm run build`, and `python scripts/release_smoke.py`.
+- 2026-07-07 local macOS app build smoke passed:
+  `./scripts/build_macos_standalone_app.sh` produced
+  `dist/Skyscanner 多市场比价.app` v1.2.1, executable present, size 229M.
+- v1.2.1 is ready to tag and publish with the built macOS app artifact.
 
 ### 19. CI
 
-Status: implemented baseline in `.github/workflows/ci.yml`.
+Status: implemented in `.github/workflows/ci.yml`.
 
 Minimum:
 
@@ -454,7 +481,8 @@ Current scope:
 
 ### 20. Swallowed exception audit
 
-Status: in progress.
+Status: implemented for current runtime scope; remaining broad handlers are
+documented boundary handlers.
 
 Done:
 
@@ -464,19 +492,53 @@ Done:
 - Reduced the broad-handler count from the initial 56 to 53 while preserving
   transport boundary behavior.
 - Removed remaining bare `except` handlers; none are present in the current audit.
+- Replaced broad config/manifest handlers in CLI manual-tabs loading and app
+  build-manifest loading with `OSError` / `JSONDecodeError`.
+- Replaced broad Google Jump HTTP fallback handlers with `aiohttp.ClientError`
+  / `TimeoutError`.
+- Replaced broad Neo raw-request HTTP handler with `aiohttp.ClientError` /
+  `TimeoutError`; current non-vendor broad-handler count is 52.
+- Replaced broad OpenCLI tab close/wait handlers with `OpenCLIError`;
+  current non-vendor broad-handler count is 50.
+- Replaced CDP version connection close broad handler with `OSError`;
+  current non-vendor broad-handler count is 49.
+- Replaced safe Scrapling CDP connection/cookie/probe handlers and structured
+  CDP eval/poll/target-select handlers with transport-specific exception sets;
+  current non-vendor broad-handler count is 40.
+- Replaced Google Jump CDP navigation and Neo doctor session-persistence
+  handlers with specific exception sets; current non-vendor broad-handler count
+  is 38.
+- Replaced CDP eval/page-loop handlers and OpenCLI orchestration/snapshot
+  handlers with transport/file exception sets; current non-vendor broad-handler
+  count is 31.
+- Replaced scan-orchestrator parser/history/Google-Jump fallback handlers,
+  Playwright probe cleanup handlers, page-snippet coercion, text extraction,
+  captcha health/backend handlers, and deterministic captcha-quote build
+  handlers with specific exception sets.
+- Current non-vendor broad-handler count is 9; remaining broad handlers are
+  top-level UI/benchmark/legacy boundaries or third-party Scrapling fetch
+  boundaries where narrowing would risk changing external error behavior.
+- `tests/tools/test_benchmark_fetch.py` now covers the benchmark boundary
+  handler for scan exceptions and hard timeouts before any future narrowing.
+- `tests/test_desktop_ui_service_boundaries.py` covers the desktop point-scan
+  worker boundary for setup failures and cancel-preferred handling, plus the
+  expanded-route scan worker setup-failure boundary.
+- Desktop scan workers now share one `_handle_worker_exception` boundary path,
+  so point and expanded scans keep the same cancel-vs-error behavior.
+- `test_compare_via_scrapling_returns_failure_quote_when_fetchers_raise`
+  covers Scrapling stealth/HTTP fetcher exceptions returning a failure quote
+  instead of escaping the transport boundary.
 
 Todo:
 
-- Continue reducing broad `except Exception` handlers by replacing generic
-  catches with transport-specific exception types where practical.
+- Before changing any of the remaining broad boundary handlers, add focused
+  coverage for the specific external exception being narrowed.
 
 ## Suggested Next Five Tasks
 
 1. Keep the removed `desktop_ui_service -> cli.SimpleCLI` boundary guarded.
-2. Run a real-world benchmark comparing main vs OpenCLI v2 on the same route/date/market set.
-3. Add richer WebView warning drill-down with evidence snippets, candidate sources, and fallback chain details.
-4. Continue shrinking `cli.py` by delegating CLI result output to `ResultService`.
-5. Prepare the actual GitHub Release/tag once the working tree is ready.
+2. Add focused coverage before narrowing any remaining broad boundary handler.
+3. Publish v1.2.1 release artifacts after the branch is pushed.
 
 ## Do Not Do Yet
 

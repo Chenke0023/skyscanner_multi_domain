@@ -1487,6 +1487,12 @@ class DesktopUIService:
             )
             self._log_locked("扫描已被用户取消。")
 
+    def _handle_worker_exception(self, exc: BaseException) -> None:
+        if self._cancel_event.is_set():
+            self._handle_cancelled()
+        else:
+            self._handle_scan_error(str(exc))
+
     def _trigger_alert_notifications_locked(
         self,
         rows_by_date: list[tuple[str, list[dict[str, Any]]]],
@@ -2044,10 +2050,7 @@ class DesktopUIService:
         except asyncio.CancelledError:
             self._handle_cancelled()
         except Exception as exc:
-            if self._cancel_event.is_set():
-                self._handle_cancelled()
-            else:
-                self._handle_scan_error(str(exc))
+            self._handle_worker_exception(exc)
 
     def _run_expanded_scan_worker(
         self,
@@ -2473,7 +2476,4 @@ class DesktopUIService:
         except asyncio.CancelledError:
             self._handle_cancelled()
         except Exception as exc:
-            if self._cancel_event.is_set():
-                self._handle_cancelled()
-            else:
-                self._handle_scan_error(str(exc))
+            self._handle_worker_exception(exc)

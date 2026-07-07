@@ -12,6 +12,7 @@ from cli import (
     run_failure_replay_command,
 )
 from skyscanner_multi_domain.scan.result_service import (
+    ResultService,
     build_decision_summary as _build_decision_summary,
     build_warning_detail_section as _build_warning_detail_section,
     confidence_label as _confidence_label,
@@ -187,9 +188,9 @@ class CliParserTests(unittest.TestCase):
 
 class MarkdownFormattingTests(unittest.TestCase):
     def test_window_markdown_shows_round_trip_range(self) -> None:
-        cli = SimpleCLI()
+        results = ResultService()
 
-        payload = cli.build_window_markdown_table(
+        payload = results.build_window_markdown_table(
             rows_by_date=[],
             origin="SHAA",
             destination="HKG",
@@ -539,7 +540,7 @@ class WarningDetailSectionTests(unittest.TestCase):
 
 class MarkdownReportTrustTests(unittest.TestCase):
     def test_build_markdown_table_includes_trust_columns_and_decision(self) -> None:
-        cli = SimpleCLI()
+        results = ResultService()
         rows = [
             _make_simplified_row(
                 region_name="中国",
@@ -557,7 +558,7 @@ class MarkdownReportTrustTests(unittest.TestCase):
             ),
         ]
 
-        payload = cli.build_markdown_table(
+        payload = results.build_markdown_table(
             rows=rows,
             origin="北京",
             destination="阿拉木图",
@@ -574,12 +575,12 @@ class MarkdownReportTrustTests(unittest.TestCase):
         self.assertIn("证据片段：Best 2,610 CNY direct", payload)
 
     def test_build_markdown_table_tolerates_rows_without_trust_metadata(self) -> None:
-        cli = SimpleCLI()
+        results = ResultService()
         legacy_row = _make_simplified_row()
         for key in ("confidence", "price_source", "evidence_text", "parser_warnings"):
             legacy_row.pop(key, None)
 
-        payload = cli.build_markdown_table(
+        payload = results.build_markdown_table(
             rows=[legacy_row],
             origin="北京",
             destination="阿拉木图",
@@ -590,7 +591,7 @@ class MarkdownReportTrustTests(unittest.TestCase):
         self.assertNotIn("证据片段：", payload)
 
     def test_build_window_markdown_table_includes_decision_section(self) -> None:
-        cli = SimpleCLI()
+        results = ResultService()
         rows_a = [
             _make_simplified_row(
                 region_name="中国",
@@ -608,7 +609,7 @@ class MarkdownReportTrustTests(unittest.TestCase):
             ),
         ]
 
-        payload = cli.build_window_markdown_table(
+        payload = results.build_window_markdown_table(
             rows_by_date=[("2026-05-20", rows_a), ("2026-05-21", rows_b)],
             origin="北京",
             destination="阿拉木图",

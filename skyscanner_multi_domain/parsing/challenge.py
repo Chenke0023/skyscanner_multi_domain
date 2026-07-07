@@ -15,7 +15,7 @@ def coerce_page_snippet(value: Any) -> str:
     if callable(value):
         try:
             value = value()
-        except Exception:
+        except (AttributeError, TypeError, ValueError):
             value = None
     if isinstance(value, (bytes, bytearray)):
         value = value.decode("utf-8", errors="ignore")

@@ -65,7 +65,7 @@ async def _safe_eval(ws_url: str, stage: str, expression: str, *, retries: int =
     for attempt in range(retries + 1):
         try:
             return await cdp_eval(ws_url, expression, max_retries=0)
-        except Exception as exc:  # noqa: BLE001
+        except (aiohttp.ClientError, asyncio.TimeoutError, json.JSONDecodeError, RuntimeError) as exc:
             last_error = exc
             if attempt < retries and _is_transient_eval_error(exc):
                 await asyncio.sleep(0.75 * (attempt + 1))
@@ -474,7 +474,7 @@ async def wait_for_result_state(
 
         except CdpStageError as exc:
             logger.debug("CDP page state poll stage failed", exc_info=exc)
-        except Exception as exc:
+        except (aiohttp.ClientError, asyncio.TimeoutError, json.JSONDecodeError, RuntimeError) as exc:
             logger.debug("CDP page state poll failed", exc_info=exc)
 
         await asyncio.sleep(poll_interval)
@@ -627,9 +627,9 @@ async def compare_via_cdp_structured(
                             owned_tab_ids.add(tab_id)
                             trace.append("target_select:ok opened_replacement_tab=true")
                             failure_stage = None
-                        except Exception as open_exc:  # noqa: BLE001
+                        except (aiohttp.ClientError, asyncio.TimeoutError, json.JSONDecodeError, RuntimeError) as open_exc:
                             capture["stageErrors"].append({"stage": "target_select", "error": str(open_exc)})
-                except Exception as exc:  # noqa: BLE001
+                except (aiohttp.ClientError, asyncio.TimeoutError, json.JSONDecodeError, RuntimeError) as exc:
                     failure_stage = "target_select"
                     capture["stageErrors"].append({"stage": failure_stage, "error": str(exc)})
                     trace.append(f"target_select:failed {exc}")
@@ -639,7 +639,7 @@ async def compare_via_cdp_structured(
                         tabs = await cdp_list_tabs(session)
                         tab = next((item for item in tabs if item.get("id") == tab_id), {})
                         ws_url = str(tab.get("webSocketDebuggerUrl", ""))
-                    except Exception as exc:  # noqa: BLE001
+                    except (aiohttp.ClientError, asyncio.TimeoutError, json.JSONDecodeError, RuntimeError) as exc:
                         failure_stage = failure_stage or "target_select"
                         capture["stageErrors"].append({"stage": "target_select", "error": str(exc)})
 
@@ -740,7 +740,7 @@ async def compare_via_cdp_structured(
                 for tab_id in owned_tab_ids:
                     try:
                         await cdp_close_tab(session, tab_id)
-                    except Exception as exc:
+                    except (aiohttp.ClientError, asyncio.TimeoutError, json.JSONDecodeError, RuntimeError) as exc:
                         logger.debug("Failed to close owned structured CDP tab %s", tab_id, exc_info=exc)
 
     return quotes

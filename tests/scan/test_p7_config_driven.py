@@ -483,6 +483,14 @@ class CliConfigBuildingTests(unittest.TestCase):
         cfg = SimpleCLI._build_scan_config(args)
         assert cfg.challenge_policy == ChallengePolicy.MANUAL
 
+    def test_build_scan_config_ignores_bad_manual_tabs_json(self) -> None:
+        from cli import SimpleCLI
+        import argparse
+
+        args = argparse.Namespace(manual_tabs_json="/tmp/missing-manual-tabs.json")
+        cfg = SimpleCLI._build_scan_config(args)
+        assert cfg.manual_tabs == {}
+
 
 if __name__ == "__main__":
     unittest.main()

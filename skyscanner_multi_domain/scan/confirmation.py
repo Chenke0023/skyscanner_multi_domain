@@ -61,6 +61,33 @@ class PriceConfirmationStore:
             "latest_at": samples[-1].created_at if samples else None,
         }
 
+    def export_confirmed_parser_fixtures(self, output_dir: Path) -> list[Path]:
+        output_dir.mkdir(parents=True, exist_ok=True)
+        paths: list[Path] = []
+        for sample in self.load():
+            if sample.status != "confirmed" or not sample.evidence_text.strip():
+                continue
+            payload = {
+                "date": sample.date,
+                "route": sample.route,
+                "region_code": sample.region_code,
+                "region_name": sample.region_name,
+                "link": sample.link,
+                "expected": {
+                    "cheapest_cny_price": sample.cheapest_cny_price,
+                    "best_cny_price": sample.best_cny_price,
+                    "price_source": sample.price_source,
+                },
+                "confidence": sample.confidence,
+                "parser_warnings": sample.parser_warnings,
+                "evidence_text": sample.evidence_text,
+                "created_at": sample.created_at,
+            }
+            path = output_dir / f"{_safe_fixture_token(sample.date)}_{_safe_fixture_token(sample.region_code)}_{len(paths) + 1}.json"
+            path.write_text(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
+            paths.append(path)
+        return paths
+
 
 def sample_from_row(
     row: dict[str, Any],
@@ -117,3 +144,8 @@ def _string_list(value: object) -> list[str]:
     if not isinstance(value, list):
         return []
     return [str(item) for item in value if str(item).strip()]
+
+
+def _safe_fixture_token(value: object) -> str:
+    token = "".join(ch for ch in str(value or "") if ch.isalnum())[:24]
+    return token or "unknown"

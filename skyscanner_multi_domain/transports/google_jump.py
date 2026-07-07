@@ -10,10 +10,13 @@ Strategy:
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import random
 import re
 from urllib.parse import quote, urlencode
+
+import aiohttp
 
 from skyscanner_multi_domain.models import FlightQuote, RegionConfig
 from skyscanner_multi_domain.transports.context import get_transport_context
@@ -50,7 +53,6 @@ async def _fetch_google_search(
     timeout: float = 15.0,
 ) -> str:
     """Fetch Google search results page HTML."""
-    import aiohttp
     ctx = get_transport_context()
     params = {"q": query, "hl": "en", "num": "10"}
     headers = {
@@ -157,7 +159,7 @@ async def _cdp_navigate_via_google(
                         timeout_seconds=15,
                     )
                     return True
-    except Exception as exc:
+    except (aiohttp.ClientError, asyncio.TimeoutError, json.JSONDecodeError, RuntimeError) as exc:
         logger.debug("Google referrer navigation failed", exc_info=exc)
     return False
 
@@ -197,7 +199,7 @@ async def google_search_jump(
         if links:
             # Return the Google search URL as a referrer
             return _build_google_search_url(origin, destination, date)
-    except Exception as exc:
+    except (aiohttp.ClientError, TimeoutError) as exc:
         logger.debug("Google search referrer discovery failed", exc_info=exc)
     return None
 
@@ -212,7 +214,6 @@ async def build_quote_via_google_jump(
     timeout: float = 30.0,
 ) -> FlightQuote | None:
     """Build a FlightQuote that includes a Google referrer, to reduce challenge rate."""
-    import aiohttp
     ctx = get_transport_context()
     referrer = await google_search_jump(
         skyscanner_url, origin, destination, date, timeout=timeout,
@@ -234,6 +235,6 @@ async def build_quote_via_google_jump(
                 quote = extract_page_quote(region, skyscanner_url, text)
                 quote.source_kind = "google_referrer"
                 return quote
-    except Exception as exc:
+    except (aiohttp.ClientError, TimeoutError) as exc:
         logger.debug("Google referrer fetch failed", exc_info=exc)
     return None

@@ -175,7 +175,7 @@ class TwoCaptchaSolver(BaseCaptchaSolver):
                 json={"clientKey": self.api_key},
             )
             return {"status": "healthy" if resp.status_code == 200 else "unhealthy", "provider": "2captcha"}
-        except Exception as exc:
+        except httpx.HTTPError as exc:
             return {"status": "unhealthy", "error": str(exc), "provider": "2captcha"}
 
     async def _create_task(self, task_type: str, website_url: str, website_key: str, **kwargs) -> str:
@@ -263,7 +263,7 @@ class CapSolverSolver(BaseCaptchaSolver):
                 json={"clientKey": self.api_key},
             )
             return {"status": "healthy" if resp.status_code == 200 else "unhealthy", "provider": "capsolver"}
-        except Exception as exc:
+        except httpx.HTTPError as exc:
             return {"status": "unhealthy", "error": str(exc), "provider": "capsolver"}
 
     async def _create_and_poll(self, task: dict[str, Any], max_wait: int = 120) -> dict[str, Any]:
@@ -366,7 +366,7 @@ class MultiBackendCaptchaSolver(BaseCaptchaSolver):
                 results["backends"][type(backend).__name__] = hc
                 if hc.get("status") == "healthy":
                     all_unhealthy = False
-            except Exception as exc:
+            except (CaptchaSolverError, httpx.HTTPError, OSError) as exc:
                 results["backends"][type(backend).__name__] = {"status": "unhealthy", "error": str(exc)}
         if all_unhealthy:
             results["status"] = "unhealthy"
@@ -380,7 +380,7 @@ class MultiBackendCaptchaSolver(BaseCaptchaSolver):
                 result = await fn(*args, **kwargs)
                 if result:
                     return result
-            except Exception as exc:
+            except (CaptchaSolverError, httpx.HTTPError, OSError) as exc:
                 last_error = exc
                 continue
         raise CaptchaSolverError(f"All backends failed for {method}: {last_error}")
@@ -404,7 +404,7 @@ class MultiBackendCaptchaSolver(BaseCaptchaSolver):
         for backend in self.backends:
             try:
                 await backend.close()
-            except Exception as exc:
+            except (CaptchaSolverError, httpx.HTTPError, OSError) as exc:
                 logger.debug("Failed to close captcha backend %s", type(backend).__name__, exc_info=exc)
 
 

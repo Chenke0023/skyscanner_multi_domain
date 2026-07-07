@@ -1,4 +1,5 @@
 import {
+  Fragment,
   startTransition,
   useDeferredValue,
   useEffect,
@@ -101,6 +102,13 @@ function listSummary(value: unknown): string {
   if (!Array.isArray(value)) return "-";
   const cleaned = value.map((item) => String(item).trim()).filter(Boolean);
   return cleaned.length ? cleaned.join(", ") : "-";
+}
+
+function fallbackAttemptLabel(attempt: Record<string, unknown>): string {
+  const transport = String(attempt.transport ?? "?");
+  const status = String(attempt.status ?? attempt.action ?? "").trim();
+  const error = String(attempt.error ?? attempt.reason ?? "").trim();
+  return [transport, status, error].filter(Boolean).join(" · ");
 }
 
 function planProgressText(progress: UIState["status"]["progress"]): string {
@@ -465,7 +473,7 @@ function DataTable({
                   ? "price-row changed"
                   : "price-row";
             return (
-              <>
+              <Fragment key={key}>
                 <tr key={key} className={rowClassName}>
                   {columns.map((column) => (
                     <td key={column.key} className={column.align === "right" ? "align-right" : ""}>
@@ -555,7 +563,7 @@ function DataTable({
                             <strong>Fallback chain</strong>
                             <p>
                               {row.fallback_attempts
-                                .map((attempt) => String(attempt.transport ?? attempt.status ?? "?"))
+                                .map((attempt) => fallbackAttemptLabel(attempt))
                                 .join(" -> ")}
                             </p>
                           </div>
@@ -570,7 +578,7 @@ function DataTable({
                     </td>
                   </tr>
                 ) : null}
-              </>
+              </Fragment>
             );
           })}
         </tbody>
@@ -683,7 +691,7 @@ function ParserEvidencePanel({ rows }: { rows: ResultRow[] }) {
             <small>候选来源：{listSummary(row.candidate_sources)}</small>
             <small>Readiness：{String(row.readiness ?? "-")}</small>
             {row.evidence_text ? <p>{String(row.evidence_text)}</p> : null}
-            {row.fallback_attempts?.length ? <small>Fallback chain: {row.fallback_attempts.map((attempt) => String(attempt.transport ?? attempt.status ?? "?")).join(" -> ")}</small> : null}
+            {row.fallback_attempts?.length ? <small>Fallback chain: {row.fallback_attempts.map((attempt) => fallbackAttemptLabel(attempt)).join(" -> ")}</small> : null}
           </div>
         ))}
       </div>

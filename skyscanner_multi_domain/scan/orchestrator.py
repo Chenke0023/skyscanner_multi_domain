@@ -8,6 +8,7 @@ import inspect
 import json
 import logging
 import re
+import sqlite3
 from datetime import datetime
 from enum import Enum
 from pathlib import Path
@@ -276,7 +277,7 @@ def _persist_failure_log(
                 "parser_snapshot",
                 page_parse_diagnostics_to_dict(diagnostics),
             )
-        except Exception as exc:
+        except (TypeError, ValueError) as exc:
             logger.debug("Failed to attach parser snapshot to failure log", exc_info=exc)
 
     # Add failure class to extra for richer failure logs
@@ -501,7 +502,8 @@ async def run_page_scan(
 
                 resolved_history_store = history_store or ScanHistoryStore()
                 latest_record_for_plan = resolved_history_store.get_latest_scan(query_payload)
-            except Exception:
+            except (OSError, json.JSONDecodeError, sqlite3.Error) as exc:
+                logger.debug("Failed to load latest scan history for planning", exc_info=exc)
                 latest_record_for_plan = None
         identity = query_payload.get("identity") if isinstance(query_payload, dict) else {}
         identity = identity if isinstance(identity, dict) else {}
@@ -960,7 +962,7 @@ async def run_page_scan(
                                 plan=gj_plan,
                             )
                             quote_by_region[region.code] = gj_quote
-                    except Exception as exc:
+                    except (OSError, RuntimeError) as exc:
                         logger.debug("Google Jump fallback failed for %s", region.code, exc_info=exc)
 
             # Try CDP fallback

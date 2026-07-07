@@ -4,7 +4,7 @@ from scripts.release_smoke import read_release_version, run_release_smoke
 
 
 def test_release_version_is_semver() -> None:
-    assert read_release_version() == "1.2.0"
+    assert read_release_version() == "1.2.1"
 
 
 def test_release_smoke_metadata_passes_without_requiring_built_webui() -> None:
