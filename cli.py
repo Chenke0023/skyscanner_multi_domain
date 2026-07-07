@@ -15,6 +15,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import fcntl
+import json
 import logging
 import plistlib
 import subprocess
@@ -61,11 +62,7 @@ from skyscanner_multi_domain.planning.search_plan import (
     rank_route_pairs,
     render_search_plan,
 )
-from skyscanner_multi_domain.scan.output_rows import (
-    CombinedQuoteRow,
-    QuoteRow,
-    SimplifiedQuoteRow,
-)
+from skyscanner_multi_domain.scan.output_rows import QuoteRow, SimplifiedQuoteRow
 from skyscanner_multi_domain.scan.config import (
     CdpMode,
     ChallengePolicy,
@@ -73,6 +70,7 @@ from skyscanner_multi_domain.scan.config import (
     ScanConfig,
     TransportMode,
 )
+from skyscanner_multi_domain.scan.confirmation import PriceConfirmationStore
 from skyscanner_multi_domain.scan.query_service import QueryService
 from skyscanner_multi_domain.scan.result_service import (
     ResultService,
@@ -107,6 +105,16 @@ def run_failure_replay_command(args: argparse.Namespace) -> int:
     report = build_failure_replay_report(failure_dir)
     print(render_failure_replay_report(report, show_samples=args.show_samples))
     return 0 if report.total_samples else 1
+
+
+def run_export_confirmations_command(args: argparse.Namespace) -> int:
+    store = PriceConfirmationStore()
+    output_dir = Path(args.output_dir).expanduser()
+    paths = store.export_confirmed_parser_fixtures(output_dir)
+    print(f"已导出 {len(paths)} 个确认价格 parser fixture 到 {output_dir}")
+    for path in paths:
+        print(path)
+    return 0
 
 
 def _auto_refresh_lock_path() -> Path:
@@ -251,94 +259,6 @@ class SimpleCLI:
     ) -> Optional[float]:
         return self.fx_rates.convert_to_cny(price, currency)
 
-    @staticmethod
-    def _query_title(
-        origin_label: str,
-        destination_label: str,
-        date: str,
-        return_date: str | None = None,
-    ) -> str:
-        return QueryService._query_title(origin_label, destination_label, date, return_date)
-
-    def build_point_query_payload(
-        self,
-        *,
-        origin_input: str,
-        destination_input: str,
-        origin_label: str,
-        destination_label: str,
-        origin_code: str,
-        destination_code: str,
-        date: str,
-        return_date: str | None,
-        date_window_days: int,
-        manual_regions: list[str],
-        effective_regions: list[str],
-        exact_airport: bool,
-    ) -> dict[str, object]:
-        return self._query_service.build_point_query_payload(
-            origin_input=origin_input,
-            destination_input=destination_input,
-            origin_label=origin_label,
-            destination_label=destination_label,
-            origin_code=origin_code,
-            destination_code=destination_code,
-            date=date,
-            return_date=return_date,
-            date_window_days=date_window_days,
-            manual_regions=manual_regions,
-            effective_regions=effective_regions,
-            exact_airport=exact_airport,
-        )
-
-    def build_expanded_query_payload(
-        self,
-        *,
-        origin_value: str,
-        destination_value: str,
-        origin_label: str,
-        destination_label: str,
-        origin_file_token: str,
-        destination_file_token: str,
-        date: str,
-        return_date: str | None,
-        date_window_days: int,
-        manual_regions: list[str],
-        effective_regions: list[str],
-        exact_airport: bool,
-        origin_is_country: bool,
-        destination_is_country: bool,
-        airport_limit: int,
-    ) -> dict[str, object]:
-        return self._query_service.build_expanded_query_payload(
-            origin_value=origin_value,
-            destination_value=destination_value,
-            origin_label=origin_label,
-            destination_label=destination_label,
-            origin_file_token=origin_file_token,
-            destination_file_token=destination_file_token,
-            date=date,
-            return_date=return_date,
-            date_window_days=date_window_days,
-            manual_regions=manual_regions,
-            effective_regions=effective_regions,
-            exact_airport=exact_airport,
-            origin_is_country=origin_is_country,
-            destination_is_country=destination_is_country,
-            airport_limit=airport_limit,
-        )
-
-    @staticmethod
-    def rows_to_quote_snapshots(rows: list[SimplifiedQuoteRow]) -> list[QuoteRow]:
-        return ResultService.rows_to_quote_snapshots(rows=rows)
-
-    @staticmethod
-    def _group_single_trip(
-        trip_label: str,
-        rows: list[dict[str, object]],
-    ) -> list[tuple[str, list[dict[str, object]]]]:
-        return ResultService._group_single_trip(trip_label=trip_label, rows=rows)
-
     def _print_delta_summary(self, rows_by_date: list[tuple[str, list[SimplifiedQuoteRow]]]) -> None:
         lines = build_delta_summary_lines(rows_by_date)
         if not lines:
@@ -379,59 +299,6 @@ class SimpleCLI:
                 f"snapshots recommended {int(snapshot_summary.get('snapshot_recommended_count') or 0)}"
             )
 
-    def _sort_simplified_rows(
-        self, rows: list[SimplifiedQuoteRow]
-    ) -> list[SimplifiedQuoteRow]:
-        return self._result_service.sort_simplified_rows(rows=rows)
-
-    def simplify_quotes(
-        self, quotes: list[QuoteRow], *, route_label: str | None = None
-    ) -> list[SimplifiedQuoteRow]:
-        return self._result_service.simplify_quotes(quotes=quotes, route_label=route_label)
-
-    @staticmethod
-    def _format_plan_cell(row: dict[str, object]) -> str:
-        return ResultService.format_plan_cell(row=row)
-
-    @staticmethod
-    def _with_route_plan_metadata(
-        rows: list[SimplifiedQuoteRow],
-        *,
-        route_rank: int,
-        route_reason: str,
-    ) -> list[SimplifiedQuoteRow]:
-        return ResultService.with_route_plan_metadata(rows=rows, route_rank=route_rank, route_reason=route_reason)
-
-    def build_markdown_table(
-        self,
-        rows: list[SimplifiedQuoteRow],
-        origin: str,
-        destination: str,
-        date: str,
-        return_date: str | None = None,
-    ) -> str:
-        return self._result_service.build_markdown_table(rows=rows, origin=origin, destination=destination, date=date, return_date=return_date)
-
-    def build_combined_markdown_table(
-        self,
-        rows: list[CombinedQuoteRow],
-        origin: str,
-        destination: str,
-    ) -> str:
-        return self._result_service.build_combined_markdown_table(rows=rows, origin=origin, destination=destination)
-
-    def build_window_markdown_table(
-        self,
-        rows_by_date: list[tuple[str, list[SimplifiedQuoteRow]]],
-        origin: str,
-        destination: str,
-        start_date: str,
-        end_date: str,
-        start_return_date: str | None = None,
-        end_return_date: str | None = None,
-    ) -> str:
-        return self._result_service.build_window_markdown_table(rows_by_date=rows_by_date, origin=origin, destination=destination, start_date=start_date, end_date=end_date, start_return_date=start_return_date, end_return_date=end_return_date)
-
     def print_quotes(self, rows: list[SimplifiedQuoteRow]) -> None:
         if not rows:
             print("\n暂无可用价格结果。")
@@ -460,71 +327,6 @@ class SimpleCLI:
                 f"| {row.get('route') or '-'} | {row['region_name']} | {row.get('source_label') or '-'} | {row.get('best_display_price') or '-'} | {best_cny_text} | {row.get('cheapest_display_price') or '-'} | {cheapest_cny_text} | {_confidence_label(row.get('confidence'))} | {_price_source_label(row.get('price_source'))} | {_warnings_summary(row.get('parser_warnings'))} | {row.get('delta_label') or '-'} | {row.get('status') or '-'} | {row.get('error') or '-'} | {row['link']} |"
             )
 
-    def save_results(
-        self,
-        quotes: list[QuoteRow],
-        origin: str,
-        destination: str,
-        date: str,
-        return_date: str | None = None,
-        route_label: str | None = None,
-        file_origin_token: str | None = None,
-        file_destination_token: str | None = None,
-    ) -> Path:
-        return self._result_service.save_results(quotes=quotes, origin=origin, destination=destination, date=date, return_date=return_date, route_label=route_label, file_origin_token=file_origin_token, file_destination_token=file_destination_token)
-
-    def save_simplified_results(
-        self,
-        rows: list[SimplifiedQuoteRow],
-        origin: str,
-        destination: str,
-        date: str,
-        return_date: str | None = None,
-        file_origin_token: str | None = None,
-        file_destination_token: str | None = None,
-    ) -> Path:
-        return self._result_service.save_simplified_results(rows=rows, origin=origin, destination=destination, date=date, return_date=return_date, file_origin_token=file_origin_token, file_destination_token=file_destination_token)
-
-    def save_combined_results(
-        self,
-        rows: list[CombinedQuoteRow],
-        origin: str,
-        destination: str,
-        date: str,
-        return_date: str | None = None,
-        file_origin_token: str | None = None,
-        file_destination_token: str | None = None,
-    ) -> Path:
-        return self._result_service.save_combined_results(rows=rows, origin=origin, destination=destination, date=date, return_date=return_date, file_origin_token=file_origin_token, file_destination_token=file_destination_token)
-
-    def save_window_results(
-        self,
-        rows_by_date: list[tuple[str, list[SimplifiedQuoteRow]]],
-        origin: str,
-        destination: str,
-        start_date: str,
-        end_date: str,
-        start_return_date: str | None = None,
-        end_return_date: str | None = None,
-        file_origin_token: str | None = None,
-        file_destination_token: str | None = None,
-    ) -> Path:
-        return self._result_service.save_window_results(rows_by_date=rows_by_date, origin=origin, destination=destination, start_date=start_date, end_date=end_date, start_return_date=start_return_date, end_return_date=end_return_date, file_origin_token=file_origin_token, file_destination_token=file_destination_token)
-
-    @staticmethod
-    def _display_price_value(value: object) -> float:
-        return ResultService.display_price_value(value=value)
-
-    def _row_selection_key(self, row: SimplifiedQuoteRow) -> tuple[float, float, float, float]:
-        return self._result_service.row_selection_key(row=row)
-
-    def _pick_better_row(
-        self,
-        current: SimplifiedQuoteRow | None,
-        candidate: SimplifiedQuoteRow,
-    ) -> SimplifiedQuoteRow:
-        return self._result_service.pick_better_row(current=current, candidate=candidate)
-
     async def _run_point_to_point_page_command(
         self,
         args: argparse.Namespace,
@@ -552,7 +354,7 @@ class SimpleCLI:
         except ValueError as exc:
             print(f"日期参数错误: {exc}")
             return 2
-        query_payload = self.build_point_query_payload(
+        query_payload = self._query_service.build_point_query_payload(
             origin_input=args.origin,
             destination_input=args.destination,
             origin_label=origin.query or origin.name or origin.code,
@@ -630,7 +432,7 @@ class SimpleCLI:
             any_winner = False
             for current_date, current_return_date in trip_dates:
                 trip_label = format_trip_date_label(current_date, current_return_date)
-                rows = self._sort_simplified_rows(
+                rows = self._result_service.sort_simplified_rows(
                     get_rows_for_trip_label(cached_rows_by_date, trip_label)
                 )
                 rows_by_date.append((trip_label, rows))
@@ -672,7 +474,7 @@ class SimpleCLI:
                     selected_regions = []
 
             if rerun_failed and latest_record is not None and not selected_regions:
-                rows = self._sort_simplified_rows(
+                rows = self._result_service.sort_simplified_rows(
                     get_rows_for_trip_label(
                         override_rows_source_kind(
                             latest_record.rows_by_date,
@@ -763,9 +565,12 @@ class SimpleCLI:
 
             live_quote_dicts = quotes_to_dicts(quotes)
             live_rows_by_date = annotate_rows_with_history(
-                self._group_single_trip(
-                    trip_label,
-                    self.simplify_quotes(live_quote_dicts, route_label=route_label),
+                ResultService._group_single_trip(
+                    trip_label=trip_label,
+                    rows=self._result_service.simplify_quotes(
+                        live_quote_dicts,
+                        route_label=route_label,
+                    ),
                 ),
                 latest_record.rows_by_date if latest_record else None,
             )
@@ -773,17 +578,17 @@ class SimpleCLI:
 
             if rerun_failed and latest_record is not None:
                 cached_rows_by_date = override_rows_source_kind(
-                    self._group_single_trip(
-                        trip_label,
-                        get_rows_for_trip_label(latest_record.rows_by_date, trip_label),
+                    ResultService._group_single_trip(
+                        trip_label=trip_label,
+                        rows=get_rows_for_trip_label(latest_record.rows_by_date, trip_label),
                     ),
                     "cached",
                     updated_at=latest_record.created_at,
                 )
                 cached_quotes_by_date = override_quotes_source_kind(
-                    self._group_single_trip(
-                        trip_label,
-                        get_quotes_for_trip_label(latest_record.quotes_by_date, trip_label),
+                    ResultService._group_single_trip(
+                        trip_label=trip_label,
+                        rows=get_quotes_for_trip_label(latest_record.quotes_by_date, trip_label),
                     ),
                     "cached",
                 )
@@ -795,12 +600,12 @@ class SimpleCLI:
                     cached_quotes_by_date,
                     live_quotes_by_date,
                 )
-                rows = self._sort_simplified_rows(
+                rows = self._result_service.sort_simplified_rows(
                     get_rows_for_trip_label(merged_rows_by_date, trip_label)
                 )
                 quote_snapshots = get_quotes_for_trip_label(merged_quotes_by_date, trip_label)
             else:
-                rows = self._sort_simplified_rows(
+                rows = self._result_service.sort_simplified_rows(
                     get_rows_for_trip_label(live_rows_by_date, trip_label)
                 )
                 quote_snapshots = live_quote_dicts
@@ -881,11 +686,11 @@ class SimpleCLI:
                 print("未能成功提取任何市场价格。")
 
             if args.save:
-                saved = self.save_simplified_results(
-                    rows,
-                    origin.code,
-                    destination.code,
-                    current_date,
+                saved = self._result_service.save_simplified_results(
+                    rows=rows,
+                    origin=origin.code,
+                    destination=destination.code,
+                    date=current_date,
                     return_date=current_return_date,
                 )
                 print(f"结果已保存到: {saved}")
@@ -901,12 +706,12 @@ class SimpleCLI:
         if args.save and scanned_rows_by_date:
             start_date, start_return_date = trip_dates[0]
             end_date, end_return_date = trip_dates[-1]
-            summary_path = self.save_window_results(
-                scanned_rows_by_date,
-                origin.code,
-                destination.code,
-                start_date,
-                end_date,
+            summary_path = self._result_service.save_window_results(
+                rows_by_date=scanned_rows_by_date,
+                origin=origin.code,
+                destination=destination.code,
+                start_date=start_date,
+                end_date=end_date,
                 start_return_date=start_return_date,
                 end_return_date=end_return_date,
             )
@@ -997,7 +802,7 @@ class SimpleCLI:
         except ValueError as exc:
             print(f"日期参数错误: {exc}")
             return 2
-        query_payload = self.build_expanded_query_payload(
+        query_payload = self._query_service.build_expanded_query_payload(
             origin_value=getattr(args, "origin_country", None) or getattr(args, "origin", None) or "",
             destination_value=getattr(args, "destination_country", None)
             or getattr(args, "destination", None)
@@ -1070,7 +875,7 @@ class SimpleCLI:
             any_winner = False
             for current_date, current_return_date in trip_dates:
                 trip_label = format_trip_date_label(current_date, current_return_date)
-                rows = self._sort_simplified_rows(
+                rows = self._result_service.sort_simplified_rows(
                     get_rows_for_trip_label(cached_rows_by_date, trip_label)
                 )
                 rows_by_date.append((trip_label, rows))
@@ -1119,7 +924,7 @@ class SimpleCLI:
                     selected_regions = []
 
             if rerun_failed and latest_record is not None and not selected_regions:
-                rows = self._sort_simplified_rows(
+                rows = self._result_service.sort_simplified_rows(
                     get_rows_for_trip_label(
                         override_rows_source_kind(
                             latest_record.rows_by_date,
@@ -1212,8 +1017,8 @@ class SimpleCLI:
                 route_reason = f"路线候选排序 {pair_index + 1}"
                 return (
                     pair_index,
-                    self._with_route_plan_metadata(
-                        self.simplify_quotes(
+                    ResultService.with_route_plan_metadata(
+                        rows=self._result_service.simplify_quotes(
                             quotes_to_dicts(quotes),
                             route_label=route_label,
                         ),
@@ -1236,23 +1041,23 @@ class SimpleCLI:
             for _, pair_rows in pair_results:
                 for row in pair_rows:
                     region_name = str(row.get("region_name") or "-")
-                    best_rows_by_region[region_name] = self._pick_better_row(
+                    best_rows_by_region[region_name] = self._result_service.pick_better_row(
                         best_rows_by_region.get(region_name),
                         row,
                     )
 
             live_rows_by_date = annotate_rows_with_history(
-                self._group_single_trip(
-                    trip_label,
-                    self._sort_simplified_rows(list(best_rows_by_region.values())),
+                ResultService._group_single_trip(
+                    trip_label=trip_label,
+                    rows=self._result_service.sort_simplified_rows(list(best_rows_by_region.values())),
                 ),
                 latest_record.rows_by_date if latest_record else None,
             )
             if rerun_failed and latest_record is not None:
                 cached_rows_by_date = override_rows_source_kind(
-                    self._group_single_trip(
-                        trip_label,
-                        get_rows_for_trip_label(latest_record.rows_by_date, trip_label),
+                    ResultService._group_single_trip(
+                        trip_label=trip_label,
+                        rows=get_rows_for_trip_label(latest_record.rows_by_date, trip_label),
                     ),
                     "cached",
                     updated_at=latest_record.created_at,
@@ -1261,11 +1066,11 @@ class SimpleCLI:
                     cached_rows_by_date,
                     live_rows_by_date,
                 )
-                rows = self._sort_simplified_rows(
+                rows = self._result_service.sort_simplified_rows(
                     get_rows_for_trip_label(merged_rows_by_date, trip_label)
                 )
             else:
-                rows = self._sort_simplified_rows(
+                rows = self._result_service.sort_simplified_rows(
                     get_rows_for_trip_label(live_rows_by_date, trip_label)
                 )
             return (
@@ -1274,7 +1079,7 @@ class SimpleCLI:
                 current_date,
                 current_return_date,
                 rows,
-                self.rows_to_quote_snapshots(rows),
+                ResultService.rows_to_quote_snapshots(rows=rows),
             )
 
         date_semaphore = asyncio.Semaphore(CLI_DATE_WINDOW_CONCURRENCY)
@@ -1362,11 +1167,11 @@ class SimpleCLI:
                 print("未能从候选机场组合里提取出有效价格。")
 
             if args.save:
-                saved = self.save_simplified_results(
-                    rows,
-                    origin_label,
-                    destination_label,
-                    current_date,
+                saved = self._result_service.save_simplified_results(
+                    rows=rows,
+                    origin=origin_label,
+                    destination=destination_label,
+                    date=current_date,
                     return_date=current_return_date,
                     file_origin_token=origin_file_token,
                     file_destination_token=destination_file_token,
@@ -1384,12 +1189,12 @@ class SimpleCLI:
         if args.save and scanned_rows_by_date:
             start_date, start_return_date = trip_dates[0]
             end_date, end_return_date = trip_dates[-1]
-            summary_path = self.save_window_results(
-                scanned_rows_by_date,
-                origin_label,
-                destination_label,
-                start_date,
-                end_date,
+            summary_path = self._result_service.save_window_results(
+                rows_by_date=scanned_rows_by_date,
+                origin=origin_label,
+                destination=destination_label,
+                start_date=start_date,
+                end_date=end_date,
                 start_return_date=start_return_date,
                 end_return_date=end_return_date,
                 file_origin_token=origin_file_token,
@@ -1434,9 +1239,8 @@ class SimpleCLI:
         manual_tabs_json = getattr(args, "manual_tabs_json", None)
         if manual_tabs_json:
             try:
-                import json
                 manual_tabs = json.loads(Path(manual_tabs_json).read_text(encoding="utf-8"))
-            except Exception as exc:
+            except (OSError, json.JSONDecodeError) as exc:
                 logger.warning("Failed to load --manual-tabs-json from %s", manual_tabs_json, exc_info=exc)
 
         # ScanConfig.transport is the strict-mode override.  Default is AUTO,
@@ -1650,6 +1454,16 @@ def build_parser() -> argparse.ArgumentParser:
         dest="show_samples",
         action="store_false",
         help="仅打印汇总统计",
+    )
+
+    export_confirmations = subparsers.add_parser(
+        "export-confirmations",
+        help="把人工确认价格样本导出成 parser fixture JSON",
+    )
+    export_confirmations.add_argument(
+        "--output-dir",
+        default=str(PROJECT_ROOT / "tests" / "fixtures" / "price_confirmations"),
+        help="fixture 输出目录",
     )
 
     auto_once = subparsers.add_parser(
@@ -1922,6 +1736,9 @@ def main() -> int:
 
     if args.command == "replay-failures":
         return run_failure_replay_command(args)
+
+    if args.command == "export-confirmations":
+        return run_export_confirmations_command(args)
 
     if args.command == "auto-refresh-once":
         return asyncio.run(run_auto_refresh_once_command(args))

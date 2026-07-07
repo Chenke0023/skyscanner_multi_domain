@@ -155,7 +155,7 @@ async def execute_raw_request(
         async with session.post(url, headers=headers, json=body) as response:
             text = await response.text()
             return extract_quote(region, url, text, response.status)
-    except Exception as exc:
+    except (aiohttp.ClientError, TimeoutError) as exc:
         return FlightQuote(
             region=region.code,
             domain=region.domain,
@@ -265,7 +265,7 @@ def print_doctor(
                 persistence_browser,
             )
             print(f"Session 持久化: {'通过' if ok else '失败'} ({message})")
-        except Exception as exc:
+        except (OSError, RuntimeError) as exc:
             print(f"Session 持久化: 失败 ({exc})")
 
     print("\n建议流程:")

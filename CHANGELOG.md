@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.2.1 - 2026-07-07
+
+- Finalized the todo backlog cleanup and release evidence after the 1.2.0 prep tag.
+- Added focused boundary tests for benchmark, desktop scan workers, and Scrapling fetch failures.
+- Verified local release gates and macOS app build smoke for the desktop WebView app.
+
 ## 1.2.0 - 2026-07-03
 
 - Removed root-level compatibility shims from package import paths and guarded the boundary in tests.

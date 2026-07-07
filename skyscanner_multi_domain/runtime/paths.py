@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+import json
+import logging
 import os
 import shutil
 import sys
-import logging
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -50,12 +51,11 @@ def _load_build_source_root() -> Path | None:
     if not manifest_path.exists():
         return None
     try:
-        import json
         data = json.loads(manifest_path.read_text(encoding="utf-8"))
         root = str(data.get("source_root", "")).strip()
         if root:
             return Path(root)
-    except Exception as exc:
+    except (OSError, json.JSONDecodeError) as exc:
         logger.debug("Failed to load build source root from %s", manifest_path, exc_info=exc)
     return None
 

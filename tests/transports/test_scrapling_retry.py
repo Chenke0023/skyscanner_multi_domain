@@ -29,6 +29,56 @@ class ShellPage:
 
 
 class ScraplingRetryTests(unittest.TestCase):
+    def test_compare_via_scrapling_returns_failure_quote_when_fetchers_raise(self) -> None:
+        def fake_fetch(url: str, **kwargs):
+            raise RuntimeError("stealth down")
+
+        def fake_get(url: str, **kwargs):
+            raise RuntimeError("http down")
+
+        fake_scrapling = types.SimpleNamespace(
+            Fetcher=types.SimpleNamespace(get=fake_get),
+            StealthyFetcher=types.SimpleNamespace(fetch=fake_fetch),
+        )
+        fake_captcha_solver = types.SimpleNamespace(
+            CaptchaSolverClient=None, CaptchaSolverError=Exception,
+        )
+
+        args = argparse.Namespace(
+            origin="BJSA", destination="ALA", date="2026-04-29",
+            timeout=20, page_wait=5,
+        )
+        region = RegionConfig(
+            code="HK", name="香港", domain="https://www.skyscanner.com.hk",
+            currency="HKD", locale="zh-HK",
+        )
+
+        async def run_case() -> None:
+            with (
+                patch.dict(__import__("sys").modules, {
+                    "scrapling": fake_scrapling,
+                    "captcha_solver": fake_captcha_solver,
+                }),
+                patch("skyscanner_multi_domain.transports.scrapling._probe_existing_cdp_page", return_value=None),
+                patch("skyscanner_multi_domain.transports.scrapling._probe_page_with_playwright", return_value=None),
+                patch("skyscanner_multi_domain.transports.scrapling._resolve_scrapling_state_overrides", return_value={}),
+                patch("skyscanner_multi_domain.transports.scrapling.emit_trace", lambda **k: None),
+            ):
+                quotes = await compare_via_scrapling(
+                    args, [region],
+                    persist_failures=False,
+                    build_search_url=lambda *_args: (
+                        "https://www.skyscanner.com.hk/transport/flights/bjsa/ala/260429/"
+                    ),
+                    persist_failure_log=lambda *a, **k: a[0],
+                )
+
+            self.assertEqual(len(quotes), 1)
+            self.assertEqual(quotes[0].status, "scrapling_failed")
+            self.assertIn("stealth down", quotes[0].error or "")
+
+        asyncio.run(run_case())
+
     def test_compare_via_scrapling_serializes_shared_profile_dir_usage(self) -> None:
         active_calls = 0
         max_active_calls = 0

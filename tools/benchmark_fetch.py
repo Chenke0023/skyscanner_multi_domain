@@ -51,7 +51,9 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--runs", type=int, default=3, help="Number of benchmark runs")
     parser.add_argument("--wait", type=int, default=10, help="Page wait seconds")
     parser.add_argument("--timeout", type=int, default=30, help="HTTP/CDP timeout")
+    parser.add_argument("--max-run-seconds", type=int, default=180, help="Hard timeout per benchmark run")
     parser.add_argument("--transport", choices=["scrapling", "page", "opencli"], default="opencli")
+    parser.add_argument("--compare-transports", default="", help="Comma-separated transports to benchmark with the same inputs")
     parser.add_argument("--fetch-pipeline", choices=["fast", "balanced", "session_heavy"], default="balanced")
     parser.add_argument("--json", action="store_true", help="Output JSON only")
     parser.add_argument("--save", action="store_true", help="Save benchmark results to file")
@@ -89,26 +91,11 @@ async def _single_run(
     run_index: int,
 ) -> dict[str, Any]:
     start = time.monotonic()
-    try:
-        quotes = await run_page_scan(
-            origin=origin.code,
-            destination=destination.code,
-            date=args.date,
-            region_codes=region_codes,
-            return_date=args.return_date,
-            page_wait=args.wait,
-            timeout=args.timeout,
-            transport=args.transport,
-            scan_mode="full_scan",
-            allow_browser_fallback=False,
-            fetch_pipeline=args.fetch_pipeline,
-        )
-    except Exception as exc:
-        wall_ms = int((time.monotonic() - start) * 1000)
+    def error_run(error: str) -> dict[str, Any]:
         return {
             "run": run_index + 1,
-            "wall_time_ms": wall_ms,
-            "error": str(exc),
+            "wall_time_ms": int((time.monotonic() - start) * 1000),
+            "error": error,
             "fetch_price_found_count": 0,
             "fetch_total_regions": len(selected_regions),
             "fetch_price_found_rate": 0.0,
@@ -120,6 +107,28 @@ async def _single_run(
             "extract_attempt_total": 0,
             "fallback_telemetry": {},
         }
+
+    try:
+        quotes = await asyncio.wait_for(
+            run_page_scan(
+                origin=origin.code,
+                destination=destination.code,
+                date=args.date,
+                region_codes=region_codes,
+                return_date=args.return_date,
+                page_wait=args.wait,
+                timeout=args.timeout,
+                transport=args.transport,
+                scan_mode="full_scan",
+                allow_browser_fallback=False,
+                fetch_pipeline=args.fetch_pipeline,
+            ),
+            timeout=max(int(args.max_run_seconds), 1),
+        )
+    except asyncio.TimeoutError:
+        return error_run(f"run_timeout_after_{args.max_run_seconds}s")
+    except Exception as exc:
+        return error_run(str(exc))
 
     wall_ms = int((time.monotonic() - start) * 1000)
     total = len(quotes)
@@ -206,31 +215,23 @@ def _save_benchmark(report: dict[str, Any], args: argparse.Namespace) -> Path:
     return filename
 
 
-async def main() -> int:
-    args = _parse_args()
-    origin, destination, region_codes, selected_regions = _resolve_regions(args)
-
-    if not selected_regions:
-        print("No regions selected.", file=sys.stderr)
-        return 1
-
-    if not args.json:
-        print(f"Benchmark: {origin.code} -> {destination.code} on {args.date}")
-        print(f"Regions: {', '.join(r.code for r in selected_regions)}")
-        print(f"Transport: {args.transport}, pipeline: {args.fetch_pipeline}")
-        print(f"Runs: {args.runs}\n")
-
+async def _run_benchmark(
+    args: argparse.Namespace,
+    origin: LocationRecord,
+    destination: LocationRecord,
+    region_codes: list[str],
+    selected_regions: list[RegionConfig],
+) -> dict[str, Any]:
     runs: list[dict[str, Any]] = []
     for i in range(args.runs):
         run = await _single_run(args, origin, destination, region_codes, selected_regions, i)
         runs.append(run)
         if not args.json:
             _print_run_summary(run)
-        # Brief pause between runs
         if i < args.runs - 1:
             await asyncio.sleep(2)
 
-    report = {
+    return {
         "benchmark": {
             "origin": origin.code,
             "destination": destination.code,
@@ -244,19 +245,72 @@ async def main() -> int:
         "aggregate": _compute_aggregate(runs),
     }
 
+
+async def main() -> int:
+    args = _parse_args()
+    origin, destination, region_codes, selected_regions = _resolve_regions(args)
+
+    if not selected_regions:
+        print("No regions selected.", file=sys.stderr)
+        return 1
+
+    compare_transports = [
+        item.strip()
+        for item in args.compare_transports.split(",")
+        if item.strip()
+    ]
+    if compare_transports:
+        allowed = {"scrapling", "page", "opencli"}
+        invalid = [item for item in compare_transports if item not in allowed]
+        if invalid:
+            print(f"Invalid compare transport(s): {', '.join(invalid)}", file=sys.stderr)
+            return 2
+
+    if not args.json:
+        print(f"Benchmark: {origin.code} -> {destination.code} on {args.date}")
+        print(f"Regions: {', '.join(r.code for r in selected_regions)}")
+        print(f"Transport: {args.transport}, pipeline: {args.fetch_pipeline}")
+        if compare_transports:
+            print(f"Compare: {', '.join(compare_transports)}")
+        print(f"Runs: {args.runs}\n")
+
+    reports: list[dict[str, Any]] = []
+    transports = compare_transports or [args.transport]
+    for transport in transports:
+        run_args = argparse.Namespace(**vars(args))
+        run_args.transport = transport
+        if compare_transports and not args.json:
+            print(f"\n[{transport}]")
+        reports.append(await _run_benchmark(run_args, origin, destination, region_codes, selected_regions))
+
+    report = reports[0] if len(reports) == 1 else {
+        "comparison": {
+            "origin": origin.code,
+            "destination": destination.code,
+            "date": args.date,
+            "return_date": args.return_date,
+            "regions": region_codes,
+            "fetch_pipeline": args.fetch_pipeline,
+            "timestamp": datetime.now().isoformat(timespec="seconds"),
+        },
+        "benchmarks": reports,
+    }
+
     if args.json:
         print(json.dumps(report, ensure_ascii=False, indent=2))
     else:
-        agg = report["aggregate"]
-        print(f"\nAggregate ({agg['runs']} runs):")
-        print(f"  Wall time: avg {agg['avg_wall_time_ms'] / 1000:.1f}s "
-              f"(min {agg['min_wall_time_ms'] / 1000:.1f}s, "
-              f"max {agg['max_wall_time_ms'] / 1000:.1f}s)")
-        print(f"  Price found rate: {agg['avg_fetch_price_found_rate']:.0%}")
-        print(f"  OpenCLI direct rate: {agg['avg_opencli_direct_price_found_rate']:.0%}")
-        print(f"  Fallback rescue rate: {agg['avg_fallback_rescue_rate']:.0%}")
-        print(f"  Challenge rate: {agg['avg_challenge_rate']:.0%}")
-        print(f"  Tabs: opened avg {agg['avg_tab_open_total']:.0f}, reused avg {agg['avg_tab_reuse_total']:.0f}")
+        for item in reports:
+            agg = item["aggregate"]
+            label = item["benchmark"]["transport"]
+            print(f"\nAggregate [{label}] ({agg['runs']} runs):")
+            print(f"  Wall time: avg {agg['avg_wall_time_ms'] / 1000:.1f}s "
+                  f"(min {agg['min_wall_time_ms'] / 1000:.1f}s, "
+                  f"max {agg['max_wall_time_ms'] / 1000:.1f}s)")
+            print(f"  Price found rate: {agg['avg_fetch_price_found_rate']:.0%}")
+            print(f"  OpenCLI direct rate: {agg['avg_opencli_direct_price_found_rate']:.0%}")
+            print(f"  Fallback rescue rate: {agg['avg_fallback_rescue_rate']:.0%}")
+            print(f"  Challenge rate: {agg['avg_challenge_rate']:.0%}")
+            print(f"  Tabs: opened avg {agg['avg_tab_open_total']:.0f}, reused avg {agg['avg_tab_reuse_total']:.0f}")
 
     if args.save:
         path = _save_benchmark(report, args)
@@ -264,9 +318,28 @@ async def main() -> int:
             print(f"\nSaved to: {path}")
 
     # Exit code: 0 if any run found prices, 1 otherwise
-    has_prices = any(r["fetch_price_found_count"] > 0 for r in runs)
+    has_prices = any(
+        run["fetch_price_found_count"] > 0
+        for item in reports
+        for run in item["aggregate"]["run_details"]
+    )
     return 0 if has_prices else 1
 
 
+def _run_main() -> int:
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    try:
+        return loop.run_until_complete(main())
+    finally:
+        pending = [task for task in asyncio.all_tasks(loop) if not task.done()]
+        for task in pending:
+            task.cancel()
+        if pending:
+            loop.run_until_complete(asyncio.wait(pending, timeout=1))
+        loop.close()
+        asyncio.set_event_loop(None)
+
+
 if __name__ == "__main__":
-    raise SystemExit(asyncio.run(main()))
+    raise SystemExit(_run_main())

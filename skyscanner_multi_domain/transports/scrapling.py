@@ -168,7 +168,7 @@ def _cdp_get_json(path: str, port: int = BROWSER_CDP_PORT) -> Any:
             try:
                 if connection is not None:
                     connection.close()
-            except Exception as exc:
+            except OSError as exc:
                 logger.debug("Failed to close Scrapling CDP connection", exc_info=exc)
     return None
 
@@ -235,7 +235,7 @@ async def _cdp_get_cookie_jar(
         if not isinstance(cookies, list):
             return []
         return [cookie for cookie in cookies if isinstance(cookie, dict)]
-    except Exception:
+    except (aiohttp.ClientError, asyncio.TimeoutError, json.JSONDecodeError, RuntimeError):
         return []
 
     return []
@@ -293,7 +293,7 @@ async def _probe_existing_cdp_page(
                     "awaitPromise": True,
                 },
             )
-        except Exception:
+        except (aiohttp.ClientError, asyncio.TimeoutError, json.JSONDecodeError, RuntimeError):
             continue
 
         if not isinstance(payload, dict):
@@ -381,7 +381,7 @@ def _extract_scrapling_page_text(page: Any) -> str:
         if callable(value):
             try:
                 value = value()
-            except Exception:
+            except (AttributeError, TypeError, ValueError):
                 value = None
         if isinstance(value, (bytes, bytearray)):
             value = value.decode("utf-8", errors="ignore")
@@ -399,7 +399,7 @@ def _extract_scrapling_page_text(page: Any) -> str:
             ]
             if visible_lines:
                 return "\n".join(visible_lines)
-        except Exception as exc:
+        except (AttributeError, TypeError, ValueError) as exc:
             logger.debug("Failed to extract visible text with BeautifulSoup", exc_info=exc)
 
     css_method = getattr(page, "css", None)
@@ -418,7 +418,7 @@ def _extract_scrapling_page_text(page: Any) -> str:
                     ]
                     if texts:
                         return "\n".join(texts)
-            except Exception:
+            except (AttributeError, TypeError, ValueError):
                 continue
 
     body = getattr(page, "body", None)
@@ -432,7 +432,7 @@ def _extract_scrapling_page_text(page: Any) -> str:
         if callable(value):
             try:
                 value = value()
-            except Exception:
+            except (AttributeError, TypeError, ValueError):
                 value = None
         if isinstance(value, (bytes, bytearray)):
             value = value.decode("utf-8", errors="ignore")
@@ -463,6 +463,7 @@ async def _probe_page_with_playwright(
     url: str, region: RegionConfig, timeout_ms: int
 ) -> ProbeOutcome | None:
     try:
+        from playwright.async_api import Error as PlaywrightError
         from playwright.async_api import TimeoutError as PlaywrightTimeoutError
         from playwright.async_api import async_playwright
     except ImportError:
@@ -492,10 +493,10 @@ async def _probe_page_with_playwright(
                 }}
                 """
             )
-        except Exception:
+        except (OSError, PlaywrightError):
             try:
                 page_text = await page.text_content("body") or ""
-            except Exception:
+            except (OSError, PlaywrightError):
                 page_text = ""
 
         quote = extract_page_quote(region, final_url, page_text)
@@ -558,13 +559,13 @@ async def _probe_page_with_playwright(
                                 page_text=outcome.page_text,
                                 state_overrides={"user_data_dir": str(profile_dir)},
                             )
-                except Exception as exc:
+                except (OSError, PlaywrightError) as exc:
                     logger.debug("Persistent profile probe failed for %s", profile_dir, exc_info=exc)
                 finally:
                     try:
                         if context is not None:
                             await context.close()
-                    except Exception as exc:
+                    except (OSError, PlaywrightError) as exc:
                         logger.debug("Failed to close persistent probe context", exc_info=exc)
 
             browser = None
@@ -582,19 +583,19 @@ async def _probe_page_with_playwright(
                 try:
                     if launched_page is not None:
                         await launched_page.close()
-                except Exception as exc:
+                except (OSError, PlaywrightError) as exc:
                     logger.debug("Failed to close Scrapling probe page", exc_info=exc)
                 try:
                     if context is not None:
                         await context.close()
-                except Exception as exc:
+                except (OSError, PlaywrightError) as exc:
                     logger.debug("Failed to close Scrapling probe context", exc_info=exc)
                 try:
                     if browser is not None:
                         await browser.close()
-                except Exception as exc:
+                except (OSError, PlaywrightError) as exc:
                     logger.debug("Failed to close Scrapling probe browser", exc_info=exc)
-    except Exception as exc:
+    except (OSError, PlaywrightError) as exc:
         logger.debug("Playwright profile probe failed", exc_info=exc)
         return None
 
@@ -996,7 +997,7 @@ async def compare_via_scrapling(
                     error=f"Captcha解决失败 ({captcha_type}): {exc}",
                     source_kind="live",
                 )
-            except Exception as exc:
+            except (TypeError, ValueError) as exc:
                 logger.debug("Failed to build captcha failure quote for %s", region.code, exc_info=exc)
 
         if (latest_quote is None or latest_quote.price is None) and FETCH_STAGE_HTTP in pipeline_stages:

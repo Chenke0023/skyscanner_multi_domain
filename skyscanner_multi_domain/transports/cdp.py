@@ -89,7 +89,7 @@ def detect_cdp_version(port: int = 9222) -> Optional[dict[str, Any]]:
         finally:
             try:
                 connection.close()
-            except Exception as exc:
+            except OSError as exc:
                 logger.debug("Failed to close CDP version connection", exc_info=exc)
 
         if isinstance(payload, dict) and payload.get("Browser"):
@@ -405,7 +405,7 @@ async def cdp_eval(ws_url: str, expression: str, *, max_retries: int = 2) -> Any
                         if "value" in result:
                             return result["value"]
                         raise RuntimeError(json.dumps(payload, ensure_ascii=False))
-        except Exception as exc:  # noqa: BLE001
+        except (aiohttp.ClientError, asyncio.TimeoutError, json.JSONDecodeError, RuntimeError) as exc:
             last_error = exc
             if attempt < max_retries:
                 await asyncio.sleep(1.0 * (attempt + 1))
@@ -812,7 +812,7 @@ async def compare_via_pages(
                             ws_url,
                             build_page_text_capture_expression(),
                         )
-                    except Exception as exc:  # noqa: BLE001
+                    except (aiohttp.ClientError, asyncio.TimeoutError, json.JSONDecodeError, RuntimeError) as exc:
                         latest_quotes[region.code] = FlightQuote(
                             region=region.code,
                             domain=region.domain,
@@ -866,7 +866,7 @@ async def compare_via_pages(
                 for tab_id in owned_tab_ids:
                     try:
                         await cdp_close_tab(session, tab_id)
-                    except Exception as exc:
+                    except (aiohttp.ClientError, asyncio.TimeoutError, json.JSONDecodeError, RuntimeError) as exc:
                         logger.debug("Failed to close owned CDP tab %s", tab_id, exc_info=exc)
 
         ordered_quotes: list[FlightQuote] = []

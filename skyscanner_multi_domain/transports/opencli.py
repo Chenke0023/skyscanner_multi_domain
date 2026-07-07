@@ -208,7 +208,7 @@ async def _tab_close_async(tab_id: str) -> None:
     """Close a specific tab."""
     try:
         await _run_opencli_async(["browser", "tab", "close", tab_id], timeout=5)
-    except Exception as exc:
+    except OpenCLIError as exc:
         logger.debug("Failed to close OpenCLI tab %s", tab_id, exc_info=exc)
 
 
@@ -227,7 +227,7 @@ async def _tab_wait_interactive_async(tab_id: str, timeout: float = TAB_WAIT_TIM
                 return True
             if page_state == "error":
                 return False
-        except Exception as exc:
+        except OpenCLIError as exc:
             logger.debug("Failed while waiting for OpenCLI tab %s", tab_id, exc_info=exc)
     return False
 
@@ -604,7 +604,7 @@ class OpenCLIDomainScheduler:
                     tab_id, delta_ensure = await session.ensure_tab_async(url)
                     if not tab_id:
                         raise OpenCLITabCreationError("No tab ID returned from tab creation")
-                except Exception as exc:
+                except OpenCLIError as exc:
                     attempt = _error_to_attempt(exc, "tab_create")
 
                 if attempt is None:
@@ -612,7 +612,7 @@ class OpenCLIDomainScheduler:
                         success, delta_wait_state = await session.wait_progressive_state(
                             tab_id, self._effective_page_wait(domain),
                         )
-                    except Exception as exc:
+                    except OpenCLIError as exc:
                         attempt = _error_to_attempt(exc, "wait_interactive")
 
                 if attempt is None:
@@ -621,7 +621,7 @@ class OpenCLIDomainScheduler:
                             tab_id, region, url, wait_steps=policy.extract_wait_steps,
                         )
                         page_text = attempt.page_text
-                    except Exception as exc:
+                    except OpenCLIError as exc:
                         attempt = _error_to_attempt(exc, "extract")
 
                 if attempt is None:
@@ -686,7 +686,7 @@ class OpenCLIDomainScheduler:
                             },
                             region=region, quote=quote, page_text=page_text,
                         )
-                    except Exception as exc:
+                    except (OSError, TypeError) as exc:
                         logger.debug("Failed to persist OpenCLI failure trace for %s", region.code, exc_info=exc)
 
                 if persist_failures and quote.price is None:
