@@ -454,7 +454,8 @@ Done:
 - 2026-07-07 local macOS app build smoke passed:
   `./scripts/build_macos_standalone_app.sh` produced
   `dist/Skyscanner 多市场比价.app` v1.2.1, executable present, size 229M.
-- v1.2.1 is ready to tag and publish with the built macOS app artifact.
+- v1.2.1 was tagged and published on GitHub with the built macOS app artifact:
+  https://github.com/Chenke0023/skyscanner_multi_domain/releases/tag/v1.2.1
 
 ### 19. CI
 
@@ -538,7 +539,7 @@ Todo:
 
 1. Keep the removed `desktop_ui_service -> cli.SimpleCLI` boundary guarded.
 2. Add focused coverage before narrowing any remaining broad boundary handler.
-3. Publish v1.2.1 release artifacts after the branch is pushed.
+3. Keep release smoke gates passing before the next tag.
 
 ## Do Not Do Yet
 
