@@ -1,16 +1,13 @@
-"""Page parser price extraction tests (migrated from test_skyscanner_neo.py)."""
+"""Page parser price extraction tests."""
 
 from __future__ import annotations
 
 import unittest
 
-from skyscanner_neo import (
-    PAGE_TEXT_CAPTURE_LIMIT,
-    REGIONS,
-    _extract_scrapling_page_text,
-    extract_page_quote,
-)
+from skyscanner_multi_domain.geo.regions import REGIONS
+from skyscanner_multi_domain.parsing.page_parser import PAGE_TEXT_CAPTURE_LIMIT, extract_page_quote
 from skyscanner_multi_domain.parsing.page_parser import slice_page_text_for_scan
+from skyscanner_multi_domain.transports.scrapling import _extract_scrapling_page_text
 
 
 class ExtractPageQuoteTests(unittest.TestCase):

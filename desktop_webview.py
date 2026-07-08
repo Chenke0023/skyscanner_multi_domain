@@ -203,15 +203,6 @@ def _error_page_uri(title: str, body: str, detail: str = "") -> str:
     return f"data:text/html;charset=utf-8,{quote(html)}"
 
 
-def _run_legacy_gui_if_explicitly_enabled() -> bool:
-    if os.environ.get("SKYSCANNER_ALLOW_LEGACY_GUI") != "1":
-        return False
-    from legacy import gui as legacy_gui
-
-    legacy_gui.main()
-    return True
-
-
 def main() -> None:
     if os.environ.get("SKYSCANNER_GUI_SMOKE_TEST") == "1":
         DesktopUIService()
@@ -222,11 +213,7 @@ def main() -> None:
     try:
         import webview
     except ImportError as exc:
-        if _run_legacy_gui_if_explicitly_enabled():
-            return
-        raise SystemExit(
-            "缺少 pywebview，无法启动桌面 Web UI。请安装依赖后重试；如需临时打开旧 Tk 界面，可设置 SKYSCANNER_ALLOW_LEGACY_GUI=1。"
-        ) from exc
+        raise SystemExit("缺少 pywebview，无法启动桌面 Web UI。请安装依赖后重试。") from exc
 
     if frontend_index.exists():
         asset_server = _FrontendAssetServer(frontend_index.parent)
@@ -237,7 +224,7 @@ def main() -> None:
         window_url = _error_page_uri(
             "未找到前端静态资源",
             "桌面入口已停止静默回退到旧 Tk 界面。请先构建 webui/dist 后再启动。",
-            detail="缺失文件: webui/dist/index.html\n可选临时方案: 设置 SKYSCANNER_ALLOW_LEGACY_GUI=1 再启动旧界面。",
+            detail="缺失文件: webui/dist/index.html\n请运行: cd webui && npm install && npm run build",
         )
         bridge = None
 

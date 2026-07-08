@@ -15,6 +15,7 @@ ROOT_SHIMS = {
     "scan_history",
     "scan_orchestrator",
     "search_plan",
+    "skyscanner_neo",
     "skyscanner_models",
     "skyscanner_page_parser",
     "skyscanner_regions",
@@ -23,11 +24,12 @@ ROOT_SHIMS = {
     "transport_scrapling",
 }
 SHIM_TARGETS_REMOVED = """
-The root-level compatibility shims (app_paths, date_window, fx_rates,
+The root-level flat compatibility shims (app_paths, date_window, fx_rates,
 location_resolver, scan_history, scan_orchestrator, search_plan,
 skyscanner_models, skyscanner_page_parser, skyscanner_regions,
-transport_cdp, transport_opencli, transport_scrapling, attempt_trace)
-have been removed. All callers now import from skyscanner_multi_domain.*
+transport_cdp, transport_opencli, transport_scrapling, attempt_trace,
+skyscanner_neo)
+have been removed. Active code now imports from skyscanner_multi_domain.*
 directly. ROOT_SHIMS is kept as a deny-list: package code must never
 re-introduce imports of these flat root names.
 """
@@ -36,6 +38,7 @@ DOCUMENTED_PACKAGE_MODULES = {
     "skyscanner_multi_domain.geo.location_resolver",
     "skyscanner_multi_domain.geo.regions",
     "skyscanner_multi_domain.models",
+    "skyscanner_multi_domain.neo",
     "skyscanner_multi_domain.parsing.page_parser",
     "skyscanner_multi_domain.parsing.price_candidates",
     "skyscanner_multi_domain.parsing.readiness",
@@ -68,6 +71,17 @@ def _imports_for(path: Path) -> set[str]:
     return imports
 
 
+def _import_modules_for(path: Path) -> set[str]:
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    modules: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            modules.update(alias.name for alias in node.names)
+        elif isinstance(node, ast.ImportFrom) and node.module:
+            modules.add(node.module)
+    return modules
+
+
 def test_no_package_module_imports_root_shims() -> None:
     offenders: list[str] = []
     for path in (ROOT / "skyscanner_multi_domain").rglob("*.py"):
@@ -78,6 +92,10 @@ def test_no_package_module_imports_root_shims() -> None:
     assert offenders == []
 
 
+def test_removed_flat_root_shim_files_stay_removed() -> None:
+    assert [name for name in sorted(ROOT_SHIMS) if (ROOT / f"{name}.py").exists()] == []
+
+
 def test_desktop_logic_does_not_import_cli() -> None:
     imports = _imports_for(ROOT / "desktop_logic.py")
     assert "cli" not in imports
@@ -86,12 +104,74 @@ def test_desktop_logic_does_not_import_cli() -> None:
 def test_desktop_ui_service_no_longer_imports_cli() -> None:
     imports = _imports_for(ROOT / "desktop_ui_service.py")
     assert "cli" not in imports
+    assert "skyscanner_neo" not in imports
     handoff = (ROOT / "AI_AGENT_HANDOFF.md").read_text(encoding="utf-8")
     todo = (ROOT / "docs" / "todo.md").read_text(encoding="utf-8")
     assert "desktop_ui_service -> cli.SimpleCLI" in handoff
     assert "desktop_ui_service -> cli.SimpleCLI" in todo
     assert "ResultService" in handoff
     assert "ResultService" in todo
+
+
+def test_active_entries_import_package_neo_directly() -> None:
+    for entry in ("cli.py", "desktop_ui_service.py"):
+        modules = _import_modules_for(ROOT / entry)
+        assert "skyscanner_neo" not in modules
+        assert "skyscanner_multi_domain.neo" in modules
+
+
+def test_package_neo_does_not_reexport_core_scan_helpers() -> None:
+    neo = importlib.import_module("skyscanner_multi_domain.neo")
+
+    for name in (
+        "build_search_url",
+        "detect_browsers",
+        "detect_cdp_version",
+        "mutate_payload",
+        "prepare_headers",
+        "quotes_to_dicts",
+        "rewrite_url",
+        "run_page_scan",
+    ):
+        assert not hasattr(neo, name)
+
+
+def test_simple_cli_does_not_reintroduce_thin_service_wrappers() -> None:
+    tree = ast.parse((ROOT / "cli.py").read_text(encoding="utf-8"))
+    simple_cli = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.ClassDef) and node.name == "SimpleCLI"
+    )
+    methods = {
+        node.name
+        for node in simple_cli.body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    }
+
+    assert methods.isdisjoint(
+        {
+            "normalize_location",
+            "resolve_location",
+            "resolve_country",
+            "build_country_route_plan",
+            "build_expanded_route_plan",
+            "build_effective_regions",
+            "to_cny",
+            "pick_better_row",
+            "rows_to_quote_snapshots",
+            "save_combined_results",
+            "save_results",
+            "save_simplified_results",
+            "save_window_results",
+            "simplify_quotes",
+            "sort_simplified_rows",
+        }
+    )
+
+
+def test_package_legacy_namespace_stays_removed() -> None:
+    assert not (ROOT / "skyscanner_multi_domain" / "legacy").exists()
 
 
 def test_runtime_paths_importable() -> None:
@@ -109,19 +189,16 @@ def test_documented_package_modules_exist() -> None:
         importlib.import_module(module_name)
 
 
-def test_legacy_gui_does_not_import_new_trust_modules() -> None:
-    tree = ast.parse((ROOT / "legacy" / "gui.py").read_text(encoding="utf-8"))
-    forbidden = {
-        "skyscanner_multi_domain.parsing.price_candidates",
-        "skyscanner_multi_domain.diagnostics.snapshots",
-        "skyscanner_multi_domain.scan.repair",
-        "skyscanner_multi_domain.planning.execution_policy",
-    }
-    imports: set[str] = set()
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Import):
-            imports.update(alias.name for alias in node.names)
-        elif isinstance(node, ast.ImportFrom) and node.module:
-            imports.add(node.module)
+def test_root_legacy_tk_entrypoints_stay_removed() -> None:
+    assert not (ROOT / "gui.py").exists()
+    assert not (ROOT / "legacy").exists()
 
-    assert imports.isdisjoint(forbidden)
+
+def test_desktop_webview_does_not_reintroduce_legacy_tk_fallback() -> None:
+    path = ROOT / "desktop_webview.py"
+    source = path.read_text(encoding="utf-8")
+    modules = _import_modules_for(path)
+
+    assert "legacy" not in modules
+    assert "legacy.gui" not in modules
+    assert "SKYSCANNER_ALLOW_LEGACY_GUI" not in source

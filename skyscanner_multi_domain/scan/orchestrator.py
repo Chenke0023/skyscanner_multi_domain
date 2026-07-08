@@ -142,13 +142,6 @@ def should_retry_wait_render(status: str) -> bool:
     return action == FailureAction.WAIT_RENDER
 
 
-# Legacy alias — keep for backward compatibility with tests/imports
-SCRAPLING_FALLBACK_STATUSES: set[str] = {
-    status
-    for status, cls in _STATUS_TO_CLASS.items()
-    if failure_action(cls) == FailureAction.RETRY_BROWSER
-}
-
 ScanProgressCallback = Callable[[dict[str, Any]], Union[Awaitable[None], None]]
 
 
@@ -417,9 +410,9 @@ async def run_page_scan(
     from skyscanner_multi_domain.planning.date_window import format_trip_date_label
     from skyscanner_multi_domain.scan.history import ScanHistoryStore, get_quotes_for_trip_label, select_preview_region_batches
     from skyscanner_multi_domain.scan.fallback_router import (
-    decide_fallback,
-    classify_quote_failure,
-)
+        decide_fallback,
+        classify_quote_failure,
+    )
     from skyscanner_multi_domain.scan.fetch_types import AttemptPlanner
     from skyscanner_multi_domain.models import new_run_id
 
@@ -429,7 +422,7 @@ async def run_page_scan(
     # ── P7.4: transport mode strict enforcement ──────────────────────────
     # When config.transport is set to a specific transport (not AUTO), force
     # that transport and disable browser fallback.  AUTO preserves the
-    # caller-provided transport/allow_browser_fallback (legacy behavior).
+    # caller-provided transport/allow_browser_fallback (existing behavior).
     if config is not None:
         cfg_transport = getattr(config, "transport", None)
         cfg_t_str = getattr(cfg_transport, "value", None) if cfg_transport is not None else None
@@ -1326,21 +1319,28 @@ async def run_page_scan(
                         used_cached_preview=preview_record is not None,
                     )
 
-                    # v3: per-batch router-driven fallback
-                    if allow_browser_fallback:
+                    # Defer preview_first CDP fallback until all live batches
+                    # have run, so one successful live market can avoid launching
+                    # a browser just to repair an earlier slow market.
+                    if allow_browser_fallback and batch_index == len(batches) - 1:
+                        failed_region_codes = []
+                        for quote in scrapling_merged_quotes:
+                            if quote.price is not None:
+                                continue
+                            decision = decide_fallback(quote)
+                            if decision.should_fallback and "cdp" in decision.transports:
+                                failed_region_codes.append(quote.region)
                         batch_failed = [
-                            region for region in batch_regions
-                            if any(
-                                quote.region == region.code
-                                and quote.price is None
-                                and decide_fallback(quote).should_fallback
-                                and "cdp" in decide_fallback(quote).transports
-                                for quote in batch_quotes
-                            )
+                            region_by_code[code]
+                            for code in failed_region_codes
+                            if code in region_by_code
                         ]
                         if batch_failed:
                             cdp_info = detect_cdp_version()
-                            if not cdp_info:
+                            has_live_success = any(
+                                quote.price is not None for quote in scrapling_merged_quotes
+                            )
+                            if not cdp_info and not has_live_success:
                                 ensure_cdp_ready(
                                     start_url=build_search_url(
                                         batch_failed[0], origin, destination, date, return_date

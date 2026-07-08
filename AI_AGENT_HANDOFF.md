@@ -12,7 +12,7 @@ The desktop WebView app is the only active end-user product path:
 3. `desktop_ui_service.py` bridges UI actions to the scan engine.
 4. Core scan modules live under `skyscanner_multi_domain/`.
 
-The CLI remains supported as a developer entry for automation, smoke tests, debugging, SearchPlan inspection, and report export. The Tk GUI is legacy-only.
+The CLI remains supported as a developer entry for automation, smoke tests, debugging, SearchPlan inspection, and report export.
 
 ## 2. Directory Map
 
@@ -35,7 +35,7 @@ Core engine:
 - `skyscanner_multi_domain/scan/history.py` — scan history, preview cache, plan telemetry
 - `skyscanner_multi_domain/transports/opencli.py` — default browser automation transport
 - `skyscanner_multi_domain/transports/cdp.py` — CDP/browser fallback transport
-- `skyscanner_multi_domain/transports/scrapling.py` — Scrapling legacy fallback transport
+- `skyscanner_multi_domain/transports/scrapling.py` — Scrapling fallback transport
 - `skyscanner_multi_domain/parsing/page_parser.py` — Best/Cheapest page parser
 - `skyscanner_multi_domain/parsing/readiness.py` — OpenCLI page readiness classifier
 - `skyscanner_multi_domain/parsing/price_candidates.py` — candidate price collection, embedded JSON recovery, ranking
@@ -49,20 +49,20 @@ Core engine:
 - `skyscanner_multi_domain/diagnostics/attempt_trace.py` — attempt trace logging
 - `skyscanner_multi_domain/pricing/fx_rates.py` — FX conversion
 
-Compatibility shims (removed):
+Flat compatibility shims (removed):
 
-- The root-level shims (`app_paths.py`, `attempt_trace.py`, `date_window.py`, `fx_rates.py`, `skyscanner_models.py`, `scan_orchestrator.py`, `scan_history.py`, `search_plan.py`, `transport_*.py`, `skyscanner_page_parser.py`, `location_resolver.py`, `skyscanner_regions.py`) have been removed.
-- All callers — tests and `legacy/gui.py` — now import package paths (`skyscanner_multi_domain.*`) directly.
-- `test_import_boundaries.py` keeps a `ROOT_SHIMS` deny-list so package code never re-introduces these flat root names. Do not recreate root-level shims; new code must import package paths.
+- The root-level flat shims (`app_paths.py`, `attempt_trace.py`, `date_window.py`, `fx_rates.py`, `skyscanner_neo.py`, `skyscanner_models.py`, `scan_orchestrator.py`, `scan_history.py`, `search_plan.py`, `transport_*.py`, `skyscanner_page_parser.py`, `location_resolver.py`, `skyscanner_regions.py`) have been removed.
+- Active/internal callers now import package paths (`skyscanner_multi_domain.*`) directly.
+- `test_import_boundaries.py` keeps a `ROOT_SHIMS` deny-list so package code never re-introduces these flat root names. Do not recreate removed flat root-level shims; new code must import package paths.
 
-Legacy:
+Neo tooling:
 
-- `legacy/gui.py` and `gui.py` are deprecated Tk entry points. Only fix startup-level breakage.
-- `skyscanner_neo.py` is a compatibility / legacy Neo entry. It still owns existing Neo CLI, replay, and URL mutation behavior, but it is not a new feature entry point.
+- `skyscanner_multi_domain/neo.py` owns the Neo CLI, replay, doctor, and compare behavior.
+- `test_import_boundaries.py` guards that the root Neo shim stays removed.
 
 Historical notes:
 
-- Root-level compatibility shims have been removed; see section 2.
+- Flat root-level compatibility shims have been removed, including `skyscanner_neo.py`.
 
 ## 3. Data Flow
 
@@ -93,10 +93,8 @@ Current SearchPlan behavior is intentionally conservative:
 
 ## 4. Do Not Modify By Default
 
-- Do not add new user-facing features to `legacy/gui.py` or `gui.py`.
-- Follow `docs/legacy_tk_policy.md`; legacy Tk is frozen for compatibility only.
-- Do not recreate root-level compatibility shims; import package paths (`skyscanner_multi_domain.*`) directly.
-- Do not add new product logic to `skyscanner_neo.py`; move new Neo-related code into package modules first.
+- Do not recreate removed flat root-level compatibility shims; import package paths (`skyscanner_multi_domain.*`) directly.
+- Do not recreate `skyscanner_neo.py`; keep Neo-related code in package modules such as `skyscanner_multi_domain.neo`.
 - Do not turn `webui/` into a standalone cloud/web product.
 - Do not introduce SearchPlan pruning until explainability, plan metadata, and telemetry are stable.
 - Do not add challenge/captcha bypass logic.
@@ -105,7 +103,7 @@ Current SearchPlan behavior is intentionally conservative:
 ## 5. Common Test Commands
 
 ```bash
-python -m py_compile cli.py desktop_ui_service.py skyscanner_neo.py
+python -m py_compile cli.py desktop_ui_service.py skyscanner_multi_domain/neo.py
 python -m py_compile skyscanner_multi_domain/scan/orchestrator.py
 python -m py_compile skyscanner_multi_domain/planning/search_plan.py
 python -m py_compile skyscanner_multi_domain/planning/execution_policy.py skyscanner_multi_domain/scan/repair.py
@@ -119,22 +117,27 @@ python tools/replay_parser_snapshots.py logs/snapshots/opencli --json
 ## 6. Current Next Tasks
 
 - Keep `desktop_ui_service -> cli.SimpleCLI` as retired P1 debt; prevent regressions that reintroduce the import.
-- Add richer WebView warning drill-down with evidence snippets per row.
+- Keep the WebView component split (`QueryCard`, `ResultStream`, `RawResults`, `Drawers`, `StatusBar`) behavior-preserving; bridge/service contracts still live outside React components.
+- `tests/test_webui_component_boundaries.py` guards the WebView Phase 6 component split so `App.tsx` does not reabsorb result-table or drawer helper code.
+- `webui/src/App.test.tsx` now includes a first-launch blank-slate regression, and `webui/src/testSetup.ts` performs RTL cleanup after each test.
 - Failed-market repair actions now support queue retry, run retry, extend wait, open manual-review links, and skip current repair tasks.
-- Continue shrinking `cli.py`: query/planning lives in `skyscanner_multi_domain.scan.query_service.QueryService`, and desktop result processing lives in `skyscanner_multi_domain.scan.result_service.ResultService`.
-- CI now runs ruff, scoped mypy, frontend build, release smoke, and pytest via `.github/workflows/ci.yml`; mypy currently covers 43 source files across runtime/pricing/geo/diagnostics/parsing/selected planning/scan support/orchestration/primary transport modules plus CLI, desktop, and Neo entry points.
-- Broad swallowed exceptions in primary runtime/transport paths now log at debug/warning instead of disappearing silently; the current audit has no bare `except` handlers and 53 broad handlers remaining.
+- Keep `cli.py` focused on argparse/printing/export; query/planning lives in `skyscanner_multi_domain.scan.query_service.QueryService`, and desktop result processing lives in `skyscanner_multi_domain.scan.result_service.ResultService`.
+- CI now runs ruff, full non-vendor source mypy, frontend test/build, release smoke, and pytest via `.github/workflows/ci.yml`; mypy currently covers 61 non-vendor, non-WebUI source files.
+- Broad swallowed exceptions in primary runtime/transport paths now log at debug/warning instead of disappearing silently; the current audit has no bare `except` handlers and 1 non-vendor broad boundary handler remaining.
+- `tests/test_exception_boundaries.py` now guards the remaining broad-handler allow-list.
 - Market reliability now feeds SearchPlan ordering from recent success, parser confidence, historical win rate, fallback dependence, and challenge/loading risk without reducing the task set.
-- Neo capture URL/payload/header helpers now live in `skyscanner_multi_domain.scan.url_builder`; `skyscanner_neo.py` remains a compatibility CLI and re-export layer.
+- Neo capture URL/payload/header helpers now live in `skyscanner_multi_domain.scan.url_builder`; Neo CLI behavior now lives in `skyscanner_multi_domain.neo`.
 - User-confirmed price loop baseline records confirmed/mismatched WebView rows to `runtime/price_confirmations.jsonl` and shows confirmation counts in Trust UX.
-- Release hygiene baseline is in place: version 1.2.0, `CHANGELOG.md`, quick README install/run path, and `scripts/release_smoke.py`.
+- Release hygiene baseline is in place: version 1.2.1, `CHANGELOG.md`, quick README install/run path, and `scripts/release_smoke.py`.
 - Only after explainability, batch progress, and telemetry are stable, consider conservative user-confirmed early stop in fast mode.
 
 Recently completed:
 
 - Extracted location resolution, route planning, and query-payload building from `cli.SimpleCLI` into `skyscanner_multi_domain.scan.query_service.QueryService`; `desktop_ui_service` now routes all query/location work through `self.query`.
+- Removed the remaining thin `SimpleCLI` query route/effective-region wrapper methods; CLI call sites now use `self._query_service` directly.
+- `test_simple_cli_does_not_reintroduce_thin_service_wrappers` guards against thin `SimpleCLI` service wrappers returning.
 - Extracted desktop result processing and markdown persistence into `skyscanner_multi_domain.scan.result_service.ResultService`; `desktop_ui_service.py` no longer imports `cli`.
-- Enabled Ruff Bugbear (`B`) and expanded the scoped mypy gate to 41 source files.
+- Enabled Ruff Bugbear (`B`) and expanded mypy to the full non-vendor source gate of 61 files, including package Neo compatibility modules.
 - Audited bare `except ...: pass` handlers and replaced broad silent catches in captcha, runtime paths, orchestrator, CDP, structured CDP, Google jump, OpenCLI, and Scrapling paths with logging.
 
 - Parser diagnostics/confidence metadata now flows through `FlightQuote` and scan/report rows.
@@ -149,10 +152,11 @@ Recently completed:
 - Repair Mode can build failed-market repair plans without rescanning successful markets; challenge tasks are manual review by default.
 - WebView state exposes fetch quality, parser recovery, snapshot, candidate, fallback, and repair-plan fields for Trust UX.
 - SearchPlan market reliability score now reflects parser confidence, fallback dependence, and challenge/loading risk in addition to success and win history.
-- Extracted Neo capture selection, URL rewriting, payload mutation, header preparation, and response quote extraction into `skyscanner_multi_domain.scan.url_builder` with compatibility re-exports from `skyscanner_neo.py`.
+- Extracted Neo capture selection, URL rewriting, payload mutation, header preparation, response quote extraction, and the Neo CLI into package modules; the root `skyscanner_neo.py` shim is removed.
 - WebView repair panel actions now call `apply_repair_action` for class-specific queue retry, selected-region rerun, extended-wait rerun, challenge link opening, and per-task skip.
 - WebView success rows now expose `确认` / `不符` actions backed by `skyscanner_multi_domain.scan.confirmation.PriceConfirmationStore`.
-- Added release smoke checks for version consistency, changelog coverage, README install path, PyInstaller bundle version wiring, and built WebView assets.
+- Added release smoke checks for version consistency, changelog coverage, README install path, removed flat root shims, PyInstaller bundle version wiring, CI gates, and built WebView assets.
+- Completed the WebView Phase 6 component refactor: `App.tsx` now orchestrates state/bridge callbacks while query entry, results, raw tables, drawers, and status bar live in smaller components.
 
 The fuller execution backlog is in `docs/todo.md`.
 
@@ -160,5 +164,5 @@ The fuller execution backlog is in `docs/todo.md`.
 
 - Browser scraping is slow and unstable; avoid high concurrency as a default.
 - History data may contain old rows without plan metadata; code must tolerate missing `plan_*` fields.
-- Root-level compatibility shims have been removed; `test_import_boundaries.py` enforces a `ROOT_SHIMS` deny-list so package code never re-introduces flat root imports. Do not recreate shims.
+- Flat root-level compatibility shims have been removed; `test_import_boundaries.py` enforces a `ROOT_SHIMS` deny-list so package code never re-introduces flat root imports. Do not recreate shims.
 - Tests live under `tests/` (module-organized) plus four root-level entry/structural tests (`test_cli`, `test_desktop_ui_service`, `test_failure_replay`, `test_import_boundaries`).

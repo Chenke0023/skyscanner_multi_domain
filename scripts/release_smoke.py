@@ -13,8 +13,91 @@ README_FILE = PROJECT_ROOT / "README.md"
 CHANGELOG_FILE = PROJECT_ROOT / "CHANGELOG.md"
 WEBUI_PACKAGE_FILE = PROJECT_ROOT / "webui" / "package.json"
 WEBUI_DIST_INDEX = PROJECT_ROOT / "webui" / "dist" / "index.html"
+WEBUI_SOURCE_DIR = PROJECT_ROOT / "webui" / "src"
 BUILD_SCRIPT = PROJECT_ROOT / "scripts" / "build_macos_standalone_app.sh"
-SPEC_FILE = PROJECT_ROOT / "Skyscanner 多市场比价.spec"
+SOURCE_APP_SCRIPT = PROJECT_ROOT / "scripts" / "build_macos_app.sh"
+CI_WORKFLOW_FILE = PROJECT_ROOT / ".github" / "workflows" / "ci.yml"
+LEGACY_TK_ENTRYPOINTS = (
+    PROJECT_ROOT / "gui.py",
+    PROJECT_ROOT / "legacy",
+    PROJECT_ROOT / "docs" / "legacy_tk_policy.md",
+    PROJECT_ROOT / "tests" / "legacy",
+)
+REMOVED_PACKAGE_LEGACY_NAMESPACES = (
+    PROJECT_ROOT / "skyscanner_multi_domain" / "legacy",
+)
+REMOVED_FLAT_ROOT_SHIMS = tuple(
+    PROJECT_ROOT / f"{name}.py"
+    for name in (
+        "app_paths",
+        "attempt_trace",
+        "date_window",
+        "fx_rates",
+        "location_resolver",
+        "scan_history",
+        "scan_orchestrator",
+        "search_plan",
+        "skyscanner_neo",
+        "skyscanner_models",
+        "skyscanner_page_parser",
+        "skyscanner_regions",
+        "transport_cdp",
+        "transport_opencli",
+        "transport_scrapling",
+    )
+)
+LEGACY_TK_FORBIDDEN_TEXT = (
+    (PROJECT_ROOT / "desktop_webview.py", "SKYSCANNER_ALLOW_LEGACY_GUI"),
+    (PROJECT_ROOT / "desktop_webview.py", "from legacy"),
+    (PROJECT_ROOT / "desktop_webview.py", "legacy.gui"),
+    (PROJECT_ROOT / "scripts" / "build_macos_standalone_app.sh", "test_gui_features"),
+    (PROJECT_ROOT / "scripts" / "build_macos_standalone_app.sh", "test_gui_startup"),
+)
+REMOVED_ROOT_SHIM_FORBIDDEN_TEXT = (
+    (PYPROJECT_FILE, "skyscanner_neo.py"),
+    (BUILD_SCRIPT, "skyscanner_neo"),
+)
+CI_GATE_NEEDLES = (
+    "python -m ruff check .",
+    "python -m mypy",
+    "npm ci",
+    "npm test -- --run",
+    "npm run build",
+    "python scripts/release_smoke.py",
+    "python -m pytest -q",
+)
+WEBUI_STYLE_FORBIDDEN_PATTERNS = (
+    ("handwritten SVG", re.compile(r"<svg\b")),
+    ("Tailwind tracking utility", re.compile(r"\btracking-")),
+    ("decorative loading orbit", re.compile(r"loading-orbit|orbitPulse")),
+    ("gradient background", re.compile(r"radial-gradient|linear-gradient")),
+    ("viewport-scaled font size", re.compile(r"font-size:[^;]*vw|clamp\(")),
+    ("oversized border radius", re.compile(r"border-radius:\s*(?:1[7-9]|[2-9]\d)px|rounded-(?:2xl|3xl)|rounded-\[")),
+)
+
+
+def _iter_webui_source_files(source_dir: Path = WEBUI_SOURCE_DIR) -> list[Path]:
+    if not source_dir.exists():
+        return []
+    return sorted(
+        path
+        for path in source_dir.rglob("*")
+        if path.suffix in {".css", ".ts", ".tsx"}
+    )
+
+
+def collect_webui_style_guardrail_violations(source_dir: Path = WEBUI_SOURCE_DIR) -> list[str]:
+    violations: list[str] = []
+    for path in _iter_webui_source_files(source_dir):
+        relative_path = path.relative_to(PROJECT_ROOT) if path.is_relative_to(PROJECT_ROOT) else path
+        source = path.read_text(encoding="utf-8")
+        for label, pattern in WEBUI_STYLE_FORBIDDEN_PATTERNS:
+            if pattern.search(source):
+                violations.append(f"{relative_path}: {label}")
+        for match in re.finditer(r"letter-spacing\s*:\s*([^;\"']+)", source):
+            if match.group(1).strip() != "0":
+                violations.append(f"{relative_path}: non-zero letter spacing")
+    return violations
 
 
 def read_release_version() -> str:
@@ -47,19 +130,61 @@ def run_release_smoke(*, require_webui_dist: bool = True) -> list[str]:
     for needle in ("快速安装 / 运行", "scripts/build_macos_standalone_app.sh", "python3 desktop_webview.py"):
         if needle not in readme:
             raise RuntimeError(f"{README_FILE} is missing release/install text: {needle}")
+    if "SKYSCANNER_ALLOW_LEGACY_GUI" in readme:
+        raise RuntimeError(f"{README_FILE} must not document the removed legacy Tk fallback")
     checks.append("README install path")
+
+    existing_legacy = [path for path in LEGACY_TK_ENTRYPOINTS if path.exists()]
+    if existing_legacy:
+        raise RuntimeError(f"Legacy Tk entrypoints must stay removed: {existing_legacy}")
+    for path, forbidden_text in LEGACY_TK_FORBIDDEN_TEXT:
+        if forbidden_text in path.read_text(encoding="utf-8"):
+            raise RuntimeError(f"{path} must not reference removed legacy Tk fallback text: {forbidden_text}")
+    checks.append("legacy Tk entrypoints removed")
+
+    existing_flat_shims = [path for path in REMOVED_FLAT_ROOT_SHIMS if path.exists()]
+    if existing_flat_shims:
+        raise RuntimeError(f"Flat root compatibility shims must stay removed: {existing_flat_shims}")
+    checks.append("flat root shims removed")
+    for path, forbidden_text in REMOVED_ROOT_SHIM_FORBIDDEN_TEXT:
+        if forbidden_text in path.read_text(encoding="utf-8"):
+            raise RuntimeError(f"{path} must not reference removed root shim: {forbidden_text}")
+    checks.append("removed root shim references")
+
+    existing_package_legacy = [path for path in REMOVED_PACKAGE_LEGACY_NAMESPACES if path.exists()]
+    if existing_package_legacy:
+        raise RuntimeError(f"Package legacy namespaces must stay removed: {existing_package_legacy}")
+    checks.append("package legacy namespace removed")
 
     build_script = BUILD_SCRIPT.read_text(encoding="utf-8")
     for needle in ('VERSION_FILE="${PROJECT_ROOT}/data/version.txt"', "CFBundleShortVersionString", "CFBundleVersion"):
         if needle not in build_script:
             raise RuntimeError(f"{BUILD_SCRIPT} is missing bundle version handling: {needle}")
+    source_app_script = SOURCE_APP_SCRIPT.read_text(encoding="utf-8")
+    for needle in ('VERSION_FILE="${PROJECT_ROOT}/data/version.txt"', "<string>${VERSION}</string>"):
+        if needle not in source_app_script:
+            raise RuntimeError(f"{SOURCE_APP_SCRIPT} is missing bundle version handling: {needle}")
     checks.append("macOS bundle version wiring")
 
-    spec_text = SPEC_FILE.read_text(encoding="utf-8")
-    for needle in ("desktop_webview.py", "webui/dist", "collect_submodules('skyscanner_multi_domain')"):
-        if needle not in spec_text:
-            raise RuntimeError(f"{SPEC_FILE} is missing required PyInstaller entry/data: {needle}")
-    checks.append("PyInstaller spec data")
+    for needle in (
+        "desktop_webview.py",
+        '--add-data "webui/dist:webui/dist"',
+        "--collect-submodules skyscanner_multi_domain",
+    ):
+        if needle not in build_script:
+            raise RuntimeError(f"{BUILD_SCRIPT} is missing required PyInstaller entry/data: {needle}")
+    checks.append("PyInstaller build data")
+
+    ci_workflow = CI_WORKFLOW_FILE.read_text(encoding="utf-8")
+    for needle in CI_GATE_NEEDLES:
+        if needle not in ci_workflow:
+            raise RuntimeError(f"{CI_WORKFLOW_FILE} is missing CI gate: {needle}")
+    checks.append("CI test gates")
+
+    webui_style_violations = collect_webui_style_guardrail_violations()
+    if webui_style_violations:
+        raise RuntimeError(f"WebUI style guardrails failed: {webui_style_violations}")
+    checks.append("webui style guardrails")
 
     if require_webui_dist and not WEBUI_DIST_INDEX.exists():
         raise RuntimeError(f"Missing built frontend asset: {WEBUI_DIST_INDEX}")

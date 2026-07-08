@@ -5,19 +5,28 @@ from __future__ import annotations
 
 import ast
 from pathlib import Path
+from typing import Any
 
 TEST_DIR = Path(__file__).parent.parent
-TEST_FILES = sorted(
-    [*TEST_DIR.glob("test_*.py"), *TEST_DIR.glob("tests/**/test_*.py")]
-)
 
 
-def parse_test_file(path: Path) -> dict:
-    with open(path) as f:
-        src = f.read()
+def iter_test_files(root: Path = TEST_DIR) -> list[Path]:
+    test_files = [*root.glob("test_*.py"), *root.glob("tests/**/test_*.py")]
+    return sorted(path for path in test_files if "vendor" not in path.relative_to(root).parts)
 
-    stats = {
-        "file": path.name,
+
+def _display_path(path: Path) -> str:
+    try:
+        return path.relative_to(TEST_DIR).as_posix()
+    except ValueError:
+        return path.name
+
+
+def parse_test_file(path: Path) -> dict[str, Any]:
+    src = path.read_text(encoding="utf-8")
+
+    stats: dict[str, Any] = {
+        "file": _display_path(path),
         "lines": len(src.splitlines()),
         "tests": 0,
         "classes": 0,
@@ -36,7 +45,7 @@ def parse_test_file(path: Path) -> dict:
         return stats
 
     for node in ast.walk(tree):
-        if isinstance(node, ast.FunctionDef) and node.name.startswith("test_"):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name.startswith("test_"):
             stats["tests"] += 1
         if isinstance(node, ast.ClassDef) and node.name.endswith("Tests"):
             stats["classes"] += 1
@@ -44,10 +53,11 @@ def parse_test_file(path: Path) -> dict:
     stats["patch_calls"] = src.count("patch(") + src.count("patch.object(") + src.count("patch.dict(")
     stats["async_calls"] = src.count("async def test_") + src.count("AsyncMock")
     stats["import_root_shim"] = (
-        src.count("from transport_") +
-        src.count("from skyscanner_neo") +
-        src.count("from scan_history") +
-        src.count("from test_")  # cross-test imports
+        src.count("from skyscanner_neo")
+        + src.count("import skyscanner_neo")
+        + src.count("from transport_")
+        + src.count("from scan_history")
+        + src.count("from test_")  # cross-test imports
     )
     stats["import_package"] = src.count("from skyscanner_multi_domain")
     stats["sleep_calls"] = src.count("time.sleep")
@@ -57,7 +67,7 @@ def parse_test_file(path: Path) -> dict:
     return stats
 
 
-def print_table(rows: list[dict]) -> None:
+def print_table(rows: list[dict[str, Any]]) -> None:
     header = f"{'file':<36} {'tests':>5} {'cls':>4} {'lines':>6} {'patch':>6} {'async':>5} {'sys_mod':>8} {'sleep':>6} {'td':>4}"
     print(header)
     print("-" * len(header))
@@ -80,11 +90,9 @@ def print_table(rows: list[dict]) -> None:
 
 def main() -> None:
     rows = []
-    for p in TEST_FILES:
+    for p in iter_test_files():
         stats = parse_test_file(p)
-        # Only include files in the main project dir (not vendor subdirs)
-        if "vendor" not in str(p):
-            rows.append(stats)
+        rows.append(stats)
 
     print_table(rows)
 

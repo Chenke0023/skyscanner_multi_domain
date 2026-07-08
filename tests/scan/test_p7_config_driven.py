@@ -337,7 +337,7 @@ class TransportModeStrictTests(unittest.IsolatedAsyncioTestCase):
         assert len(scrapling_calls) >= 1
         assert cdp_calls == [], "CDP fallback should be disabled when transport=scrapling strict"
 
-    async def test_auto_preserves_legacy_fallback_chain(self) -> None:
+    async def test_auto_preserves_existing_fallback_chain(self) -> None:
         """transport=AUTO → caller's transport/allow_browser_fallback unchanged."""
         opencli_calls: list = []
         cdp_calls: list = []

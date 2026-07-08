@@ -12,7 +12,6 @@ from skyscanner_multi_domain.scan.orchestrator import (
     classify_failure,
     failure_action,
     should_retry_wait_render,
-    SCRAPLING_FALLBACK_STATUSES,
     run_page_scan,
 )
 from skyscanner_multi_domain.models import FlightQuote
@@ -75,17 +74,6 @@ class ShouldRetryWaitRenderTests(unittest.TestCase):
 
     def test_parse_is_false(self) -> None:
         assert should_retry_wait_render("parse") is False
-
-
-class LegacySCRAPLING_FALLBACK_STATUSESTests(unittest.TestCase):
-    def test_excludes_loading(self) -> None:
-        assert "page_loading" not in SCRAPLING_FALLBACK_STATUSES
-
-    def test_includes_network(self) -> None:
-        assert "scrapling_failed" in SCRAPLING_FALLBACK_STATUSES
-
-    def test_includes_parse(self) -> None:
-        assert "page_parse_failed" in SCRAPLING_FALLBACK_STATUSES
 
 
 class AttemptTraceFlushTests(unittest.TestCase):

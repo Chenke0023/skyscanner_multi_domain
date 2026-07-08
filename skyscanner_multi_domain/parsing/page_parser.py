@@ -466,8 +466,10 @@ def _normalize_date(date_str: str) -> str:
             try:
                 return datetime.strptime(date_str.strip(), try_fmt).strftime("%Y-%m-%d")
             except ValueError:
-                pass
+                continue
     return date_str.strip()
+
+
 def attach_parser_trust_metadata(
     quote: FlightQuote,
     diagnostics: PageParseDiagnostics,

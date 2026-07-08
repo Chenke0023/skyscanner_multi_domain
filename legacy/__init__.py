@@ -1,1 +1,0 @@
-"""Legacy desktop UI modules."""

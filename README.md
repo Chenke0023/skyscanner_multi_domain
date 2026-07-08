@@ -1,10 +1,10 @@
 # Skyscanner 多市场比价
 
-这是一个以 `opencli` 浏览器自动化为主方案、以 Edge + CDP `page` 和 Scrapling legacy 方案为备用兜底的 Skyscanner 多市场比价工具。
+这是一个以 `opencli` 浏览器自动化为主方案、以 Edge + CDP `page` 和 Scrapling 方案为备用兜底的 Skyscanner 多市场比价工具。
 
-当前只维护一条面向终端用户的产品路径：桌面 WebView。CLI 保留为开发、调试、自动化和导出入口；旧 Tk GUI 与根目录兼容 shim 只做 legacy 兼容。
+当前只维护一条面向终端用户的产品路径：桌面 WebView。CLI 保留为开发、调试、自动化和导出入口。
 
-## Active / Legacy Map
+## Runtime Map
 
 ### Primary product
 
@@ -23,7 +23,7 @@
 - `skyscanner_multi_domain/scan/history.py` — 历史记录、预览缓存、plan telemetry
 - `skyscanner_multi_domain/transports/opencli.py` — opencli 传输
 - `skyscanner_multi_domain/transports/cdp.py` — CDP 传输
-- `skyscanner_multi_domain/transports/scrapling.py` — Scrapling legacy 传输
+- `skyscanner_multi_domain/transports/scrapling.py` — Scrapling 备用传输
 - `skyscanner_multi_domain/parsing/page_parser.py` — 页面解析
 - `skyscanner_multi_domain/geo/location_resolver.py` — 地点/国家/机场解析
 - `skyscanner_multi_domain/geo/regions.py` — 地区配置
@@ -33,16 +33,15 @@
 - `skyscanner_multi_domain/diagnostics/attempt_trace.py` — attempt trace 日志
 - `skyscanner_multi_domain/pricing/fx_rates.py` — 汇率换算
 
-### Legacy
+### Neo tooling
 
-- `skyscanner_neo.py` — compatibility / legacy Neo entry。保留现有 Neo CLI、replay、URL mutation 兼容能力；新逻辑不要继续写入这里，中期再拆到 package。
-- `legacy/gui.py` / `gui.py` — deprecated Tk interface。只修启动级别问题，不再增加 SearchPlan UI、历史抽屉、失败修复 UI 或视觉优化。
+- `skyscanner_multi_domain/neo.py` — Neo CLI、replay、doctor、compare 与 URL mutation 工具。
 
-### Compatibility shims (removed)
+### Flat compatibility shims (removed)
 
-根目录的 compatibility shims（`app_paths.py`、`attempt_trace.py`、`date_window.py`、`fx_rates.py`、`skyscanner_models.py`、`scan_orchestrator.py`、`scan_history.py`、`search_plan.py`、`transport_*.py`、`skyscanner_page_parser.py`、`location_resolver.py`、`skyscanner_regions.py`）已移除。所有调用方（测试、`legacy/gui.py`）现直接 import `skyscanner_multi_domain.*` package path。
+根目录的 flat compatibility shims（`app_paths.py`、`attempt_trace.py`、`date_window.py`、`fx_rates.py`、`skyscanner_neo.py`、`skyscanner_models.py`、`scan_orchestrator.py`、`scan_history.py`、`search_plan.py`、`transport_*.py`、`skyscanner_page_parser.py`、`location_resolver.py`、`skyscanner_regions.py`）已移除。active 调用方现直接 import `skyscanner_multi_domain.*` package path。
 
-- 新代码一律 import package path，不要再创建 root-level shim。
+- 新代码一律 import package path，不要再创建 removed flat root-level shim。
 - `test_import_boundaries.py` 保留 `ROOT_SHIMS` 作为 deny-list，防止 package 代码重新引入这些 flat root 名字。
 
 ## Engineering Rules
@@ -52,17 +51,17 @@
 1. 扫描核心能力：放在 `skyscanner_multi_domain/scan/`、`skyscanner_multi_domain/planning/`、`skyscanner_multi_domain/parsing/`、`skyscanner_multi_domain/geo/` 或 `skyscanner_multi_domain/transports/`。
 2. 终端用户体验：只做 `webui/` + `desktop_webview.py` + `desktop_ui_service.py`。
 3. 调试、自动化、导出：CLI 可以暴露。
-4. 旧 GUI 兼容：默认不做新功能，只修启动级别问题。
+4. Neo 调试工具：放在 `skyscanner_multi_domain/neo.py`，不新增 root shim。
 
 ## 当前主方案
 
 - 默认抓取方案：`opencli`
 - 备用抓取方案：`page`（通过本机 Edge + CDP 读取结果页）
-- Legacy 兜底方案：`scrapling`
+- Scrapling 兜底方案：`scrapling`
 
-当前推荐优先使用 opencli 驱动浏览器打开结果页、抽取正文并解析 Best / Cheapest 价格；opencli 未取到价格时会先 fallback 到 `page`，仍失败时再尝试 Scrapling legacy。
+当前推荐优先使用 opencli 驱动浏览器打开结果页、抽取正文并解析 Best / Cheapest 价格；opencli 未取到价格时会先 fallback 到 `page`，仍失败时再尝试 Scrapling。
 
-当前开发以本文件的 active / legacy 边界为准。根目录 compatibility shims 已移除，所有调用方直接 import `skyscanner_multi_domain.*`。
+当前开发以本文件的 runtime 边界为准。根目录 compatibility shims 已移除，active 调用方直接 import `skyscanner_multi_domain.*`。
 
 当前任务优先级和验收标准记录在 `docs/todo.md`。下一阶段重点是 SearchPlan batch progress、桌面 WebView 阶段展示和结果可信度，不做动态剪枝。
 
@@ -72,7 +71,7 @@
 
 ```bash
 python3 -m pip install -r requirements.txt
-cd webui && npm install && npm run build && cd ..
+cd webui && npm install && npm test -- --run && npm run build && cd ..
 python3 desktop_webview.py
 ```
 
@@ -103,7 +102,7 @@ App 自包含 Python 运行时与所有依赖，可独立分发，无需安装 P
 
 ### 源码运行（开发调试）
 
-GUI：
+桌面 WebView：
 
 ```bash
 python3 desktop_webview.py
@@ -112,12 +111,6 @@ python3 desktop_webview.py
 如果本机尚未安装 `pywebview`，桌面入口会直接给出明确错误并退出。
 
 如果前端静态资源 `webui/dist/index.html` 缺失，桌面窗口会显示错误页，不再静默回退到 Tk。
-
-如需临时打开旧 Tk 版本，请显式执行：
-
-```bash
-SKYSCANNER_ALLOW_LEGACY_GUI=1 python3 desktop_webview.py
-```
 
 CLI：
 
@@ -159,9 +152,9 @@ python3 cli.py page -o 北京 -d 阿拉木图 -t 2026-04-29 --challenge-policy m
 
 - 默认通过 opencli 浏览器自动化抓取结果页可见正文
 - SearchPlan 会对路线、日期和市场候选进行可解释排序；`--show-plan` 可打印扫描计划并退出，不发起实时扫描
-- 当单个市场在 opencli 下仍失败时，自动回退到 `page` 方案，再尝试 Scrapling legacy 兜底
+- 当单个市场在 opencli 下仍失败时，自动回退到 `page` 方案，再尝试 Scrapling 兜底
 - 在需要时可显式切换到 `page` 方案，自动连接或拉起带 `9222` 调试端口的 Edge
-- 在需要对比 legacy 行为时可显式切换到 `scrapling` 方案
+- 在需要对比备用抓取行为时可显式切换到 `scrapling` 方案
 - 按路线智能拼出实际比较地区（基线地区 + 出发/目的地所属市场 + 手动追加地区）
 - 支持单程与往返
 - 支持日期窗口扫描（默认 `±3` 天，`--date-window 0` 表示只扫单日；往返时保持停留天数）
@@ -176,12 +169,12 @@ python3 cli.py page -o 北京 -d 阿拉木图 -t 2026-04-29 --challenge-policy m
 - 按汇率统一换算为人民币
 - 保存 Markdown 报告，便于直接对比
 - 结果表 / Markdown 报告包含“航段”列，能看到实际命中的机场组合
-- GUI 结果表格支持点击列头排序（价格列按数值排序，支持升序/降序切换）
-- GUI 扫描进度条：逐市场实时更新状态（如 `正在扫描 2026-04-29 [中国] (attempts/expected: 3/49)`），附 `ttk.Progressbar`
-- GUI 取消按钮：扫描期间可随时中断，worker 线程在日期/地区间隙安全退出
-- GUI 链接可点击：双击结果表"链接"列可在默认浏览器中打开对应 Skyscanner 结果页
-- GUI 支持独立勾选“出发地按国家”与“目的地按国家”
-- GUI 内置出发 / 返程日期选择器
+- WebView 结果列表展示价格、可信度、来源、警告和 fallback evidence
+- WebView 状态栏逐市场展示 SearchPlan 阶段、批次和扫描进度
+- WebView 取消按钮：扫描期间可随时中断，worker 线程在日期/地区间隙安全退出
+- WebView 链接按钮可在默认浏览器中打开对应 Skyscanner 结果页
+- WebView 支持独立勾选“出发地按国家”与“目的地按国家”
+- WebView 支持出发 / 返程日期输入、历史抽屉、失败修复和价格确认
 
 ## 输出与运行时路径
 
@@ -422,15 +415,17 @@ pip install -r requirements.txt
 ```bash
 cd webui
 npm install
+npm test -- --run
 npm run build
 ```
 
 运行测试：
 
 ```bash
-python3 -m pytest -q test_location_resolver.py test_cli.py
-python3 -m pytest -q test_skyscanner_neo.py
-python3 -m pytest -q test_date_window.py
+python3 -m ruff check .
+python3 -m mypy --config-file pyproject.toml
+python3 -m pytest -q
+python3 scripts/release_smoke.py
 ```
 
 OpenCLI fetch reliability diagnostics:
@@ -472,12 +467,6 @@ python3 cli.py uninstall-auto-refresh
 ```
 
 后台任务只处理 UI 中选择为“后台”的自动复扫配置；“应用内”配置仍由桌面 App 打开时的轮询触发。后台命令使用 `runtime/background_auto_refresh.lock` 做进程锁，避免多次调度重叠执行。
-
-Legacy Tk status:
-
-- `legacy/gui.py` and root-level `gui.py` are frozen compatibility entry points.
-- New end-user UX must be implemented in `desktop_webview.py`, `desktop_ui_service.py`, and `webui/`.
-- See `docs/legacy_tk_policy.md`.
 
 验证浏览器会话持久化：
 

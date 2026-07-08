@@ -1,16 +1,15 @@
 """
-Skyscanner Neo compatibility layer and legacy capture-based tooling.
+Neo tooling.
 
 Primary scan paths (Scrapling + CDP fallback) live in the package:
 - skyscanner_multi_domain/transports/scrapling.py
 - skyscanner_multi_domain/transports/cdp.py
 - skyscanner_multi_domain/scan/orchestrator.py
 
-This module retains:
+This module owns:
 - NeoCli wrapper and Neo-based request execution
 - Capture file loading, URL rewriting, payload mutation
 - doctor / compare CLI subcommands
-- Re-exports for backward compatibility
 """
 
 from __future__ import annotations
@@ -23,72 +22,16 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
-from typing import Any, Callable, Optional  # noqa: F401  (re-exported)
-from urllib.parse import parse_qsl, quote, urlencode, urlparse, urlunparse  # noqa: F401  (re-exported)
+from typing import Any, Optional
 
 import aiohttp
 
 from skyscanner_multi_domain.runtime.paths import PROJECT_ROOT
 from skyscanner_multi_domain.models import FlightQuote, RegionConfig
-from skyscanner_multi_domain.parsing.page_parser import (
-    PAGE_TEXT_CAPTURE_LIMIT,  # noqa: F401  (re-exported)
-    extract_page_quote,  # noqa: F401  (re-exported)
-)
-from skyscanner_multi_domain.geo.regions import (
-    DEFAULT_REGIONS,
-    REGIONS,
-    build_effective_region_codes,  # noqa: F401  (re-exported)
-    get_selected_regions,  # noqa: F401  (re-exported)
-)
-
-# ---------------------------------------------------------------------------
-# Re-exports for backward compatibility
-# ---------------------------------------------------------------------------
-from skyscanner_multi_domain.scan.orchestrator import (  # noqa: F401
-    build_search_url,
-    print_quotes,
-    quotes_to_dicts,
-    run_page_scan,
-)
-from skyscanner_multi_domain.scan.url_builder import (  # noqa: F401
-    CURRENCY_KEYS,
-    DATE_PATH_HINTS,
-    DROP_HEADERS,
-    PRICE_KEYS,
-    SAFE_FORWARD_HEADERS,
-    URL_HINTS,
-    collect_price_candidates,
-    compact_json,
-    deep_copy_json,
-    extract_quote,
-    find_candidate_captures,
-    load_capture_file,
-    mutate_payload,
-    nested_get,
-    nested_set,
-    parse_date,
-    pick_currency,
-    prepare_headers,
-    replace_date_tokens,
-    rewrite_url,
-    stringify,
-)
-# PLACEHOLDER_REEXPORT_TAIL
-from skyscanner_multi_domain.scan.orchestrator import _persist_failure_log  # noqa: F401
-from skyscanner_multi_domain.transports.cdp import (  # noqa: F401
-    detect_browsers,
-    detect_cdp_version,
-    ensure_cdp_ready,
-    launch_browser_with_cdp,
-    prune_browser_profile,
-    verify_browser_session_persistence,
-    wait_for_cdp,
-)
-from skyscanner_multi_domain.parsing.challenge import check_captcha_in_page  # noqa: F401
-from skyscanner_multi_domain.transports.scrapling import (  # noqa: F401
-    _extract_scrapling_page_text,
-    compare_via_scrapling,
-)
+from skyscanner_multi_domain.geo.regions import DEFAULT_REGIONS, REGIONS
+from skyscanner_multi_domain.scan import orchestrator as scan_orchestrator
+from skyscanner_multi_domain.scan import url_builder
+from skyscanner_multi_domain.transports import cdp
 
 DEFAULT_DATE = "2026-04-29"
 
@@ -138,12 +81,6 @@ class NeoCli:
         )
 
 
-# --- PLACEHOLDER_NEO_TAIL ---
-
-
-# --- PLACEHOLDER_EXEC ---
-
-
 async def execute_raw_request(
     session: aiohttp.ClientSession,
     region: RegionConfig,
@@ -154,7 +91,7 @@ async def execute_raw_request(
     try:
         async with session.post(url, headers=headers, json=body) as response:
             text = await response.text()
-            return extract_quote(region, url, text, response.status)
+            return url_builder.extract_quote(region, url, text, response.status)
     except (aiohttp.ClientError, TimeoutError) as exc:
         return FlightQuote(
             region=region.code,
@@ -181,7 +118,7 @@ def execute_neo_request(
         "--method",
         "POST",
         "--body",
-        compact_json(body),
+        url_builder.compact_json(body),
         "--tab",
         tab_pattern,
         "--auto-headers",
@@ -224,10 +161,7 @@ def execute_neo_request(
 
     separator = lines.index("---") if "---" in lines else 1
     body_text = "\n".join(lines[separator + 1 :])
-    return extract_quote(region, url, body_text, status_code)
-
-
-# --- PLACEHOLDER_DOCTOR ---
+    return url_builder.extract_quote(region, url, body_text, status_code)
 
 
 def print_doctor(
@@ -237,8 +171,8 @@ def print_doctor(
     verify_session_persistence: bool = False,
     persistence_browser: Optional[str] = None,
 ) -> None:
-    browsers = detect_browsers()
-    cdp_info = detect_cdp_version()
+    browsers = cdp.detect_browsers()
+    cdp_info = cdp.detect_cdp_version()
     extension_path = neo.project_root / "vendor" / "neo" / "extension-dist"
 
     print("Neo 环境检查")
@@ -261,7 +195,7 @@ def print_doctor(
         print(f"Capture 文件: {'存在' if capture_file.exists() else '不存在'}")
     if verify_session_persistence:
         try:
-            ok, message = verify_browser_session_persistence(
+            ok, message = cdp.verify_browser_session_persistence(
                 persistence_browser,
             )
             print(f"Session 持久化: {'通过' if ok else '失败'} ({message})")
@@ -297,7 +231,7 @@ async def compare_prices(args: argparse.Namespace) -> int:
     if args.transport == "page":
         page_quotes = await compare_via_pages(args, selected_regions)
         page_quotes.sort(key=lambda item: (item.price is None, item.price or float("inf")))
-        print_quotes(page_quotes)
+        scan_orchestrator.print_quotes(page_quotes)
         winner = next((quote for quote in page_quotes if quote.price is not None), None)
         if winner:
             print(
@@ -309,7 +243,7 @@ async def compare_prices(args: argparse.Namespace) -> int:
         return 2
 
     if args.capture_file:
-        captures = load_capture_file(Path(args.capture_file))
+        captures = url_builder.load_capture_file(Path(args.capture_file))
     else:
         if not neo.available:
             print(
@@ -323,7 +257,7 @@ async def compare_prices(args: argparse.Namespace) -> int:
             return 1
         captures = json.loads(export.stdout or "[]")
 
-    candidates = find_candidate_captures(
+    candidates = url_builder.find_candidate_captures(
         captures, args.origin, args.destination, args.date
     )
     if not candidates:
@@ -345,15 +279,17 @@ async def compare_prices(args: argparse.Namespace) -> int:
         async with aiohttp.ClientSession(timeout=timeout) as session:
             tasks = []
             for region in selected_regions:
-                url = rewrite_url(str(base_capture.get("url", "")), region, args.date)
-                body = mutate_payload(
+                url = url_builder.rewrite_url(
+                    str(base_capture.get("url", "")), region, args.date
+                )
+                body = url_builder.mutate_payload(
                     base_capture.get("requestBody"),
                     args.origin.upper(),
                     args.destination.upper(),
                     args.date,
                     region,
                 )
-                headers = prepare_headers(
+                headers = url_builder.prepare_headers(
                     base_capture.get("requestHeaders") or {},
                     region,
                     url,
@@ -366,15 +302,17 @@ async def compare_prices(args: argparse.Namespace) -> int:
             print("未找到 Neo CLI，无法使用 --transport neo。", file=sys.stderr)
             return 1
         for region in selected_regions:
-            url = rewrite_url(str(base_capture.get("url", "")), region, args.date)
-            body = mutate_payload(
+            url = url_builder.rewrite_url(
+                str(base_capture.get("url", "")), region, args.date
+            )
+            body = url_builder.mutate_payload(
                 base_capture.get("requestBody"),
                 args.origin.upper(),
                 args.destination.upper(),
                 args.date,
                 region,
             )
-            headers = prepare_headers(
+            headers = url_builder.prepare_headers(
                 base_capture.get("requestHeaders") or {},
                 region,
                 url,
@@ -391,7 +329,7 @@ async def compare_prices(args: argparse.Namespace) -> int:
             raw_quotes.append(quote)
 
     raw_quotes.sort(key=lambda item: (item.price is None, item.price or float("inf")))
-    print_quotes(raw_quotes)
+    scan_orchestrator.print_quotes(raw_quotes)
 
     winner = next((quote for quote in raw_quotes if quote.price is not None), None)
     if winner:
@@ -409,12 +347,9 @@ async def compare_prices(args: argparse.Namespace) -> int:
     return 2
 
 
-# --- PLACEHOLDER_CLI ---
-
-
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Compare Skyscanner prices across markets (Scrapling/page primary flow + legacy Neo tools).",
+        description="Compare Skyscanner prices across markets (Scrapling/page primary flow + Neo tools).",
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
 

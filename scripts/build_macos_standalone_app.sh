@@ -17,7 +17,7 @@ else
 fi
 echo "Building ${APP_NAME} v${VERSION}"
 
-# ── Record source root for runtime legacy profile lookup ─────────
+# ── Record source root for bundled runtime paths ────────────────
 python3 -c "
 import json
 from pathlib import Path
@@ -70,21 +70,17 @@ python3 -m PyInstaller \
   --hidden-import cli \
   --hidden-import desktop_logic \
   --hidden-import desktop_ui_service \
-  --hidden-import skyscanner_neo \
   --hidden-import failure_replay \
   --hidden-import captcha_solver \
   --collect-submodules skyscanner_multi_domain \
   --collect-data apify_fingerprint_datapoints \
   --exclude-module pytest \
   --exclude-module unittest \
-  --exclude-module test_skyscanner_neo \
   --exclude-module test_cli \
   --exclude-module test_date_window \
   --exclude-module test_transport_cdp \
   --exclude-module test_transport_scrapling \
   --exclude-module test_desktop_ui_service \
-  --exclude-module test_gui_features \
-  --exclude-module test_gui_startup \
   --exclude-module test_location_resolver \
   --exclude-module test_scan_history \
   --exclude-module test_failure_replay \

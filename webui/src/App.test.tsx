@@ -70,6 +70,30 @@ describe("App", () => {
     expect(await screen.findByText("开始比价")).toBeInTheDocument();
     expect(await screen.findByPlaceholderText("例如：北京")).toBeInTheDocument();
     expect(await screen.findByPlaceholderText("例如：东京")).toBeInTheDocument();
+    expect(await screen.findByLabelText("出发日期")).toHaveAttribute("type", "date");
+    fireEvent.click(await screen.findByLabelText("环境状态: 未检查"));
+    expect(await screen.findByText("环境状态")).toBeInTheDocument();
+  });
+
+  it("keeps the first-launch canvas focused on the query card", async () => {
+    render(<App />);
+
+    expect(await screen.findByText("开始比价")).toBeInTheDocument();
+    expect(screen.queryByText("最低价结论")).not.toBeInTheDocument();
+    expect(screen.queryByText("推荐下单方案")).not.toBeInTheDocument();
+    expect(screen.queryByText("Top 方案")).not.toBeInTheDocument();
+    expect(screen.queryByText("显示原始结果")).not.toBeInTheDocument();
+    expect(screen.queryByText("运行日志")).not.toBeInTheDocument();
+    expect(screen.queryByText("等待秒数")).not.toBeInTheDocument();
+    expect(screen.queryByText("保存汇总")).not.toBeInTheDocument();
+
+    const advancedToggle = await screen.findByRole("button", { name: "高级搜索设置" });
+    expect(advancedToggle).toHaveAttribute("aria-expanded", "false");
+
+    fireEvent.click(advancedToggle);
+    expect(advancedToggle).toHaveAttribute("aria-expanded", "true");
+    expect(await screen.findByText("等待秒数")).toBeInTheDocument();
+    expect(await screen.findByText("保存汇总")).toBeInTheDocument();
   });
 
   it("shows full fallback details in result evidence", async () => {
@@ -79,6 +103,9 @@ describe("App", () => {
     render(<App />);
 
     fireEvent.click(await screen.findByText("查看详细结果"));
+    expect(await screen.findByText("显示原始结果")).toBeInTheDocument();
+    expect(screen.queryByText("成功结果")).not.toBeInTheDocument();
+    fireEvent.click(await screen.findByText("显示原始结果"));
     expect(await screen.findByText(/opencli · opencli_error · timeout/)).toBeInTheDocument();
     fireEvent.click(await screen.findByText("详情"));
     expect(await screen.findByText("完整警告")).toBeInTheDocument();

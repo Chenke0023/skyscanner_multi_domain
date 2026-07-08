@@ -497,34 +497,6 @@ def test_tab_close_telemetry_correct_delta() -> None:
 
     _asyncio.run(run_test())
 
-def test_captcha_solver_client_backward_compatible() -> None:
-    """CaptchaSolverClient must accept old constructor params (base_url, client_key, timeout)
-    and maintain backward-compatible behavior."""
-    import asyncio as _asyncio
-
-    async def run_test():
-        from captcha_solver import CaptchaSolverClient
-
-        # Old-style instantiation
-        client = CaptchaSolverClient(
-            base_url="http://localhost:9999",
-            client_key="test-key-123",
-            timeout=60.0,
-        )
-        assert isinstance(client, CaptchaSolverClient)
-        # Should delegate to underlying MultiBackendCaptchaSolver
-        assert hasattr(client, "solve_recaptcha_v2")
-        assert hasattr(client, "health_check")
-
-        # New-style instantiation (no args)
-        client2 = CaptchaSolverClient()
-        assert isinstance(client2, CaptchaSolverClient)
-
-        await client.close()
-        await client2.close()
-
-    _asyncio.run(run_test())
-
 def test_orchestrator_loading_after_cdp_does_not_scrapling() -> None:
     """When OpenCLI returns loading and CDP also returns loading,
     Scrapling must NOT be attempted because loading's router transports
@@ -758,8 +730,7 @@ def test_scheduler_uses_wait_policy_max_region_time() -> None:
     asyncio.run(run_test())
 
 def test_captcha_solver_client_accepts_backends_kwarg() -> None:
-    """CaptchaSolverClient must accept backends= kwarg for callers who adopted
-    the MultiBackendCaptchaSolver style."""
+    """CaptchaSolverClient is the multi-backend solver entrypoint."""
     import asyncio as _asyncio
 
     async def run_test():

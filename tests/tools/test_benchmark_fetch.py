@@ -50,6 +50,19 @@ def test_single_run_returns_error_row_for_scan_exception(monkeypatch: pytest.Mon
     assert run["fetch_total_regions"] == 1
 
 
+def test_single_run_returns_error_row_for_transport_exception(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def broken_scan(**_: object) -> list[object]:
+        raise benchmark_fetch.OpenCLIError("opencli broke")
+
+    monkeypatch.setattr(benchmark_fetch, "run_page_scan", broken_scan)
+
+    run = asyncio.run(_run())
+
+    assert run["error"] == "opencli broke"
+    assert run["fetch_price_found_count"] == 0
+    assert run["fetch_total_regions"] == 1
+
+
 def test_single_run_returns_timeout_row(monkeypatch: pytest.MonkeyPatch) -> None:
     async def slow_scan(**_: object) -> list[object]:
         await asyncio.sleep(2)

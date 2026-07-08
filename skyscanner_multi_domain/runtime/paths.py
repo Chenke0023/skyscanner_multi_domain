@@ -39,7 +39,7 @@ LOGS_DIR = APP_HOME_DIR / "logs"
 DATA_DIR = PROJECT_ROOT / "data"
 RUNTIME_DIR = APP_HOME_DIR / "runtime"
 BROWSER_PROFILES_DIR = RUNTIME_DIR / "browser-profiles"
-LEGACY_BROWSER_PROFILE_ROOTS = (
+PREVIOUS_BROWSER_PROFILE_ROOTS = (
     SOURCE_ROOT / "outputs",
     SOURCE_ROOT / "data" / "browser-profiles",
     SOURCE_ROOT / "runtime" / "browser-profiles",
@@ -112,18 +112,18 @@ def get_browser_profile_dir(browser_name: str) -> Path:
     if target.exists():
         return target
 
-    extra_roots: list[Path] = list(LEGACY_BROWSER_PROFILE_ROOTS)
+    extra_roots: list[Path] = list(PREVIOUS_BROWSER_PROFILE_ROOTS)
     if _BUILD_SOURCE_ROOT is not None and _BUILD_SOURCE_ROOT != SOURCE_ROOT:
         extra_roots.append(_BUILD_SOURCE_ROOT / "runtime" / "browser-profiles")
 
-    for legacy_root in extra_roots:
-        legacy = legacy_root / f"{browser_name}-cdp-profile"
-        if not legacy.exists():
+    for previous_root in extra_roots:
+        previous = previous_root / f"{browser_name}-cdp-profile"
+        if not previous.exists():
             continue
         try:
-            shutil.move(str(legacy), str(target))
+            shutil.move(str(previous), str(target))
             return target
         except OSError:
-            return legacy
+            return previous
 
     return target

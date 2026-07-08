@@ -29,10 +29,11 @@ jobs:
           node-version: "20"
           cache: npm
           cache-dependency-path: webui/package-lock.json
-      - name: Build frontend
+      - name: Test and build frontend
         run: |
           cd webui
           npm ci
+          npm test -- --run
           npm run build
       - name: Release smoke
         run: python scripts/release_smoke.py

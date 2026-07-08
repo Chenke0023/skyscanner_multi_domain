@@ -1,4 +1,4 @@
-"""Failure log persistence tests (migrated from test_skyscanner_neo.py)."""
+"""Failure log persistence tests."""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ import unittest
 from pathlib import Path
 
 from skyscanner_multi_domain.models import FlightQuote
-from skyscanner_neo import _persist_failure_log
+from skyscanner_multi_domain.scan.orchestrator import _persist_failure_log
 
 
 class FailureLogTests(unittest.TestCase):

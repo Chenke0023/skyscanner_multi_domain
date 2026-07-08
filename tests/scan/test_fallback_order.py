@@ -1,4 +1,4 @@
-"""Fallback order and orchestrator routing tests (migrated from test_skyscanner_neo.py)."""
+"""Fallback order and orchestrator routing tests."""
 
 from __future__ import annotations
 
@@ -9,8 +9,8 @@ from tempfile import TemporaryDirectory
 from unittest.mock import AsyncMock, patch
 
 from skyscanner_multi_domain.models import FlightQuote
-from skyscanner_neo import run_page_scan
 from skyscanner_multi_domain.scan.history import ScanHistoryStore
+from skyscanner_multi_domain.scan.orchestrator import run_page_scan
 
 
 class RunPageScanFallbackTests(unittest.TestCase):
@@ -53,7 +53,7 @@ class RunPageScanFallbackTests(unittest.TestCase):
 
         asyncio.run(run_case())
 
-    def test_run_page_scan_opencli_falls_back_to_page_then_scrapling_legacy(self) -> None:
+    def test_run_page_scan_opencli_falls_back_to_page_then_scrapling(self) -> None:
         opencli_quotes = [
             FlightQuote(
                 region="CN", domain="https://www.skyscanner.cn",
@@ -126,9 +126,9 @@ class RunPageScanFallbackTests(unittest.TestCase):
                 page_mock.assert_awaited_once()
                 scrapling_mock.assert_awaited_once()
                 page_regions = page_mock.await_args.args[1]
-                legacy_regions = scrapling_mock.await_args.args[1]
+                scrapling_regions = scrapling_mock.await_args.args[1]
                 self.assertEqual([region.code for region in page_regions], ["CN", "HK"])
-                self.assertEqual([region.code for region in legacy_regions], ["HK"])
+                self.assertEqual([region.code for region in scrapling_regions], ["HK"])
                 ensure_cdp_ready_mock.assert_not_called()
 
         asyncio.run(run_case())

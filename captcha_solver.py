@@ -23,7 +23,7 @@ logger = logging.getLogger(__name__)
 
 
 class CaptchaSolverError(Exception):
-    pass
+    """Raised when a captcha solver cannot complete a request."""
 
 
 # ── Base solver interface ────────────────────────────────────────────────────
@@ -53,8 +53,8 @@ class BaseCaptchaSolver:
     async def solve_image_captcha(self, image_path: str, question: str | None = None) -> dict[str, Any]:
         raise NotImplementedError
 
-    async def close(self):
-        pass
+    async def close(self) -> None:
+        return None
 
 
 # ── OhMyCaptcha solver (local, existing) ─────────────────────────────────────
@@ -112,7 +112,7 @@ class OhMyCaptchaSolver(BaseCaptchaSolver):
         raise CaptchaSolverError(f"Timeout after {max_attempts * poll_interval}s")
 
     async def solve_recaptcha_v3(self, website_url: str, website_key: str, page_action: str = "verify", min_score: float | None = None) -> str:
-        kwargs = {"pageAction": page_action}
+        kwargs: dict[str, Any] = {"pageAction": page_action}
         if min_score is not None:
             kwargs["minScore"] = min_score
         task_id = await self._create_task("RecaptchaV3TaskProxyless", website_url, website_key, **kwargs)
@@ -208,7 +208,7 @@ class TwoCaptchaSolver(BaseCaptchaSolver):
         return sol.get("gRecaptchaResponse", "")
 
     async def solve_recaptcha_v3(self, website_url: str, website_key: str, page_action: str = "verify", min_score: float | None = None) -> str:
-        kwargs = {"pageAction": page_action}
+        kwargs: dict[str, Any] = {"pageAction": page_action}
         if min_score is not None:
             kwargs["minScore"] = min_score
         tid = await self._create_task("RecaptchaV3TaskProxyless", website_url, website_key, **kwargs)
@@ -408,57 +408,4 @@ class MultiBackendCaptchaSolver(BaseCaptchaSolver):
                 logger.debug("Failed to close captcha backend %s", type(backend).__name__, exc_info=exc)
 
 
-# ── Backward-compatible CaptchaSolverClient ──────────────────────────────────
-
-
-class CaptchaSolverClient:
-    """Backward-compatible wrapper accepting old constructor params.
-
-    Usage:
-        # Old style (OhMyCaptchaSolver params)
-        client = CaptchaSolverClient(base_url="http://...", client_key="key", timeout=120.0)
-
-        # New style (no args — uses MultiBackendCaptchaSolver defaults)
-        client = CaptchaSolverClient()
-    """
-
-    def __init__(
-        self,
-        base_url: str = "http://localhost:8000",
-        client_key: str | None = None,
-        timeout: float = 120.0,
-        backends: list[BaseCaptchaSolver] | None = None,
-    ):
-        if backends is not None:
-            self._delegate = MultiBackendCaptchaSolver(backends=backends)
-        else:
-            built: list[BaseCaptchaSolver] = [OhMyCaptchaSolver(
-                base_url=base_url, client_key=client_key, timeout=timeout,
-            )]
-            if os.environ.get("TWOCAPTCHA_API_KEY"):
-                built.append(TwoCaptchaSolver())
-            if os.environ.get("CAPSOLVER_API_KEY"):
-                built.append(CapSolverSolver())
-            self._delegate = MultiBackendCaptchaSolver(backends=built)
-
-    def __getattr__(self, name: str):
-        if name == "_delegate":
-            raise AttributeError(name)
-        return getattr(self._delegate, name)
-
-# ── Legacy sync wrappers ─────────────────────────────────────────────────────
-
-
-def solve_recaptcha_v3_sync(website_url: str, website_key: str, page_action: str = "verify", base_url: str = "http://localhost:8000") -> str:
-    client = OhMyCaptchaSolver(base_url=base_url)
-    return asyncio.run(client.solve_recaptcha_v3(website_url, website_key, page_action))
-
-
-def solve_recaptcha_v2_sync(website_url: str, website_key: str, base_url: str = "http://localhost:8000") -> str:
-    client = OhMyCaptchaSolver(base_url=base_url)
-    return asyncio.run(client.solve_recaptcha_v2(website_url, website_key))
-
-
-def solve_turnstile_sync(website_url: str, website_key: str, base_url: str = "http://localhost:8000") -> str:
-    client = OhMyCaptchaSolver(base_url=base_url)
-    return asyncio.run(client.solve_turnstile(website_url, website_key))
+CaptchaSolverClient = MultiBackendCaptchaSolver

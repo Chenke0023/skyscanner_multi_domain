@@ -9,11 +9,11 @@ function renderFatal(title: string, detail: string) {
     return;
   }
   root.innerHTML = `
-    <main style="min-height:100vh;display:grid;place-items:center;padding:28px;background:#faf8f5;color:#2c251e;font-family:'Avenir Next','Helvetica Neue','PingFang SC',sans-serif;">
-      <section style="width:min(560px,100%);padding:32px 28px;border-radius:20px;border:1px solid rgba(101,82,58,0.12);background:rgba(255,252,247,0.95);box-shadow:0 18px 50px rgba(63,44,18,0.08)">
-        <p style="margin:0 0 10px;color:#8d4e42;letter-spacing:0.14em;text-transform:uppercase;font-size:12px">Desktop Runtime Error</p>
+    <main style="min-height:100vh;display:grid;place-items:center;padding:28px;background:#f7f7f5;color:#20252b;font-family:'Avenir Next','Helvetica Neue','PingFang SC',sans-serif;">
+      <section style="width:min(560px,100%);padding:32px 28px;border-radius:16px;border:1px solid rgba(36,47,55,0.12);background:rgba(255,255,255,0.96);box-shadow:0 16px 44px rgba(31,41,51,0.07)">
+        <p style="margin:0 0 10px;color:#9b4a3d;letter-spacing:0;text-transform:uppercase;font-size:12px">Desktop Runtime Error</p>
         <h1 style="margin:0;font-size:28px;line-height:1.05">${title}</h1>
-        <pre style="margin:14px 0 0;white-space:pre-wrap;word-break:break-word;color:#6d6257;font-size:14px;line-height:1.6">${detail}</pre>
+        <pre style="margin:14px 0 0;white-space:pre-wrap;word-break:break-word;color:#68717a;font-size:14px;line-height:1.6">${detail}</pre>
       </section>
     </main>
   `;

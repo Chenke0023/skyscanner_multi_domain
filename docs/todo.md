@@ -12,8 +12,8 @@ Todo:
 
 - Keep `test_import_boundaries.py`.
 - Keep documented package module importability checks.
-- Package modules must not import root-level compatibility shims (enforced via the `ROOT_SHIMS` deny-list).
-- Root-level shims have been removed; all callers import `skyscanner_multi_domain.*` directly. Do not recreate shims.
+- Package modules must not import removed flat root-level compatibility shims (enforced via the `ROOT_SHIMS` deny-list).
+- Root-level shims have been removed; active callers import `skyscanner_multi_domain.*` directly.
 
 Acceptance:
 
@@ -61,6 +61,11 @@ Todo:
     conversion; CLI call sites now call `ResultService` directly.
   - Removed remaining thin query/result wrappers for query payload building,
     row sorting, and best-row selection.
+  - Removed remaining thin query route/effective-region wrappers; CLI call
+    sites now call `self._query_service` directly.
+  - Removed the unused thin `SimpleCLI.to_cny` wrapper.
+  - `test_simple_cli_does_not_reintroduce_thin_service_wrappers` guards the
+    query/result wrapper boundary.
 
 Acceptance:
 
@@ -214,38 +219,39 @@ Acceptance:
 - `desktop_ui_service.py` does not import `cli`.
 - `test_desktop_ui_service_no_longer_imports_cli` guards the boundary.
 
-### 9. Define `skyscanner_neo.py` lifecycle
+### 9. Remove root `skyscanner_neo.py` shim
 
-Status: compatibility / legacy with package extraction in progress.
+Status: implemented.
 
 Todo:
 
-- Short term: do not add new product logic.
-- Mid term: move replay and URL mutation into package modules.
+- Keep Neo tooling in package modules.
   - Done: capture selection, URL rewriting, payload mutation, header
     preparation, and capture response quote extraction live in
     `skyscanner_multi_domain/scan/url_builder.py`.
-  - `skyscanner_neo.py` re-exports the moved helpers for backward
-    compatibility.
-- Long term: turn root `skyscanner_neo.py` into a shim or move active legacy code under `legacy/`.
+  - Done: Neo CLI, doctor, compare, and raw replay live in
+    `skyscanner_multi_domain/neo.py`; core scan helpers are imported from their
+    owner modules directly.
+  - Done: root `skyscanner_neo.py` shim is removed and guarded by
+    `test_import_boundaries.py` plus release smoke.
 
 Candidate split:
 
 - `skyscanner_multi_domain/diagnostics/failure_replay.py`
 - `skyscanner_multi_domain/scan/url_builder.py`
-- `skyscanner_multi_domain/legacy/neo.py`
+- `skyscanner_multi_domain/neo.py`
 
 ## P2: Product Experience
 
-### 10. Freeze legacy Tk GUI
+### 10. Remove legacy Tk GUI
 
-Status: active policy.
+Status: implemented.
 
-Todo:
+Current implementation:
 
-- Do not add SearchPlan UI to Tk.
-- Fix only startup-level legacy breakage.
-- Put new UX into `desktop_webview.py`, `desktop_ui_service.py`, and `webui/`.
+- Root `legacy/gui.py`, root `gui.py`, and legacy Tk tests have been removed.
+- `desktop_webview.py` no longer supports `SKYSCANNER_ALLOW_LEGACY_GUI`.
+- New UX stays in `desktop_webview.py`, `desktop_ui_service.py`, and `webui/`.
 
 Acceptance:
 
@@ -301,8 +307,7 @@ Current implementation:
 - WebView test coverage now asserts fallback detail text appears in the evidence
   panel and row drill-down.
 - Markdown decision reports mark Exact Mode/full scan and include candidate sources/fallback chain when available.
-- `docs/legacy_tk_policy.md` freezes legacy Tk.
-- Import-boundary tests prevent legacy Tk from importing new trust/recovery modules.
+- Import-boundary tests prevent root Tk entry points from being reintroduced.
 
 Policy:
 
@@ -310,7 +315,6 @@ Policy:
 - No default early stop.
 - No default task skipping.
 - No challenge/captcha bypass.
-- No legacy Tk feature work.
 
 ### 14. OpenCLI Fetch Reliability & Parser Recovery v2
 
@@ -359,7 +363,6 @@ Policy:
 - No automatic early stop.
 - No scan task skipping.
 - No challenge/captcha bypass.
-- No legacy Tk GUI feature work.
 
 ### 15. SearchPlan telemetry
 
@@ -445,11 +448,12 @@ Done:
 - `CHANGELOG.md` records release notes.
 - `README.md` has a short install/run path for source and macOS app builds.
 - `scripts/release_smoke.py` validates release metadata, PyInstaller data
-  wiring, bundle version handling, and built WebView assets.
-- CI runs frontend build and release smoke after Python lint/type checks.
+  wiring, bundle version handling, removed flat root shims, CI test gates, and
+  built WebView assets.
+- CI runs frontend test/build and release smoke after Python lint/type checks.
 - 2026-07-07 local release gates passed for v1.2.1:
   `python -m ruff check .`,
-  `python -m mypy`, `python -m pytest -q`, `npm test -- --run &&
+  `python -m mypy`, `python -m pytest -q`, `npm ci && npm test -- --run &&
   npm run build`, and `python scripts/release_smoke.py`.
 - 2026-07-07 local macOS app build smoke passed:
   `./scripts/build_macos_standalone_app.sh` produced
@@ -472,13 +476,13 @@ python -m pytest -q
 Current scope:
 
 - Ruff now includes Bugbear (`B`) in addition to `E4/E7/E9/F`.
-- mypy is enabled for 43 source files across runtime, pricing, geo, diagnostics,
-  parsing, selected planning modules, scan support/orchestration modules, and
-  the primary transport implementations plus CLI, desktop, and Neo entry points.
-- CI also runs `npm ci && npm run build` for `webui/` and
+- mypy is enabled for all 61 non-vendor, non-WebUI source files:
+  package modules including `skyscanner_multi_domain/neo.py`, tools,
+  scripts, and active root entry points.
+- CI also runs `npm ci && npm test -- --run && npm run build` for `webui/` and
   `python scripts/release_smoke.py`.
-- Full-project mypy remains future work; the first gate prevents the new shared
-  and support modules from drifting without claiming the legacy app is fully typed.
+- Neo compatibility remains outside the primary product path but inside
+  lint/type-check coverage.
 
 ### 20. Swallowed exception audit
 
@@ -516,15 +520,23 @@ Done:
   Playwright probe cleanup handlers, page-snippet coercion, text extraction,
   captcha health/backend handlers, and deterministic captcha-quote build
   handlers with specific exception sets.
-- Current non-vendor broad-handler count is 9; remaining broad handlers are
-  top-level UI/benchmark/legacy boundaries or third-party Scrapling fetch
-  boundaries where narrowing would risk changing external error behavior.
-- `tests/tools/test_benchmark_fetch.py` now covers the benchmark boundary
-  handler for scan exceptions and hard timeouts before any future narrowing.
-- `tests/test_desktop_ui_service_boundaries.py` covers the desktop point-scan
-  worker boundary for setup failures and cancel-preferred handling, plus the
-  expanded-route scan worker setup-failure boundary.
-- Desktop scan workers now share one `_handle_worker_exception` boundary path,
+- Replaced Scrapling stealth, DOM-retry, and HTTP fallback fetch boundaries
+  with `SCRAPLING_FETCH_ERRORS`; existing Scrapling retry coverage confirms
+  external fetcher failures still return failure quotes instead of escaping the
+  transport boundary.
+- Current non-vendor broad-handler count is 1; the remaining broad handler is
+  the shared top-level desktop worker boundary.
+  - `desktop_ui_service.py::_worker_boundary`
+- `tests/test_exception_boundaries.py` guards the allow-list so no new
+  non-vendor broad `Exception` / `BaseException` handlers can be added without
+  documenting the boundary.
+- `tools/benchmark_fetch.py::_single_run` catches only named benchmark scan
+  failures and hard timeouts.
+- `tests/tools/test_benchmark_fetch.py` covers the benchmark scan-exception,
+  transport-exception, and hard-timeout result rows.
+- `tests/test_desktop_ui_service_boundaries.py` covers point and expanded
+  desktop worker setup failures and cancel-preferred handling.
+- Desktop scan workers now share one `_worker_boundary` / `_handle_worker_exception` boundary path,
   so point and expanded scans keep the same cancel-vs-error behavior.
 - `test_compare_via_scrapling_returns_failure_quote_when_fetchers_raise`
   covers Scrapling stealth/HTTP fetcher exceptions returning a failure quote
@@ -532,19 +544,17 @@ Done:
 
 Todo:
 
-- Before changing any of the remaining broad boundary handlers, add focused
-  coverage for the specific external exception being narrowed.
+- Keep the shared desktop worker boundary broad unless there is focused
+  coverage for the exact exception path being narrowed.
 
-## Suggested Next Five Tasks
+## Suggested Next Tasks
 
 1. Keep the removed `desktop_ui_service -> cli.SimpleCLI` boundary guarded.
-2. Add focused coverage before narrowing any remaining broad boundary handler.
+2. Keep the shared desktop worker boundary covered before any further narrowing.
 3. Keep release smoke gates passing before the next tag.
 
 ## Do Not Do Yet
 
 - Do not dynamically prune scan tasks.
-- Do not recreate root-level compatibility shims (they are removed; `ROOT_SHIMS` deny-list enforced).
-- Do not rewrite the GUI.
-- Do not add new features to legacy Tk.
+- Do not recreate removed flat root-level compatibility shims (`ROOT_SHIMS` deny-list enforced).
 - Do not turn this into a standalone web SaaS.

@@ -110,11 +110,3 @@ def test_extract_quote_picks_lowest_price_candidate() -> None:
     assert quote.price == 250
     assert quote.currency == "GBP"
     assert quote.price_path == "itineraries[1].price.amount"
-
-
-def test_skyscanner_neo_reexports_url_builder_helpers() -> None:
-    import skyscanner_neo
-
-    assert skyscanner_neo.rewrite_url is rewrite_url
-    assert skyscanner_neo.mutate_payload is mutate_payload
-    assert skyscanner_neo.prepare_headers is prepare_headers

@@ -94,3 +94,22 @@ def test_expanded_scan_worker_reports_boundary_error(monkeypatch: pytest.MonkeyP
     _run_expanded_worker(service)
 
     assert errors == ["expanded setup broke"]
+
+
+def test_expanded_scan_worker_prefers_cancel_when_cancelled(monkeypatch: pytest.MonkeyPatch) -> None:
+    service = DesktopUIService()
+    cancelled: list[bool] = []
+    errors: list[str] = []
+
+    def fail_before_scan(*_: Any, **__: Any) -> list[tuple[str, str | None]]:
+        raise RuntimeError("expanded setup broke")
+
+    service._cancel_event.set()
+    monkeypatch.setattr(desktop_ui_service, "build_ordered_trip_dates", fail_before_scan)
+    monkeypatch.setattr(service, "_handle_cancelled", lambda: cancelled.append(True))
+    monkeypatch.setattr(service, "_handle_scan_error", errors.append)
+
+    _run_expanded_worker(service)
+
+    assert cancelled == [True]
+    assert errors == []

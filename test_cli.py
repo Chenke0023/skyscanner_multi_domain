@@ -207,7 +207,7 @@ class MarkdownFormattingTests(unittest.TestCase):
 
 class RoutePlanTests(unittest.TestCase):
     def test_build_expanded_route_plan_supports_location_to_country(self) -> None:
-        cli = SimpleCLI()
+        query_service = SimpleCLI()._query_service
 
         (
             origin_label,
@@ -217,7 +217,7 @@ class RoutePlanTests(unittest.TestCase):
             origin_points,
             destination_points,
             regions,
-        ) = cli.build_expanded_route_plan(
+        ) = query_service.build_expanded_route_plan(
             origin_value="北京",
             destination_value="乌兹别克斯坦",
             origin_is_country=False,
@@ -286,7 +286,7 @@ class RunPageCommandTests(unittest.IsolatedAsyncioTestCase):
 
         with (
             patch.object(
-                cli,
+                cli._query_service,
                 "build_effective_regions",
                 return_value=(object(), object(), ["CN"]),
             ),

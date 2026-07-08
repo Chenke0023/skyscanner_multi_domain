@@ -73,6 +73,15 @@ FETCH_PIPELINES: dict[str, tuple[str, ...]] = {
 }
 
 DEFAULT_FETCH_PIPELINE = "balanced"
+SCRAPLING_FETCH_ERRORS = (
+    OSError,
+    RuntimeError,
+    TimeoutError,
+    http.client.HTTPException,
+    AttributeError,
+    TypeError,
+    ValueError,
+)
 
 
 @dataclass(frozen=True)
@@ -833,7 +842,7 @@ async def compare_via_scrapling(
                     wait_override_ms=attempt_wait_ms,
                     state_overrides=state_overrides,
                 )
-            except Exception as exc:
+            except SCRAPLING_FETCH_ERRORS as exc:
                 latest_error = f"Scrapling 抓取失败: {exc}"
                 _emit_scrapling_trace(source_kind, attempt_index, used_cdp=used_cdp, used_profile=used_profile)
                 continue
@@ -907,7 +916,7 @@ async def compare_via_scrapling(
                         )
                         if latest_quote.price is not None:
                             break
-                except Exception as exc:
+                except SCRAPLING_FETCH_ERRORS as exc:
                     logger.debug("DOM retry after captcha failed for %s", region.code, exc_info=exc)
 
             if has_captcha and detected_captcha_type != "cloudflare":
@@ -1055,7 +1064,7 @@ async def compare_via_scrapling(
                         error="Scrapling 返回内容为空，未提取到可解析文本",
                         source_kind="live",
                     )
-            except Exception as exc:
+            except SCRAPLING_FETCH_ERRORS as exc:
                 latest_error = latest_error or f"Scrapling 抓取失败: {exc}"
 
         if latest_quote is None:

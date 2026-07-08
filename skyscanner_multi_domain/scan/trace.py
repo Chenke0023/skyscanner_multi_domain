@@ -162,6 +162,8 @@ def emit_attempt_trace(
         return
 
     metadata = dict(getattr(quote, "fetch_metadata", None) or {})
+    plan_action = getattr(plan, "action", None)
+    action_value = plan_action.value if plan_action is not None else ""
 
     event = ScanTraceEvent(
         scan_id=trace_ctx.scan_id,
@@ -177,7 +179,7 @@ def emit_attempt_trace(
         transport=transport,
         status=getattr(quote, "status", ""),
 
-        action=getattr(plan, "action", None) and plan.action.value,
+        action=action_value,
         failure_class=getattr(plan, "failure_class", None),
         reason=getattr(plan, "reason", None),
 

@@ -7,6 +7,8 @@ import subprocess
 import threading
 import time
 import webbrowser
+from collections.abc import Iterator
+from contextlib import contextmanager
 from copy import deepcopy
 from dataclasses import asdict
 from datetime import datetime, timedelta
@@ -78,14 +80,10 @@ from skyscanner_multi_domain.scan.history import (
 )
 from skyscanner_multi_domain.planning.search_plan import build_ordered_trip_dates, rank_route_pairs
 from skyscanner_multi_domain.scan.repair import RepairTask, build_repair_plan
-from skyscanner_neo import (
-    DEFAULT_REGIONS,
-    NeoCli,
-    build_effective_region_codes,
-    detect_cdp_version,
-    quotes_to_dicts,
-    run_page_scan,
-)
+from skyscanner_multi_domain.geo.regions import DEFAULT_REGIONS, build_effective_region_codes
+from skyscanner_multi_domain.neo import NeoCli
+from skyscanner_multi_domain.scan.orchestrator import quotes_to_dicts, run_page_scan
+from skyscanner_multi_domain.transports.cdp import detect_cdp_version
 
 
 _POLL_INTERVAL_SECONDS = 0.2
@@ -1493,6 +1491,15 @@ class DesktopUIService:
         else:
             self._handle_scan_error(str(exc))
 
+    @contextmanager
+    def _worker_boundary(self) -> Iterator[None]:
+        try:
+            yield
+        except asyncio.CancelledError:
+            self._handle_cancelled()
+        except Exception as exc:
+            self._handle_worker_exception(exc)
+
     def _trigger_alert_notifications_locked(
         self,
         rows_by_date: list[tuple[str, list[dict[str, Any]]]],
@@ -1729,7 +1736,7 @@ class DesktopUIService:
         selected_region_codes: list[str],
         allow_browser_fallback: bool,
     ) -> None:
-        try:
+        with self._worker_boundary():
             trip_dates = build_ordered_trip_dates(date, return_date, date_window_days)
             latest_record = self.history_store.get_latest_scan(query_payload)
             normalized_selected_codes = {code.strip().upper() for code in selected_region_codes if code.strip()}
@@ -2047,10 +2054,6 @@ class DesktopUIService:
                     "combined_output": combined_output,
                 }
             )
-        except asyncio.CancelledError:
-            self._handle_cancelled()
-        except Exception as exc:
-            self._handle_worker_exception(exc)
 
     def _run_expanded_scan_worker(
         self,
@@ -2071,7 +2074,7 @@ class DesktopUIService:
         selected_region_codes: list[str],
         allow_browser_fallback: bool,
     ) -> None:
-        try:
+        with self._worker_boundary():
             trip_dates = build_ordered_trip_dates(date, return_date, date_window_days)
             latest_record = self.history_store.get_latest_scan(query_payload)
             normalized_selected_codes = {code.strip().upper() for code in selected_region_codes if code.strip()}
@@ -2473,7 +2476,3 @@ class DesktopUIService:
                     "combined_output": combined_output,
                 }
             )
-        except asyncio.CancelledError:
-            self._handle_cancelled()
-        except Exception as exc:
-            self._handle_worker_exception(exc)

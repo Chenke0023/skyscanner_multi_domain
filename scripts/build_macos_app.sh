@@ -8,6 +8,13 @@ CONTENTS_DIR="${APP_DIR}/Contents"
 MACOS_DIR="${CONTENTS_DIR}/MacOS"
 RESOURCES_DIR="${CONTENTS_DIR}/Resources"
 LAUNCHER_PATH="${MACOS_DIR}/launch_gui"
+VERSION_FILE="${PROJECT_ROOT}/data/version.txt"
+
+if [[ -f "${VERSION_FILE}" ]]; then
+  VERSION="$(head -n1 "${VERSION_FILE}" | tr -d '[:space:]')"
+else
+  VERSION="$(date +%Y.%m.%d)"
+fi
 
 "${PROJECT_ROOT}/scripts/build_web_ui.sh"
 
@@ -34,9 +41,9 @@ cat > "${CONTENTS_DIR}/Info.plist" <<PLIST
   <key>CFBundlePackageType</key>
   <string>APPL</string>
   <key>CFBundleShortVersionString</key>
-  <string>1.0</string>
+  <string>${VERSION}</string>
   <key>CFBundleVersion</key>
-  <string>1</string>
+  <string>${VERSION}</string>
   <key>LSMinimumSystemVersion</key>
   <string>12.0</string>
   <key>NSHighResolutionCapable</key>

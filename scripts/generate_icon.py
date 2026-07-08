@@ -4,6 +4,7 @@ from __future__ import annotations
 import subprocess
 import shutil
 from pathlib import Path
+from typing import Any
 from PIL import Image, ImageDraw
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -38,7 +39,7 @@ def _rounded_rect_mask(size: int, radius_ratio: float = 0.225) -> Image.Image:
     return mask
 
 
-def _draw_airplane(draw: ImageDraw.Draw, cx: float, cy: float, scale: float) -> None:
+def _draw_airplane(draw: Any, cx: float, cy: float, scale: float) -> None:
     """Draw a simple airplane silhouette centered at (cx, cy) with given scale."""
     # Airplane path as list of (x, y) tuples relative to center
     # Fuselage and wings

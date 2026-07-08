@@ -21,7 +21,6 @@ import plistlib
 import subprocess
 import sys
 from pathlib import Path
-from typing import Optional
 
 from skyscanner_multi_domain.runtime.paths import PROJECT_ROOT, RUNTIME_DIR, get_log_file
 from skyscanner_multi_domain.planning.date_window import (
@@ -35,10 +34,8 @@ from failure_replay import (
 from skyscanner_multi_domain.pricing.fx_rates import FxRateService
 from skyscanner_multi_domain.geo.location_resolver import (
     COUNTRY_ROUTE_DEFAULT_AIRPORT_LIMIT,
-    CountryRecord,
     LocationRecord,
     LocationResolver,
-    ResolvedLocation,
 )
 from skyscanner_multi_domain.scan.history import (
     ScanHistoryStore,
@@ -79,14 +76,10 @@ from skyscanner_multi_domain.scan.result_service import (
     price_source_label as _price_source_label,
     warnings_summary as _warnings_summary,
 )
-from skyscanner_neo import (
-    DEFAULT_REGIONS,
-    NeoCli,
-    detect_cdp_version,
-    print_doctor,
-    quotes_to_dicts,
-    run_page_scan,
-)
+from skyscanner_multi_domain.geo.regions import DEFAULT_REGIONS
+from skyscanner_multi_domain.neo import NeoCli, print_doctor
+from skyscanner_multi_domain.scan.orchestrator import quotes_to_dicts, run_page_scan
+from skyscanner_multi_domain.transports.cdp import detect_cdp_version
 
 logger = logging.getLogger(__name__)
 
@@ -184,66 +177,6 @@ class SimpleCLI:
         self._result_service = ResultService(self.fx_rates)
         self.history_store = ScanHistoryStore()
 
-    def normalize_location(self, value: str, prefer_metro: bool) -> str:
-        return self._query_service.normalize_location(value, prefer_metro)
-
-    def resolve_location(self, value: str, prefer_metro: bool) -> ResolvedLocation:
-        return self._query_service.resolve_location(value, prefer_metro)
-
-    def resolve_country(self, value: str) -> CountryRecord:
-        return self._query_service.resolve_country(value)
-
-    def build_country_route_plan(
-        self,
-        origin_country_value: str,
-        destination_country_value: str,
-        *,
-        manual_region_codes: list[str] | None = None,
-        airport_limit: int = COUNTRY_ROUTE_DEFAULT_AIRPORT_LIMIT,
-    ) -> tuple[CountryRecord, CountryRecord, list[LocationRecord], list[LocationRecord], list[str]]:
-        return self._query_service.build_country_route_plan(
-            origin_country_value,
-            destination_country_value,
-            manual_region_codes=manual_region_codes,
-            airport_limit=airport_limit,
-        )
-
-    def build_expanded_route_plan(
-        self,
-        *,
-        origin_value: str | None,
-        destination_value: str | None,
-        origin_is_country: bool,
-        destination_is_country: bool,
-        prefer_origin_metro: bool,
-        manual_region_codes: list[str] | None = None,
-        airport_limit: int = COUNTRY_ROUTE_DEFAULT_AIRPORT_LIMIT,
-    ) -> tuple[str, str, str, str, list[LocationRecord], list[LocationRecord], list[str]]:
-        return self._query_service.build_expanded_route_plan(
-            origin_value=origin_value,
-            destination_value=destination_value,
-            origin_is_country=origin_is_country,
-            destination_is_country=destination_is_country,
-            prefer_origin_metro=prefer_origin_metro,
-            manual_region_codes=manual_region_codes,
-            airport_limit=airport_limit,
-        )
-
-    def build_effective_regions(
-        self,
-        origin_value: str,
-        destination_value: str,
-        *,
-        prefer_origin_metro: bool,
-        manual_region_codes: list[str] | None = None,
-    ) -> tuple[ResolvedLocation, ResolvedLocation, list[str]]:
-        return self._query_service.build_effective_regions(
-            origin_value,
-            destination_value,
-            prefer_origin_metro=prefer_origin_metro,
-            manual_region_codes=manual_region_codes,
-        )
-
     def print_banner(self) -> None:
         print(
             """
@@ -253,11 +186,6 @@ class SimpleCLI:
 ╚═══════════════════════════════════════════════════════════════╝
             """.strip()
         )
-
-    def to_cny(
-        self, price: Optional[float], currency: Optional[str]
-    ) -> Optional[float]:
-        return self.fx_rates.convert_to_cny(price, currency)
 
     def _print_delta_summary(self, rows_by_date: list[tuple[str, list[SimplifiedQuoteRow]]]) -> None:
         lines = build_delta_summary_lines(rows_by_date)
@@ -338,7 +266,7 @@ class SimpleCLI:
             print("参数错误: 点对点模式下必须同时提供 --origin 和 --destination。")
             return 2
 
-        origin, destination, regions = self.build_effective_regions(
+        origin, destination, regions = self._query_service.build_effective_regions(
             args.origin,
             args.destination,
             prefer_origin_metro=not args.exact_airport,
@@ -759,7 +687,7 @@ class SimpleCLI:
                 origin_points,
                 destination_points,
                 regions,
-            ) = self.build_expanded_route_plan(
+            ) = self._query_service.build_expanded_route_plan(
                 origin_value=getattr(args, "origin_country", None) or getattr(args, "origin", None),
                 destination_value=getattr(args, "destination_country", None) or getattr(args, "destination", None),
                 origin_is_country=bool(getattr(args, "origin_country", None)),
@@ -1244,7 +1172,7 @@ class SimpleCLI:
                 logger.warning("Failed to load --manual-tabs-json from %s", manual_tabs_json, exc_info=exc)
 
         # ScanConfig.transport is the strict-mode override.  Default is AUTO,
-        # which preserves the legacy --transport flag's "primary + fallback"
+        # which preserves the existing --transport flag's "primary + fallback"
         # semantic.  Setting --transport-mode opencli/cdp/scrapling forces a
         # single transport with fallback disabled.
         transport_mode_raw = getattr(args, "transport_mode", None) or "auto"
@@ -1554,7 +1482,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--transport",
         choices=["scrapling", "page", "opencli", "cdp_structured"],
         default="opencli",
-        help="opencli: 使用 opencli 浏览器自动化（默认）；cdp_structured: 实验性结构化 CDP；page: 通过浏览器 CDP 读取结果页；scrapling: legacy 直接抓取页面文本",
+        help="opencli: 使用 opencli 浏览器自动化（默认）；cdp_structured: 实验性结构化 CDP；page: 通过浏览器 CDP 读取结果页；scrapling: 备用页面文本抓取",
     )
     page.add_argument(
         "--exact-airport",

@@ -38,6 +38,10 @@ from skyscanner_multi_domain.geo.regions import (  # noqa: E402
 )  # noqa: E402
 from skyscanner_multi_domain.scan.orchestrator import run_page_scan  # noqa: E402
 from skyscanner_multi_domain.scan.fallback_router import build_fallback_telemetry  # noqa: E402
+from skyscanner_multi_domain.transports.opencli import OpenCLIError  # noqa: E402
+
+
+BENCHMARK_RUN_ERRORS = (OpenCLIError, OSError, RuntimeError, ValueError)
 
 
 def _parse_args() -> argparse.Namespace:
@@ -127,7 +131,7 @@ async def _single_run(
         )
     except asyncio.TimeoutError:
         return error_run(f"run_timeout_after_{args.max_run_seconds}s")
-    except Exception as exc:
+    except BENCHMARK_RUN_ERRORS as exc:
         return error_run(str(exc))
 
     wall_ms = int((time.monotonic() - start) * 1000)

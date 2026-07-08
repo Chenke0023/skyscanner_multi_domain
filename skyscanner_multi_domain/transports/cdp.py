@@ -225,7 +225,7 @@ def _terminate_browser_process(process: subprocess.Popen[Any], timeout: float = 
         process.wait(timeout=timeout)
         return
     except subprocess.TimeoutExpired:
-        pass
+        logger.debug("Browser process did not exit after SIGTERM; sending SIGKILL")
     try:
         os.killpg(process.pid, signal.SIGKILL)
     except ProcessLookupError:
@@ -235,7 +235,7 @@ def _terminate_browser_process(process: subprocess.Popen[Any], timeout: float = 
     try:
         process.wait(timeout=2.0)
     except subprocess.TimeoutExpired:
-        pass
+        logger.debug("Browser process did not exit after SIGKILL")
 
 
 def _allocate_tcp_port() -> int:
