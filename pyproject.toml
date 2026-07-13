@@ -36,7 +36,6 @@ python_files = "test_*.py"
 python_version = "3.12"
 files = [
     "skyscanner_multi_domain",
-    "tools",
     "scripts",
     "cli.py",
     "desktop_logic.py",

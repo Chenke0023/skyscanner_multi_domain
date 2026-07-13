@@ -533,23 +533,29 @@ async def run_page_scan(
                     for region in selected_regions
                 ]
             else:
-                common = {
-                    "build_search_url": build_search_url,
-                    "persist_failure_log": _persist_failure_log,
-                    "run_id": run_id,
-                    "cdp_mode": cdp_mode,
-                    "manual_tabs": manual_tabs,
-                    "keep_tabs": keep_tabs,
-                }
                 if normalized_transport == "page":
                     quotes = await compare_via_pages(
                         args,
                         selected_regions,
                         persist_failures=False,
-                        **common,
+                        build_search_url=build_search_url,
+                        persist_failure_log=_persist_failure_log,
+                        run_id=run_id,
+                        cdp_mode=cdp_mode,
+                        manual_tabs=manual_tabs,
+                        keep_tabs=keep_tabs,
                     )
                 else:
-                    quotes = await compare_via_cdp_structured(args, selected_regions, **common)
+                    quotes = await compare_via_cdp_structured(
+                        args,
+                        selected_regions,
+                        build_search_url=build_search_url,
+                        persist_failure_log=_persist_failure_log,
+                        run_id=run_id,
+                        cdp_mode=cdp_mode,
+                        manual_tabs=manual_tabs,
+                        keep_tabs=keep_tabs,
+                    )
 
         quotes = apply_plan_metadata(quotes)
         completed: list[str] = []

@@ -5,7 +5,7 @@ on:
   push:
     branches:
       - main
-      - cdp-structured-experiment
+      - codex/remove-opencli-slim
 
 jobs:
   python:
