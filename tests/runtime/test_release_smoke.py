@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import re
 
 from scripts.release_smoke import (
     BUILD_SCRIPT,
@@ -26,14 +27,15 @@ from scripts.release_smoke import (
 
 
 def test_release_version_is_semver() -> None:
-    assert read_release_version() == "1.2.1"
+    assert re.fullmatch(r"\d+\.\d+\.\d+", read_release_version())
 
 
 def test_release_smoke_metadata_passes_without_requiring_built_webui() -> None:
     checks = run_release_smoke(require_webui_dist=False)
 
-    assert "pyproject version 1.2.1" in checks
-    assert "webui package version 1.2.1" in checks
+    version = read_release_version()
+    assert f"pyproject version {version}" in checks
+    assert f"webui package version {version}" in checks
     assert "changelog entry" in checks
     assert "README install path" in checks
     assert "generated file ignore rules" in checks

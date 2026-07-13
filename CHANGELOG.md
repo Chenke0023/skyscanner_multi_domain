@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 1.3.0 - 2026-07-13
+
 ### Breaking changes
 
 - Removed OpenCLI, Scrapling, Neo, Google Jump, captcha solving, failure replay, and their compatibility interfaces.
