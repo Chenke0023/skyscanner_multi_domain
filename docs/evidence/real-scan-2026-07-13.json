@@ -1,0 +1,89 @@
+{
+  "best_rankable": {
+    "attempts": 1,
+    "confidence": 0.9,
+    "currency": "KZT",
+    "price": 246.0,
+    "region": "KZ",
+    "transport": "page"
+  },
+  "quotes": [
+    {
+      "attempt_history": [],
+      "confidence": 0.9,
+      "currency": "KZT",
+      "domain": "https://www.skyscanner.kz",
+      "error": null,
+      "parser_warnings": [],
+      "price": 246.0,
+      "rankable": null,
+      "region": "KZ",
+      "result_visibility": null,
+      "source_kind": "page",
+      "source_url": "https://www.skyscanner.net/transport/flights/pek/ala/260820/?adultsv2=1",
+      "status": "page_text"
+    },
+    {
+      "attempt_history": [],
+      "confidence": 0.9,
+      "currency": "GBP",
+      "domain": "https://www.skyscanner.co.uk",
+      "error": null,
+      "parser_warnings": [],
+      "price": 249.0,
+      "rankable": null,
+      "region": "UK",
+      "result_visibility": null,
+      "source_kind": "page",
+      "source_url": "https://www.skyscanner.net/transport/flights/pek/ala/260820/?adultsv2=1",
+      "status": "page_text"
+    },
+    {
+      "attempt_history": [],
+      "confidence": 0.9,
+      "currency": "SGD",
+      "domain": "https://www.skyscanner.sg",
+      "error": null,
+      "parser_warnings": [],
+      "price": 426.0,
+      "rankable": null,
+      "region": "SG",
+      "result_visibility": null,
+      "source_kind": "page",
+      "source_url": "https://www.skyscanner.com.sg/transport/flights/pek/ala/260820/?adultsv2=1",
+      "status": "page_text"
+    },
+    {
+      "attempt_history": [],
+      "confidence": 0.9,
+      "currency": "CNY",
+      "domain": "https://www.skyscanner.cn",
+      "error": null,
+      "parser_warnings": [],
+      "price": 2160.0,
+      "rankable": null,
+      "region": "CN",
+      "result_visibility": null,
+      "source_kind": "page",
+      "source_url": "https://www.tianxun.com/transport/flights/pek/ala/260820/?adultsv2=1",
+      "status": "page_text"
+    },
+    {
+      "attempt_history": [],
+      "confidence": 0.9,
+      "currency": "HKD",
+      "domain": "https://www.skyscanner.com.hk",
+      "error": null,
+      "parser_warnings": [],
+      "price": 2581.0,
+      "rankable": null,
+      "region": "HK",
+      "result_visibility": null,
+      "source_kind": "page",
+      "source_url": "https://www.skyscanner.com.hk/transport/flights/pek/ala/260820/?adultsv2=1",
+      "status": "page_text"
+    }
+  ],
+  "route_label": "PEK -> ALA",
+  "scan_id": ""
+}
