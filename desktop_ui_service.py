@@ -1897,7 +1897,7 @@ class DesktopUIService:
                             plan_reason = str(progress_payload.get("plan_batch_reason") or "").strip()
                             plan_batch_id = progress_payload.get("plan_batch_id")
                             plan_batch_count = progress_payload.get("plan_batch_count")
-                            plan_progress = {
+                            plan_progress: dict[str, Any] = {
                                 key: progress_payload.get(key)
                                 for key in (
                                     "active_plan_phase",
@@ -2263,7 +2263,7 @@ class DesktopUIService:
                                     plan_reason = str(progress_payload.get("plan_batch_reason") or "").strip()
                                     plan_batch_id = progress_payload.get("plan_batch_id")
                                     plan_batch_count = progress_payload.get("plan_batch_count")
-                                    plan_progress = {
+                                    plan_progress: dict[str, Any] = {
                                         key: progress_payload.get(key)
                                         for key in (
                                             "active_plan_phase",
