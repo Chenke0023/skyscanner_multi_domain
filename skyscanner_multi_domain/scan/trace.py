@@ -23,8 +23,7 @@ class ScanTraceEvent:
     """One structured trace record per transport attempt.
 
     Written as a single JSONL line.  Designed to be greppable / jq-able
-    for post-hoc analysis of fallback chains, confidence gating, and
-    transport reliability.
+    for post-hoc analysis of confidence gating and transport reliability.
     """
 
     scan_id: str
@@ -213,7 +212,7 @@ def append_attempt_history(
     """Append a lightweight attempt summary to the quote for UI display.
 
     Does NOT include large fields like page_text.  Only stores enough for
-    the UI to render a fallback chain summary.
+    the UI to render an attempt summary.
     """
     metadata = dict(getattr(quote, "fetch_metadata", None) or {})
 
@@ -243,9 +242,7 @@ def merge_attempt_history(
 ) -> None:
     """Merge attempt history from source into target.
 
-    When a fallback transport succeeds, the successful quote should
-    inherit the failure history of prior attempts so the UI can show
-    the full chain.
+    Merge histories when a quote object is replaced during a CDP retry.
     """
     source_history = list(getattr(source_quote, "attempt_history", []) or [])
     target_history = list(getattr(target_quote, "attempt_history", []) or [])

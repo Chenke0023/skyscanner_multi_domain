@@ -12,20 +12,16 @@ import {
 function FetchSummaryCard({ trust }: { trust: UIState["results"]["trust"] }) {
   const fetch = trust?.fetchQualityTelemetry ?? {};
   const parser = trust?.parserRecoveryTelemetry ?? {};
-  const snapshot = trust?.snapshotSummary ?? {};
   const repair = trust?.repairPlan?.summary ?? {};
   const confirmation = trust?.priceConfirmationSummary ?? {};
   const total = numberValue(fetch.fetch_total_regions);
   if (!total) return null;
   const items = [
     ["最终命中", `${numberValue(fetch.fetch_price_found_count)} / ${total}`],
-    ["OpenCLI 直接", numberValue(fetch.opencli_direct_price_found_count)],
-    ["Fallback 救回", numberValue(fetch.fallback_rescued_count)],
     ["Challenge", numberValue(fetch.fetch_challenge_count)],
     ["Parse failed", numberValue(fetch.fetch_parse_failed_count)],
     ["Tabs", `${numberValue(fetch.tab_open_total)} opened / ${numberValue(fetch.tab_reuse_total)} reused`],
     ["Candidates", numberValue(parser.price_candidate_total)],
-    ["Snapshots", numberValue(snapshot.snapshot_recommended_count)],
     ["Repair", numberValue(repair.total_repair_tasks)],
     ["Confirmed", `${numberValue(confirmation.confirmed)} / ${numberValue(confirmation.total)}`],
   ];

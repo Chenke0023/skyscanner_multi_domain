@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import argparse
-import importlib.util
 import subprocess
 import threading
 import time
@@ -20,8 +19,9 @@ from skyscanner_multi_domain.runtime.launchd import (
     install_auto_refresh_launchd,
     uninstall_auto_refresh_launchd,
 )
-from skyscanner_multi_domain.runtime.paths import PROJECT_ROOT, get_gui_state_file, get_reports_dir
+from skyscanner_multi_domain.runtime.paths import PROJECT_ROOT, get_gui_state_file, get_reports_dir, get_traces_dir
 from skyscanner_multi_domain.scan.confirmation import ConfirmationStatus, PriceConfirmationStore, sample_from_row
+from skyscanner_multi_domain.scan.config import ScanConfig
 from skyscanner_multi_domain.scan.query_service import QueryService
 from skyscanner_multi_domain.scan.result_service import ResultService
 from skyscanner_multi_domain.scan.output_rows import CombinedQuoteRow
@@ -66,7 +66,6 @@ from skyscanner_multi_domain.scan.history import (
     build_parser_recovery_telemetry,
     build_query_key,
     build_query_title,
-    build_snapshot_summary,
     get_failed_region_codes,
     get_quotes_for_trip_label,
     get_rows_for_trip_label,
@@ -81,12 +80,16 @@ from skyscanner_multi_domain.scan.history import (
 from skyscanner_multi_domain.planning.search_plan import build_ordered_trip_dates, rank_route_pairs
 from skyscanner_multi_domain.scan.repair import RepairTask, build_repair_plan
 from skyscanner_multi_domain.geo.regions import DEFAULT_REGIONS, build_effective_region_codes
-from skyscanner_multi_domain.neo import NeoCli
+from skyscanner_multi_domain.runtime.browsers import detect_browser_binaries, is_browser_launch_error
 from skyscanner_multi_domain.scan.orchestrator import quotes_to_dicts, run_page_scan
 from skyscanner_multi_domain.transports.cdp import detect_cdp_version
 
 
 _POLL_INTERVAL_SECONDS = 0.2
+
+
+def _build_desktop_scan_config() -> ScanConfig:
+    return ScanConfig(trace_dir=str(get_traces_dir()))
 
 
 def _serialize_path(path: Path | None) -> str | None:
@@ -107,6 +110,17 @@ def _serialize_history_record(record: Any) -> dict[str, Any]:
         "label": _format_history_record(record),
         "queryPayload": deepcopy(getattr(record, "query_payload", {}) or {}),
     }
+
+
+def _normalize_desktop_error_message(exc: BaseException | str) -> str:
+    raw = str(exc).strip()
+    error = exc if isinstance(exc, BaseException) else RuntimeError(raw)
+    if is_browser_launch_error(error):
+        return (
+            "browser-unavailable：未找到可启动的 Chrome、Edge 或 Comet；"
+            "请安装或启动其中之一后重试。"
+        )
+    return raw
 
 
 class DesktopUIService:
@@ -212,30 +226,23 @@ class DesktopUIService:
         }
 
     def check_environment(self) -> dict[str, Any]:
-        neo = NeoCli(PROJECT_ROOT)
-        scrapling_ready = importlib.util.find_spec("scrapling") is not None
         cdp = detect_cdp_version()
+        browsers = detect_browser_binaries()
         if cdp:
-            cdp_line = f"浏览器/CDP 回退: {cdp.get('Browser', '已连接')}"
+            lines = [f"CDP 已连接: {cdp.get('Browser', '浏览器')}"]
+        elif browsers:
+            lines = ["可启动浏览器: " + ", ".join(name.capitalize() for name in browsers)]
         else:
-            cdp_line = "浏览器/CDP 回退: 未连接（仅影响已打开浏览器复用与失败市场自动兜底）"
-        lines = [
-            f"Scrapling 主抓取: {'已安装' if scrapling_ready else '未安装'}",
-            f"Neo CLI: {'已找到' if neo.available else '未找到'}",
-            cdp_line,
-            f"项目目录: {PROJECT_ROOT}",
-        ]
+            lines = ["browser-unavailable: 未检测到 Chrome、Edge 或 Comet，请安装或启动其中之一。"]
+        lines.append(f"项目目录: {PROJECT_ROOT}")
         issues = _collect_startup_issues()
+        ready = bool(cdp or browsers) and not issues
         with self._lock:
             self._environment_lines = lines
-            self._status_message = lines[0] if scrapling_ready else "主抓取环境未就绪"
+            self._status_message = lines[0]
             for line in lines:
                 self._log_locked(line)
-            return {
-                "ok": scrapling_ready,
-                "lines": list(lines),
-                "issues": issues,
-            }
+            return {"ok": ready, "lines": list(lines), "issues": issues}
 
     def open_link(self, url: str) -> bool:
         if not str(url).startswith("http"):
@@ -466,7 +473,6 @@ class DesktopUIService:
             {
                 "rerunScopeOverride": "selected_regions",
                 "selectedRegionCodes": queued_regions,
-                "allowBrowserFallback": False,
             }
         )
         with self._lock:
@@ -513,7 +519,6 @@ class DesktopUIService:
             {
                 "rerunScopeOverride": "selected_regions",
                 "selectedRegionCodes": selected,
-                "allowBrowserFallback": action == "extend_wait",
             }
         )
         with self._lock:
@@ -555,7 +560,6 @@ class DesktopUIService:
                 for code in (payload.get("selectedRegionCodes") or [])
                 if str(code).strip()
             ]
-            allow_browser_fallback = bool(payload.get("allowBrowserFallback", True))
             origin = self._form_state["origin"].strip()
             destination = self._form_state["destination"].strip()
             date = self._form_state["date"].strip()
@@ -601,7 +605,6 @@ class DesktopUIService:
                     date_window_days=date_window_days,
                     rerun_scope_override=rerun_scope_override,
                     selected_region_codes=selected_region_codes,
-                    allow_browser_fallback=allow_browser_fallback,
                 )
             else:
                 origin_resolved = self.query.resolve_location(
@@ -661,7 +664,6 @@ class DesktopUIService:
                         query_payload,
                         rerun_scope_override,
                         selected_region_codes,
-                        allow_browser_fallback,
                     ),
                     daemon=True,
                 )
@@ -681,7 +683,6 @@ class DesktopUIService:
         date_window_days: int,
         rerun_scope_override: str,
         selected_region_codes: list[str],
-        allow_browser_fallback: bool,
     ) -> threading.Thread:
         (
             origin_label,
@@ -765,7 +766,6 @@ class DesktopUIService:
                 query_payload,
                 rerun_scope_override,
                 selected_region_codes,
-                allow_browser_fallback,
             ),
             daemon=True,
         )
@@ -929,12 +929,14 @@ class DesktopUIService:
         prefer_metro: bool,
     ) -> list[LocationRecord]:
         if use_country_mode:
+            country_records = (
+                self.query.location_resolver.search_countries(value, limit=None)
+                if value.strip()
+                else self.query.location_resolver.list_countries()
+            )
             return [
                 LocationRecord(name=item.name, code=item.code, kind="country")
-                for item in self.query.location_resolver.search_countries(
-                    value,
-                    limit=MAX_LOCATION_SUGGESTIONS,
-                )
+                for item in country_records
             ]
         return self.query.location_resolver.search_locations(
             value,
@@ -1232,7 +1234,7 @@ class DesktopUIService:
             "解析可信度:",
             f"- 来源分布: {source_text or '-'}",
             f"- 低可信度结果: {len(low_confidence)}",
-            f"- Fallback/恢复解析结果: {len(fallback_rows)}",
+            f"- 弱匹配/恢复解析结果: {len(fallback_rows)}",
             f"- Parser warnings: {len(warnings)}",
         ]
 
@@ -1240,22 +1242,17 @@ class DesktopUIService:
         payload = getattr(record, "query_payload", {}) or {}
         fetch = payload.get("fetch_quality_telemetry")
         parser = payload.get("parser_recovery_telemetry")
-        snapshot = payload.get("snapshot_summary")
         if not isinstance(fetch, dict):
             return []
         lines = [
             "",
             "抓取质量:",
             f"- 最终命中: {fetch.get('fetch_price_found_count', 0)}/{fetch.get('fetch_total_regions', 0)}",
-            f"- OpenCLI 直接命中: {fetch.get('opencli_direct_price_found_count', 0)}",
-            f"- Fallback 救回: {fetch.get('fallback_rescued_count', 0)}",
             f"- Challenge: {fetch.get('fetch_challenge_count', 0)}",
             f"- Tabs opened/reused: {fetch.get('tab_open_total', 0)}/{fetch.get('tab_reuse_total', 0)}",
         ]
         if isinstance(parser, dict):
             lines.append(f"- Parser candidates: {parser.get('price_candidate_total', 0)}")
-        if isinstance(snapshot, dict):
-            lines.append(f"- Snapshot recommended: {snapshot.get('snapshot_recommended_count', 0)}")
         return lines
 
     def _build_trust_payload_locked(self) -> dict[str, Any]:
@@ -1281,7 +1278,6 @@ class DesktopUIService:
         return {
             "fetchQualityTelemetry": build_fetch_quality_telemetry(quote_snapshots),
             "parserRecoveryTelemetry": build_parser_recovery_telemetry(quote_snapshots),
-            "snapshotSummary": build_snapshot_summary(quote_snapshots),
             "priceConfirmationSummary": self.confirmations.summary(),
             "repairPlan": {
                 "summary": repair_summary,
@@ -1451,9 +1447,10 @@ class DesktopUIService:
             self._refresh_history_lists()
 
     def _handle_scan_error(self, message: str) -> None:
+        message = _normalize_desktop_error_message(message)
         with self._lock:
             self._set_busy_locked(False)
-            self._status_message = "失败"
+            self._status_message = f"失败: {message}" if message else "失败"
             self._last_error = message
             self._apply_cheapest_conclusion_locked(
                 {
@@ -1489,7 +1486,7 @@ class DesktopUIService:
         if self._cancel_event.is_set():
             self._handle_cancelled()
         else:
-            self._handle_scan_error(str(exc))
+            self._handle_scan_error(_normalize_desktop_error_message(exc))
 
     @contextmanager
     def _worker_boundary(self) -> Iterator[None]:
@@ -1734,7 +1731,6 @@ class DesktopUIService:
         query_payload: dict[str, Any],
         rerun_scope: str,
         selected_region_codes: list[str],
-        allow_browser_fallback: bool,
     ) -> None:
         with self._worker_boundary():
             trip_dates = build_ordered_trip_dates(date, return_date, date_window_days)
@@ -1956,7 +1952,7 @@ class DesktopUIService:
                             return_date=current_return_date,
                             page_wait=wait_seconds,
                             timeout=30,
-                            transport="scrapling",
+                            transport="page",
                             on_region_start=on_region_start,
                             scan_mode="preview_first",
                             rerun_scope=current_scope,
@@ -1964,8 +1960,7 @@ class DesktopUIService:
                             region_concurrency=_GUI_REGION_CONCURRENCY,
                             query_payload=query_payload,
                             on_progress=on_progress,
-                            allow_browser_fallback=allow_browser_fallback,
-                            fetch_pipeline="balanced",
+                            config=_build_desktop_scan_config(),
                         )
                         rows = get_rows_for_trip_label(merged_rows_by_date, trip_label)
                         quote_snapshots = get_quotes_for_trip_label(merged_quotes_by_date, trip_label)
@@ -2072,7 +2067,6 @@ class DesktopUIService:
         query_payload: dict[str, Any],
         rerun_scope: str,
         selected_region_codes: list[str],
-        allow_browser_fallback: bool,
     ) -> None:
         with self._worker_boundary():
             trip_dates = build_ordered_trip_dates(date, return_date, date_window_days)
@@ -2327,7 +2321,7 @@ class DesktopUIService:
                                     return_date=current_return_date,
                                     page_wait=wait_seconds,
                                     timeout=30,
-                                    transport="scrapling",
+                                    transport="page",
                                     on_region_start=on_region_start,
                                     scan_mode="preview_first",
                                     rerun_scope=current_scope,
@@ -2335,8 +2329,7 @@ class DesktopUIService:
                                     region_concurrency=_GUI_REGION_CONCURRENCY,
                                     query_payload=query_payload,
                                     on_progress=on_pair_progress,
-                                    allow_browser_fallback=allow_browser_fallback,
-                                    fetch_pipeline="balanced",
+                                    config=_build_desktop_scan_config(),
                                 )
                                 if not quotes:
                                     return (route_label, [])

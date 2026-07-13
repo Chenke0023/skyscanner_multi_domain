@@ -95,15 +95,10 @@ def format_table(
     if best and best.price is not None:
         currency = getattr(best, "currency", "") or ""
         transport = getattr(best, "source_kind", "") or ""
-        fallback_text = ""
-        count = _attempt_count(best)
-        if count > 1:
-            fallback_text = f", after {count - 1} fallback(s)"
-
         lines.append("")
         lines.append(
             f"Best rankable: {best.region} {best.price:,.2f} {currency}"
-            f" via {transport}{fallback_text}"
+            f" via {transport}"
         )
 
     if show_attempts:

@@ -26,10 +26,16 @@ export function StatusBar({
       : environmentStatus === "ok"
         ? "环境状态: 已检查"
         : "环境状态: 未检查";
+  const errorText = String(status.error ?? "").trim();
+  const baseMessage = String(status.message ?? "").trim() || "就绪";
+  const visibleMessage =
+    errorText && !baseMessage.includes(errorText)
+      ? `${baseMessage}: ${errorText}`
+      : baseMessage;
 
   return (
     <footer className="status-bar">
-      <div className="flex items-center gap-2.5">
+      <div className="status-main flex items-center gap-2.5">
         <button
           aria-label={environmentStatusLabel}
           className={`status-dot ${environmentStatus}`}
@@ -37,7 +43,9 @@ export function StatusBar({
           title={environmentStatusLabel}
           type="button"
         />
-        <span className="text-sm text-stone-500">{status.message}</span>
+        <span className="status-message text-sm text-stone-500" title={visibleMessage}>
+          {visibleMessage}
+        </span>
         {status.progress.total > 0 ? (
           <span className="text-xs text-stone-400">
             {status.progress.step}/{status.progress.total}

@@ -5,6 +5,7 @@ from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
 from skyscanner_multi_domain.runtime import paths as app_paths
+from skyscanner_multi_domain.runtime import browsers as app_browsers
 
 
 def test_runtime_root_defaults_to_source_root_when_not_frozen() -> None:
@@ -47,3 +48,37 @@ def test_get_browser_profile_dir_migrates_from_previous_data_root() -> None:
         assert resolved == target_root / "edge-cdp-profile"
         assert resolved.exists()
         assert not previous_profile.exists()
+
+
+def test_detect_browser_binaries_requires_launchable_executable() -> None:
+    with TemporaryDirectory() as temp_dir:
+        temp_path = Path(temp_dir)
+        launchable = temp_path / "Comet"
+        non_executable = temp_path / "Microsoft Edge"
+        missing = temp_path / "Google Chrome"
+        launchable.write_text("", encoding="utf-8")
+        non_executable.write_text("", encoding="utf-8")
+        launchable.chmod(0o755)
+        non_executable.chmod(0o644)
+
+        with patch.object(
+            app_browsers,
+            "BROWSER_BINARY_CANDIDATES",
+            {
+                "comet": launchable,
+                "edge": non_executable,
+                "chrome": missing,
+            },
+        ):
+            detected = app_browsers.detect_browser_binaries()
+
+    assert detected == {"comet": launchable}
+
+
+def test_browser_launch_error_detects_browser_unavailable() -> None:
+    exc = RuntimeError("browser-unavailable: no launchable browser")
+    assert app_browsers.is_browser_launch_error(exc)
+
+
+def test_default_browser_order_is_chrome_edge_comet() -> None:
+    assert app_browsers.BROWSER_ORDER == ("chrome", "edge", "comet")

@@ -8,7 +8,7 @@ def test_repair_plan_excludes_successful_markets_and_no_flights() -> None:
     quotes = [
         FlightQuote("CN", "domain", 100.0, "CNY", "url", "ok"),
         FlightQuote("HK", "domain", None, "HKD", "url", "page_parse_failed"),
-        FlightQuote("SG", "domain", None, "SGD", "url", "opencli_no_flights"),
+        FlightQuote("SG", "domain", None, "SGD", "url", "page_no_flights"),
     ]
 
     plan = build_repair_plan(quotes)
@@ -30,19 +30,19 @@ def test_repair_plan_marks_challenge_manual_review() -> None:
 def test_repair_plan_filters_status() -> None:
     quotes = [
         FlightQuote("CN", "domain", None, "CNY", "url", "page_parse_failed"),
-        FlightQuote("HK", "domain", None, "HKD", "url", "opencli_timeout"),
+        FlightQuote("HK", "domain", None, "HKD", "url", "page_timeout"),
     ]
 
-    plan = build_repair_plan(quotes, include_statuses={"opencli_timeout"})
+    plan = build_repair_plan(quotes, include_statuses={"page_timeout"})
 
     assert [task.region for task in plan.tasks] == ["HK"]
     assert plan.tasks[0].recommended_action == "retry_with_clean_tab"
 
 
 def test_repair_tasks_are_serializable() -> None:
-    plan = build_repair_plan([FlightQuote("CN", "domain", None, "CNY", "url", "opencli_not_attempted")])
+    plan = build_repair_plan([FlightQuote("CN", "domain", None, "CNY", "url", "page_not_attempted")])
 
     payload = repair_tasks_to_dicts(plan.tasks)
 
-    assert payload[0]["recommended_action"] == "retry_opencli"
+    assert payload[0]["recommended_action"] == "retry_cdp"
     assert payload[0]["automatic"] is True

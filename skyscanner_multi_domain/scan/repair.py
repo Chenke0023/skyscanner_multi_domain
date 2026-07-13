@@ -6,18 +6,10 @@ from typing import Any
 from skyscanner_multi_domain.models import FlightQuote
 
 
-AUTO_REPAIR_STATUSES = {
-    "page_parse_failed",
-    "opencli_parse_failed",
-    "page_text_embedded_recovered",
-    "opencli_timeout",
-    "page_loading",
-    "opencli_error",
-    "opencli_failed",
-    "opencli_not_attempted",
-}
-NO_REPAIR_STATUSES = {"opencli_no_flights", "page_no_flights", "no_flights"}
-CHALLENGE_STATUSES = {"px_challenge", "page_challenge", "captcha_solve_failed"}
+AUTO_REPAIR_STATUSES = {"page_parse_failed", "page_text_embedded_recovered", "page_loading", "browser_unavailable"}
+NO_REPAIR_STATUSES = {"page_no_flights", "no_flights"}
+CHALLENGE_STATUSES = {"px_challenge", "page_challenge"}
+
 
 
 @dataclass(frozen=True)
@@ -135,12 +127,12 @@ def recommended_repair_action(failure_class: str, status: str = "") -> tuple[str
     if failure_class == "still_loading":
         return "wait_then_reextract", True
     if failure_class == "not_attempted":
-        return "retry_opencli", True
+        return "retry_cdp", True
     if failure_class == "challenge":
         return "manual_review", False
     if failure_class == "no_flights":
         return "do_not_retry", False
-    return "retry_opencli", True
+    return "retry_cdp", True
 
 
 def repair_tasks_to_dicts(tasks: list[RepairTask]) -> list[dict[str, Any]]:

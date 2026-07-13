@@ -42,7 +42,7 @@ def test_parse_test_file_counts_package_imports_separately_from_removed_root_shi
     tmp_path: Path,
     monkeypatch,
 ) -> None:
-    test_file = tmp_path / "test_neo.py"
+    test_file = tmp_path / "test_scan.py"
     test_file.write_text(
         """
 from skyscanner_multi_domain.scan.orchestrator import run_page_scan
@@ -62,18 +62,18 @@ def test_sample():
     assert stats["import_package"] == 1
 
 
-def test_parse_test_file_counts_removed_neo_root_shim_import(
+def test_parse_test_file_counts_removed_root_shim_import(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
-    test_file = tmp_path / "test_neo_root.py"
+    test_file = tmp_path / "test_removed_root.py"
     test_file.write_text(
         """
-from skyscanner_neo import run_page_scan
+from scan_history import ScanHistoryStore
 
 
 def test_sample():
-    assert run_page_scan
+    assert ScanHistoryStore
 """,
         encoding="utf-8",
     )

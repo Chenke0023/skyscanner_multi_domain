@@ -5,7 +5,7 @@ export function formatMoney(value: unknown): string {
 const priceSourceLabels: Record<string, string> = {
   cheapest_block: "Cheapest",
   best_block: "Best",
-  first_price_fallback: "Fallback",
+  first_price_fallback: "弱匹配",
   recovered_best: "Recovered",
   manual_confirmed: "Confirmed",
   unpriced: "No price",
@@ -48,11 +48,4 @@ export function listSummary(value: unknown): string {
   if (!Array.isArray(value)) return "-";
   const cleaned = value.map((item) => String(item).trim()).filter(Boolean);
   return cleaned.length ? cleaned.join(", ") : "-";
-}
-
-export function fallbackAttemptLabel(attempt: Record<string, unknown>): string {
-  const transport = String(attempt.transport ?? "?");
-  const status = String(attempt.status ?? attempt.action ?? "").trim();
-  const error = String(attempt.error ?? attempt.reason ?? "").trim();
-  return [transport, status, error].filter(Boolean).join(" · ");
 }

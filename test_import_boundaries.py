@@ -38,10 +38,8 @@ DOCUMENTED_PACKAGE_MODULES = {
     "skyscanner_multi_domain.geo.location_resolver",
     "skyscanner_multi_domain.geo.regions",
     "skyscanner_multi_domain.models",
-    "skyscanner_multi_domain.neo",
     "skyscanner_multi_domain.parsing.page_parser",
     "skyscanner_multi_domain.parsing.price_candidates",
-    "skyscanner_multi_domain.parsing.readiness",
     "skyscanner_multi_domain.planning.execution_policy",
     "skyscanner_multi_domain.planning.date_window",
     "skyscanner_multi_domain.planning.search_plan",
@@ -55,8 +53,6 @@ DOCUMENTED_PACKAGE_MODULES = {
     "skyscanner_multi_domain.scan.repair",
     "skyscanner_multi_domain.scan.result_service",
     "skyscanner_multi_domain.transports.cdp",
-    "skyscanner_multi_domain.transports.opencli",
-    "skyscanner_multi_domain.transports.scrapling",
 }
 
 
@@ -113,28 +109,24 @@ def test_desktop_ui_service_no_longer_imports_cli() -> None:
     assert "ResultService" in todo
 
 
-def test_active_entries_import_package_neo_directly() -> None:
-    for entry in ("cli.py", "desktop_ui_service.py"):
-        modules = _import_modules_for(ROOT / entry)
-        assert "skyscanner_neo" not in modules
-        assert "skyscanner_multi_domain.neo" in modules
-
-
-def test_package_neo_does_not_reexport_core_scan_helpers() -> None:
-    neo = importlib.import_module("skyscanner_multi_domain.neo")
-
-    for name in (
-        "build_search_url",
-        "detect_browsers",
-        "detect_cdp_version",
-        "mutate_payload",
-        "prepare_headers",
-        "quotes_to_dicts",
-        "rewrite_url",
-        "run_page_scan",
-    ):
-        assert not hasattr(neo, name)
-
+def test_retired_package_modules_are_not_importable() -> None:
+    retired = (
+        "skyscanner_multi_domain.neo",
+        "skyscanner_multi_domain.parsing.readiness",
+        "skyscanner_multi_domain.scan.fallback_router",
+        "skyscanner_multi_domain.scan.url_builder",
+        "skyscanner_multi_domain.transports.google_jump",
+        "skyscanner_multi_domain.transports.opencli",
+        "skyscanner_multi_domain.transports.scrapling",
+        "captcha_solver",
+        "failure_replay",
+    )
+    for module_name in retired:
+        try:
+            importlib.import_module(module_name)
+        except ModuleNotFoundError:
+            continue
+        raise AssertionError(f"retired module remains importable: {module_name}")
 
 def test_simple_cli_does_not_reintroduce_thin_service_wrappers() -> None:
     tree = ast.parse((ROOT / "cli.py").read_text(encoding="utf-8"))

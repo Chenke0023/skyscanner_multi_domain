@@ -26,7 +26,7 @@ class FailureLogTests(unittest.TestCase):
             target = Path(temp_dir) / "failure.log"
             _persist_failure_log(
                 quote,
-                transport="scrapling",
+                transport="page",
                 route_key="BJSA_ALA_20260429",
                 page_text="综合最佳\n¥3215\n最便宜\n¥2184",
                 extra={"locale": "zh-CN"},
@@ -35,7 +35,7 @@ class FailureLogTests(unittest.TestCase):
 
             self.assertEqual(quote.debug_log_path, str(target))
             content = target.read_text(encoding="utf-8")
-            self.assertIn("transport: scrapling", content)
+            self.assertIn("transport: page", content)
             self.assertIn("route: BJSA_ALA_20260429", content)
             self.assertIn("locale", content)
             self.assertIn("parser_snapshot", content)

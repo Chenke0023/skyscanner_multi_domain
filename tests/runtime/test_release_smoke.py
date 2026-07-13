@@ -3,12 +3,22 @@ from __future__ import annotations
 from pathlib import Path
 
 from scripts.release_smoke import (
+    BUILD_SCRIPT,
+    BUILD_RUNTIME_SMOKE_NEEDLES,
+    BUILD_SIZE_GUARD_NEEDLES,
     CI_GATE_NEEDLES,
+    CLI_RUNTIME_GUARD_NEEDLES,
+    DESKTOP_RUNTIME_GUARD_NEEDLES,
+    GENERATED_IGNORE_NEEDLES,
+    GITIGNORE_FILE,
+    LAUNCH_GUI_SCRIPT,
     LEGACY_TK_FORBIDDEN_TEXT,
     PYPROJECT_FILE,
     REMOVED_PACKAGE_LEGACY_NAMESPACES,
     REMOVED_FLAT_ROOT_SHIMS,
     SOURCE_APP_SCRIPT,
+    SOURCE_LINKED_RUNTIME_NEEDLES,
+    PROJECT_ROOT,
     collect_webui_style_guardrail_violations,
     read_release_version,
     run_release_smoke,
@@ -26,12 +36,19 @@ def test_release_smoke_metadata_passes_without_requiring_built_webui() -> None:
     assert "webui package version 1.2.1" in checks
     assert "changelog entry" in checks
     assert "README install path" in checks
+    assert "generated file ignore rules" in checks
     assert "legacy Tk entrypoints removed" in checks
     assert "flat root shims removed" in checks
     assert "removed root shim references" in checks
     assert "package legacy namespace removed" in checks
     assert "macOS bundle version wiring" in checks
-    assert "PyInstaller build data" in checks
+    assert "retired feature paths removed" in checks
+    assert "minimal PyInstaller module set" in checks
+    assert "release artifact size guardrails" in checks
+    assert "packaged runtime smoke guardrails" in checks
+    assert "desktop runtime smoke guardrails" in checks
+    assert "source-linked runtime guardrails" in checks
+    assert "CLI runtime path guardrails" in checks
     assert "CI test gates" in checks
     assert "webui style guardrails" in checks
     assert "webui dist asset" not in checks
@@ -72,6 +89,48 @@ def test_source_linked_app_script_uses_central_version_file() -> None:
     assert 'VERSION_FILE="${PROJECT_ROOT}/data/version.txt"' in script
     assert "<string>${VERSION}</string>" in script
     assert "<string>1.0</string>" not in script
+
+
+def test_standalone_build_script_limits_release_artifact_growth() -> None:
+    script = BUILD_SCRIPT.read_text(encoding="utf-8")
+
+    for needle in BUILD_SIZE_GUARD_NEEDLES:
+        assert needle in script
+
+
+def test_standalone_build_script_runs_packaged_runtime_smoke() -> None:
+    script = BUILD_SCRIPT.read_text(encoding="utf-8")
+
+    for needle in BUILD_RUNTIME_SMOKE_NEEDLES:
+        assert needle in script
+
+
+def test_desktop_entrypoint_smoke_checks_runtime_error_normalization() -> None:
+    desktop_webview = (PROJECT_ROOT / "desktop_webview.py").read_text(encoding="utf-8")
+
+    for needle in DESKTOP_RUNTIME_GUARD_NEEDLES:
+        assert needle in desktop_webview
+
+
+def test_source_linked_launcher_uses_runtime_app_home() -> None:
+    script = LAUNCH_GUI_SCRIPT.read_text(encoding="utf-8")
+
+    for needle in SOURCE_LINKED_RUNTIME_NEEDLES:
+        assert needle in script
+
+
+def test_cli_default_trace_dir_uses_runtime_dir() -> None:
+    cli_source = (PROJECT_ROOT / "cli.py").read_text(encoding="utf-8")
+
+    for needle in CLI_RUNTIME_GUARD_NEEDLES:
+        assert needle in cli_source
+
+
+def test_generated_growth_paths_stay_ignored() -> None:
+    gitignore = GITIGNORE_FILE.read_text(encoding="utf-8")
+
+    for needle in GENERATED_IGNORE_NEEDLES:
+        assert needle in gitignore
 
 
 def test_webui_style_guardrails_detect_forbidden_patterns(tmp_path: Path) -> None:

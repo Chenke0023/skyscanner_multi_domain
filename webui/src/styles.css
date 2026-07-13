@@ -60,6 +60,19 @@ body {
   border-top: 1px solid var(--color-line);
 }
 
+.status-main {
+  min-width: 0;
+  flex: 1;
+}
+
+.status-message {
+  min-width: 0;
+  max-width: min(72vw, 900px);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .status-dot {
   width: 10px;
   height: 10px;
@@ -257,20 +270,25 @@ button {
 /* Suggestion dropdown ------------------------------------------------------ */
 .suggestion-list {
   position: absolute;
-  z-index: 10;
+  z-index: 40;
   top: calc(100% + 6px);
   left: 0;
   right: 0;
   display: grid;
   gap: 6px;
+  max-height: min(320px, 52vh);
+  overflow-y: auto;
+  overscroll-behavior: contain;
   padding: 8px;
   border-radius: 12px;
   border: 1px solid var(--color-line);
   background: #fff;
   box-shadow: 0 16px 44px rgba(31, 41, 51, 0.08);
+  -webkit-overflow-scrolling: touch;
 }
 
 .suggestion-list button {
+  width: 100%;
   text-align: left;
   padding: 8px 10px;
   border-radius: 10px;
@@ -560,6 +578,17 @@ button {
   color: var(--color-muted);
 }
 
+td.error-cell {
+  min-width: 260px;
+  max-width: 440px;
+  white-space: normal;
+}
+
+.error-cell-text {
+  color: var(--color-danger);
+  word-break: break-word;
+}
+
 /* Details panel ------------------------------------------------------------ */
 .details-panel {
   display: flex;
@@ -726,6 +755,23 @@ td:last-child {
   white-space: normal;
   background: var(--color-paper);
   box-shadow: none;
+}
+
+.failure-detail-list {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  gap: 6px 12px;
+  margin: 8px 0 0;
+}
+
+.failure-detail-list dt {
+  color: var(--color-muted);
+  font-size: 12px;
+}
+
+.failure-detail-list dd {
+  margin: 0;
+  word-break: break-word;
 }
 
 /* Calendar ----------------------------------------------------------------- */

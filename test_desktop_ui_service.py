@@ -4,6 +4,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from desktop_ui_service import DesktopUIService
+from skyscanner_multi_domain.geo.location_resolver import load_country_records
 from skyscanner_multi_domain.scan.confirmation import PriceConfirmationStore
 from skyscanner_multi_domain.scan.history import ScanHistoryStore
 
@@ -41,6 +42,72 @@ def test_update_query_state_persists_form_and_hints(tmp_path: Path) -> None:
     assert state["form"]["destination"] == "东京"
     assert "JP" in state["hints"]["regions"]
     assert service._state_path.exists()
+
+
+def test_country_mode_hints_include_pakistan_market_and_airports(tmp_path: Path) -> None:
+    service = build_service(tmp_path)
+
+    state = service.update_query_state(
+        {
+            "origin": "北京",
+            "destination": "巴基斯坦",
+            "trip_type": "one_way",
+            "date": "2026-06-01",
+            "return_date": "",
+            "regions": "",
+            "wait": "12",
+            "date_window": "2",
+            "exact_airport": False,
+            "origin_country": False,
+            "destination_country": True,
+            "combined_summary": True,
+        }
+    )
+
+    assert "国家代码: PK" in state["hints"]["destination"]
+    assert "ISB" in state["hints"]["destination"]
+    assert "PK" in state["hints"]["regions"]
+
+
+def test_country_suggestions_are_not_truncated_for_short_queries(tmp_path: Path) -> None:
+    service = build_service(tmp_path)
+
+    payload = service.get_location_suggestions(
+        "destination",
+        "巴",
+        {"destinationCountry": True},
+    )
+    codes = [item["code"] for item in payload["items"]]
+
+    assert len(codes) > 8
+    assert "PK" in codes
+    assert "BR" in codes
+
+
+def test_country_mode_empty_query_returns_complete_dropdown(tmp_path: Path) -> None:
+    service = build_service(tmp_path)
+
+    payload = service.get_location_suggestions(
+        "destination",
+        "",
+        {"destinationCountry": True},
+    )
+    codes = [item["code"] for item in payload["items"]]
+
+    assert len(codes) == len(load_country_records())
+    assert "PK" in codes
+    assert "CN" in codes
+
+
+def test_scan_error_status_keeps_visible_reason(tmp_path: Path) -> None:
+    service = build_service(tmp_path)
+
+    service._handle_scan_error("目的地不能为空。")
+    state = service.get_ui_state()
+
+    assert state["status"]["message"] == "失败: 目的地不能为空。"
+    assert state["status"]["error"] == "目的地不能为空。"
+    assert state["results"]["cheapestConclusion"]["insight"] == "目的地不能为空。"
 
 
 def test_save_alert_config_returns_serializable_summary(tmp_path: Path) -> None:
@@ -124,7 +191,7 @@ def test_apply_repair_action_queues_matching_failure_class(tmp_path: Path) -> No
             "2026-06-01",
             [
                 {"region": "HK", "status": "page_parse_failed", "source_url": "https://example.test/hk"},
-                {"region": "SG", "status": "opencli_timeout", "source_url": "https://example.test/sg"},
+                {"region": "SG", "status": "page_timeout", "source_url": "https://example.test/sg"},
             ],
         )
     ]
@@ -172,7 +239,6 @@ def test_apply_repair_action_extend_wait_starts_selected_region_scan(tmp_path: P
     start_payload = start_scan.call_args.args[0]
     assert start_payload["rerunScopeOverride"] == "selected_regions"
     assert start_payload["selectedRegionCodes"] == ["SG"]
-    assert start_payload["allowBrowserFallback"] is True
 
 
 def test_record_price_confirmation_persists_sample_and_updates_trust_summary(tmp_path: Path) -> None:

@@ -1,5 +1,19 @@
 # Changelog
 
+## Unreleased
+
+### Breaking changes
+
+- Removed OpenCLI, Scrapling, Neo, Google Jump, captcha solving, failure replay, and their compatibility interfaces.
+- `page` is now the default and only stable transport; `cdp_structured` remains an explicit experimental CDP parser.
+- A connectable CDP endpoint or an installed Chrome, Edge, or Comet browser is now required; browsers are neither bundled nor downloaded.
+
+### Changed
+
+- Replaced dynamic locale metadata and the full airport dataset with committed static country/currency metadata and a five-column IATA airport subset.
+- Reduced runtime dependencies to `aiohttp`, `requests`, and `pywebview`.
+- Tightened macOS packaging with forbidden-module checks and 150MB app / 60MB ZIP limits.
+
 ## 1.2.1 - 2026-07-07
 
 - Finalized the todo backlog cleanup and release evidence after the 1.2.0 prep tag.

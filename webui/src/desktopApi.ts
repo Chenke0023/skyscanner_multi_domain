@@ -97,7 +97,6 @@ const createMockState = (): UIState => ({
     trust: {
       fetchQualityTelemetry: {},
       parserRecoveryTelemetry: {},
-      snapshotSummary: {},
       repairPlan: { summary: {}, tasks: [] },
     },
   },
@@ -129,17 +128,29 @@ class MockDesktopApi implements DesktopApiShape {
       field === "origin"
         ? Boolean(options?.originCountry)
         : Boolean(options?.destinationCountry);
-    if (!query.trim()) {
-      return { field, items: [] };
-    }
     if (useCountry) {
+      const countries = [
+        { name: "巴林", code: "BH", kind: "country", label: "巴林 (BH, 国家)" },
+        { name: "巴西", code: "BR", kind: "country", label: "巴西 (BR, 国家)" },
+        { name: "巴哈马", code: "BS", kind: "country", label: "巴哈马 (BS, 国家)" },
+        { name: "巴拉圭", code: "PY", kind: "country", label: "巴拉圭 (PY, 国家)" },
+        { name: "巴拿马", code: "PA", kind: "country", label: "巴拿马 (PA, 国家)" },
+        { name: "巴基斯坦", code: "PK", kind: "country", label: "巴基斯坦 (PK, 国家)" },
+        { name: "巴巴多斯", code: "BB", kind: "country", label: "巴巴多斯 (BB, 国家)" },
+        { name: "巴布亚新几内亚", code: "PG", kind: "country", label: "巴布亚新几内亚 (PG, 国家)" },
+        { name: "菲律宾", code: "PH", kind: "country", label: "菲律宾 (PH, 国家)" },
+        { name: "芬兰", code: "FI", kind: "country", label: "芬兰 (FI, 国家)" },
+      ];
+      const lowered = query.trim().toLowerCase();
       return {
         field,
-        items: [
-          { name: "菲律宾", code: "PH", kind: "country", label: "菲律宾 (国家)" },
-          { name: "芬兰", code: "FI", kind: "country", label: "芬兰 (国家)" },
-        ].filter((i) => i.name.includes(query)),
+        items: lowered
+          ? countries.filter((i) => i.name.includes(query) || i.code.toLowerCase().includes(lowered))
+          : countries,
       };
+    }
+    if (!query.trim()) {
+      return { field, items: [] };
     }
     return {
       field,

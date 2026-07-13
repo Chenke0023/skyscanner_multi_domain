@@ -161,7 +161,9 @@ function App() {
   }, [form]);
 
   useEffect(() => {
-    if (!form || !originDeferred.trim()) {
+    const shouldFetchCompleteCountryList =
+      Boolean(form?.origin_country) && activeField === "origin";
+    if (!form || (!originDeferred.trim() && !shouldFetchCompleteCountryList)) {
       setSuggestions((current) => ({ ...current, origin: [] }));
       return;
     }
@@ -176,10 +178,12 @@ function App() {
         setSuggestions((current) => ({ ...current, origin: response.items }));
       })
       .catch(() => undefined);
-  }, [form, originDeferred]);
+  }, [activeField, form, originDeferred]);
 
   useEffect(() => {
-    if (!form || !destinationDeferred.trim()) {
+    const shouldFetchCompleteCountryList =
+      Boolean(form?.destination_country) && activeField === "destination";
+    if (!form || (!destinationDeferred.trim() && !shouldFetchCompleteCountryList)) {
       setSuggestions((current) => ({ ...current, destination: [] }));
       return;
     }
@@ -194,7 +198,7 @@ function App() {
         setSuggestions((current) => ({ ...current, destination: response.items }));
       })
       .catch(() => undefined);
-  }, [destinationDeferred, form]);
+  }, [activeField, destinationDeferred, form]);
 
   const filteredResults = useMemo(() => {
     if (!uiState) {
@@ -215,8 +219,8 @@ function App() {
       failureRows = [];
     }
     if (sourceFilter === "live") {
-      successRows = successRows.filter((row) => ["live", "browser_fallback", "cdp_reuse"].includes(String(row.source_kind ?? "")));
-      failureRows = failureRows.filter((row) => ["live", "browser_fallback", "cdp_reuse"].includes(String(row.source_kind ?? "")));
+      successRows = successRows.filter((row) => ["live", "page", "cdp_structured"].includes(String(row.source_kind ?? "")));
+      failureRows = failureRows.filter((row) => ["live", "page", "cdp_structured"].includes(String(row.source_kind ?? "")));
     }
     if (sourceFilter === "bookable") {
       successRows = successRows.filter((row) => String(row.link ?? "").startsWith("http"));

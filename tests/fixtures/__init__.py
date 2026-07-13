@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import types
 
 # ── Region fixtures ────────────────────────────────────────────────────────────
 
@@ -104,37 +103,6 @@ def quote_failed(region="HK", status="page_parse_failed", error="页面正文未
         price=None, currency="HKD",
         source_url="https://www.skyscanner.com.hk/transport/flights/bjsa/ala/260429/",
         status=status, error=error,
-    )
-
-
-# ── Fake transport modules ──────────────────────────────────────────────────────
-
-def make_fake_scrapling(fetch_page=None, get_page=None):
-    """Build a fake scrapling module with configurable page returns."""
-    if fetch_page is None:
-        fetch_page = FullPricePage()
-    if get_page is None:
-        get_page = FullPricePage()
-
-    return types.SimpleNamespace(
-        Fetcher=types.SimpleNamespace(get=lambda *a, **k: get_page),
-        StealthyFetcher=types.SimpleNamespace(fetch=lambda *a, **k: fetch_page),
-    )
-
-
-def make_fake_captcha_solver():
-    """Fake captcha solver with no-op client."""
-    return types.SimpleNamespace(
-        CaptchaSolverClient=None,
-        CaptchaSolverError=Exception,
-    )
-
-
-def make_fake_opencli_fetch(price=2187.0, currency="CNY"):
-    """Fake opencli fetch result."""
-    return types.SimpleNamespace(
-        price=price, currency=currency,
-        status="ok", error=None,
     )
 
 

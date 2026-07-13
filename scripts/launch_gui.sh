@@ -5,7 +5,9 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 PYTHON_BIN="${PYTHON_BIN:-$(command -v python3 || true)}"
 WEBVIEW_SCRIPT="${PROJECT_ROOT}/desktop_webview.py"
-LOG_DIR="${PROJECT_ROOT}/logs"
+APP_HOME="${SKYSCANNER_APP_HOME:-${HOME}/Library/Application Support/skyscanner_multi_domain}"
+export SKYSCANNER_APP_HOME="${APP_HOME}"
+LOG_DIR="${APP_HOME}/logs"
 LOG_FILE="${LOG_DIR}/gui_app.log"
 
 show_alert() {

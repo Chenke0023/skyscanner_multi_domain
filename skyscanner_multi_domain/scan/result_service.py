@@ -27,7 +27,7 @@ from skyscanner_multi_domain.scan.output_rows import (
 _PRICE_SOURCE_LABELS: dict[str, str] = {
     "cheapest_block": "Cheapest 区块",
     "best_block": "Best 区块",
-    "first_price_fallback": "首个价格 fallback",
+    "first_price_fallback": "首个价格弱匹配",
     "recovered_best": "恢复解析",
     "manual_confirmed": "人工确认",
     "unpriced": "未取价",
@@ -129,7 +129,7 @@ def _build_decision_risk_hints(
         else:
             hints.append("最低价可信度偏低，建议点开页面复核。")
     if primary_source == "first_price_fallback":
-        hints.append("最低价来自首个价格 fallback，必须人工确认。")
+        hints.append("最低价来自首个价格弱匹配，必须人工确认。")
     if any(str(row.get("execution_policy_mode") or "exact") == "fast" for row, _ in valid_pairs):
         hints.append("Fast Mode 结果不是完整市场全集扫描，不能等同于全量最低价。")
 
@@ -159,7 +159,7 @@ def _build_decision_risk_hints(
         for row, _ in valid_pairs
     )
     if valid_pairs and fallback_only:
-        hints.append("所有有效价格均来自 fallback 解析，作为初筛结果，需人工复核。")
+        hints.append("所有有效价格均来自弱匹配/恢复解析，作为初筛结果，需人工复核。")
     return hints
 
 
@@ -207,16 +207,6 @@ def build_decision_summary(
     candidate_sources = primary_row.get("candidate_sources")
     if isinstance(candidate_sources, list) and candidate_sources:
         lines.append(f"- 候选来源：{', '.join(str(item) for item in candidate_sources)}")
-    fallback_attempts = primary_row.get("fallback_attempts")
-    if isinstance(fallback_attempts, list) and fallback_attempts:
-        chain = " -> ".join(
-            str(item.get("transport") or item.get("status") or "?")
-            for item in fallback_attempts
-            if isinstance(item, dict)
-        )
-        lines.append(f"- Fallback：{chain or '无'}")
-    else:
-        lines.append("- Fallback：无")
     lines.append(f"- 可信度：{confidence_label(primary_row.get('confidence'))}")
     link = primary_row.get("link")
     if isinstance(link, str) and link:
@@ -335,7 +325,6 @@ class ResultService:
                     "price_source": row.get("price_source"),
                     "evidence_text": row.get("evidence_text"),
                     "parser_warnings": row.get("parser_warnings") or [],
-                    "fallback_attempts": row.get("fallback_attempts") or [],
                     "price_candidates_count": row.get("price_candidates_count") or 0,
                     "selected_candidate_rank": row.get("selected_candidate_rank"),
                     "candidate_sources": row.get("candidate_sources") or [],
@@ -444,7 +433,6 @@ class ResultService:
                     "price_source": quote.get("price_source"),
                     "evidence_text": quote.get("evidence_text"),
                     "parser_warnings": quote.get("parser_warnings") or [],
-                    "fallback_attempts": quote.get("fallback_attempts") or [],
                     "price_candidates_count": quote.get("price_candidates_count") or 0,
                     "selected_candidate_rank": quote.get("selected_candidate_rank"),
                     "candidate_sources": quote.get("candidate_sources") or [],

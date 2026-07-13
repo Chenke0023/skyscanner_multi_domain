@@ -89,7 +89,7 @@ def test_build_delta_summary_lines_only_returns_changed_rows() -> None:
     assert lines == ["2026-05-20 | PEK -> ALA | 香港 | 降 ¥50.00"]
 
 
-def test_build_fetch_quality_telemetry_counts_opencli_and_fallback_metrics() -> None:
+def test_build_fetch_quality_telemetry_counts_direct_cdp_metrics() -> None:
     telemetry = build_fetch_quality_telemetry(
         [
             (
@@ -111,9 +111,6 @@ def test_build_fetch_quality_telemetry_counts_opencli_and_fallback_metrics() -> 
                         "price": 900.0,
                         "confidence": 0.45,
                         "status": "ok",
-                        "fallback_attempts": [
-                            {"transport": "opencli_primary", "status": "page_parse_failed"}
-                        ],
                         "tab_open_count": 0,
                         "reused_tab_count": 1,
                         "tab_close_count": 1,
@@ -123,14 +120,14 @@ def test_build_fetch_quality_telemetry_counts_opencli_and_fallback_metrics() -> 
                     {
                         "region": "CN",
                         "price": None,
-                        "status": "opencli_timeout",
+                        "status": "page_timeout",
                         "tab_open_count": 1,
                         "extract_attempt_count": 2,
                         "max_chunk_size_used": 50000,
                     },
                     {"region": "US", "price": None, "status": "px_challenge"},
                     {"region": "GB", "price": None, "status": "page_parse_failed"},
-                    {"region": "JP", "price": None, "status": "opencli_not_attempted"},
+                    {"region": "JP", "price": None, "status": "page_loading"},
                 ],
             )
         ]
@@ -139,8 +136,6 @@ def test_build_fetch_quality_telemetry_counts_opencli_and_fallback_metrics() -> 
     assert telemetry["fetch_total_regions"] == 6
     assert telemetry["fetch_price_found_count"] == 2
     assert telemetry["fetch_price_found_rate"] == 2 / 6
-    assert telemetry["opencli_direct_attempted_count"] == 3
-    assert telemetry["opencli_direct_price_found_count"] == 0
     assert telemetry["fetch_high_confidence_count"] == 1
     assert telemetry["fetch_medium_confidence_count"] == 0
     assert telemetry["fetch_low_confidence_count"] == 1
@@ -148,10 +143,6 @@ def test_build_fetch_quality_telemetry_counts_opencli_and_fallback_metrics() -> 
     assert telemetry["fetch_timeout_count"] == 1
     assert telemetry["fetch_loading_count"] == 1
     assert telemetry["fetch_challenge_count"] == 1
-    assert telemetry["fetch_not_attempted_count"] == 1
-    assert telemetry["fallback_attempted_count"] == 1
-    assert telemetry["fallback_rescued_count"] == 1
-    assert telemetry["fallback_rescue_rate"] == 1.0
     assert telemetry["tab_open_total"] == 2
     assert telemetry["tab_reuse_total"] == 1
     assert telemetry["tab_close_total"] == 1
@@ -211,7 +202,7 @@ def test_scan_history_store_round_trip(tmp_path: Path) -> None:
     assert get_failed_region_codes(latest.quotes_by_date) == []
 
 
-def test_annotate_rows_marks_cdp_reuse_failures_as_reusable() -> None:
+def test_annotate_rows_marks_page_failures_as_reusable() -> None:
     annotated = annotate_rows_with_history(
         [
             (
@@ -221,7 +212,7 @@ def test_annotate_rows_marks_cdp_reuse_failures_as_reusable() -> None:
                         "region_code": "HK",
                         "region_name": "香港",
                         "route": "PEK -> ALA",
-                        "source_kind": "cdp_reuse",
+                        "source_kind": "page",
                         "status": "page_loading",
                         "error": "still loading",
                     }
@@ -346,3 +337,36 @@ def test_toggle_favorite_removes_alert_config(tmp_path: Path) -> None:
 
     assert store.toggle_favorite(query_payload) is False
     assert store.get_alert_config(query_payload) is None
+
+
+def test_scan_history_maps_retired_status_to_unknown_failure(tmp_path: Path) -> None:
+    store = ScanHistoryStore(tmp_path / "legacy_history.sqlite3")
+    query_payload = {
+        "identity": {
+            "origin_code": "PEK",
+            "destination_code": "ALA",
+            "date": "2026-05-20",
+        }
+    }
+    original_status = "opencli_timeout"
+    rows_by_date = [
+        (
+            "2026-05-20",
+            [
+                {
+                    "region_code": "HK",
+                    "status": original_status,
+                    "error": "原始历史展示文本",
+                }
+            ],
+        )
+    ]
+
+    store.record_scan(query_payload, rows_by_date, rows_by_date, scan_mode="full_scan")
+
+    latest = store.get_latest_scan(query_payload)
+    assert latest is not None
+    row = latest.rows_by_date[0][1][0]
+    assert row["status"] == "unknown_failure"
+    assert row["legacy_status"] == original_status
+    assert row["error"] == "原始历史展示文本"

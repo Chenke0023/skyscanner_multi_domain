@@ -11,11 +11,13 @@ VERSION_FILE = PROJECT_ROOT / "data" / "version.txt"
 PYPROJECT_FILE = PROJECT_ROOT / "pyproject.toml"
 README_FILE = PROJECT_ROOT / "README.md"
 CHANGELOG_FILE = PROJECT_ROOT / "CHANGELOG.md"
+GITIGNORE_FILE = PROJECT_ROOT / ".gitignore"
 WEBUI_PACKAGE_FILE = PROJECT_ROOT / "webui" / "package.json"
 WEBUI_DIST_INDEX = PROJECT_ROOT / "webui" / "dist" / "index.html"
 WEBUI_SOURCE_DIR = PROJECT_ROOT / "webui" / "src"
 BUILD_SCRIPT = PROJECT_ROOT / "scripts" / "build_macos_standalone_app.sh"
 SOURCE_APP_SCRIPT = PROJECT_ROOT / "scripts" / "build_macos_app.sh"
+LAUNCH_GUI_SCRIPT = PROJECT_ROOT / "scripts" / "launch_gui.sh"
 CI_WORKFLOW_FILE = PROJECT_ROOT / ".github" / "workflows" / "ci.yml"
 LEGACY_TK_ENTRYPOINTS = (
     PROJECT_ROOT / "gui.py",
@@ -25,6 +27,23 @@ LEGACY_TK_ENTRYPOINTS = (
 )
 REMOVED_PACKAGE_LEGACY_NAMESPACES = (
     PROJECT_ROOT / "skyscanner_multi_domain" / "legacy",
+)
+REMOVED_FEATURE_PATHS = tuple(
+    PROJECT_ROOT / path
+    for path in (
+        "captcha_solver.py",
+        "failure_replay.py",
+        "skyscanner_multi_domain/neo.py",
+        "skyscanner_multi_domain/diagnostics/snapshots.py",
+        "skyscanner_multi_domain/parsing/readiness.py",
+        "skyscanner_multi_domain/scan/fallback_router.py",
+        "skyscanner_multi_domain/scan/url_builder.py",
+        "skyscanner_multi_domain/transports/google_jump.py",
+        "skyscanner_multi_domain/transports/opencli.py",
+        "skyscanner_multi_domain/transports/scrapling.py",
+        "vendor/neo",
+        "vendor/ohmycaptcha",
+    )
 )
 REMOVED_FLAT_ROOT_SHIMS = tuple(
     PROJECT_ROOT / f"{name}.py"
@@ -65,6 +84,55 @@ CI_GATE_NEEDLES = (
     "npm run build",
     "python scripts/release_smoke.py",
     "python -m pytest -q",
+)
+BUILD_SIZE_GUARD_NEEDLES = (
+    "APP_SIZE_LIMIT=$((150 * 1024 * 1024))",
+    "ZIP_SIZE_LIMIT=$((60 * 1024 * 1024))",
+    "print_largest_components",
+    "FORBIDDEN_PATTERN=",
+    'find "${DIST_DIR}" -maxdepth 1 -type f -name "*.zip" -delete',
+    'rm -rf "${DIST_DIR}/${APP_NAME}"',
+    '"${DIST_DIR}/${APP_NAME}-Standalone"',
+    'RELEASE_ZIP="${DIST_DIR}/skyscanner-multi-domain-v${VERSION}-macos-arm64.zip"',
+    '/usr/bin/ditto -c -k --keepParent "${APP_BUNDLE}" "${RELEASE_ZIP}"',
+    'rm -rf "${PROJECT_ROOT}/build/${APP_NAME}"',
+    '"${PROJECT_ROOT}/build/${APP_NAME}-Standalone"',
+)
+BUILD_RUNTIME_SMOKE_NEEDLES = (
+    "SKYSCANNER_GUI_SMOKE_TEST=1",
+    'SKYSCANNER_APP_HOME="${SMOKE_HOME}"',
+    'chmod 555 "${SMOKE_READONLY}"',
+    '"${SMOKE_OUTPUT}" != *"smoke-ok"*',
+    '"${SMOKE_HOME}/traces"',
+    '"${SMOKE_READONLY}/traces"',
+)
+DESKTOP_RUNTIME_GUARD_NEEDLES = (
+    "_run_desktop_smoke_test",
+    "browser-unavailable: no launchable browser",
+    "browser-unavailable error was not normalized",
+)
+SOURCE_LINKED_RUNTIME_NEEDLES = (
+    'APP_HOME="${SKYSCANNER_APP_HOME:-${HOME}/Library/Application Support/skyscanner_multi_domain}"',
+    'export SKYSCANNER_APP_HOME="${APP_HOME}"',
+    'LOG_DIR="${APP_HOME}/logs"',
+)
+CLI_RUNTIME_GUARD_NEEDLES = (
+    "get_traces_dir",
+    'trace_dir_arg = getattr(args, "trace_dir", None)',
+    "str(get_traces_dir())",
+    'default=None,\n        help="Trace JSONL 输出目录 (默认运行时 traces 目录)"',
+    'failure_log_dir=getattr(args, "failure_log_dir", None) or None',
+    'help="Failure log 输出目录 (默认运行时 logs/failures)"',
+)
+GENERATED_IGNORE_NEEDLES = (
+    ".mypy_cache/",
+    ".pytest_cache/",
+    "build/",
+    "dist/",
+    "/runtime/",
+    "webui/node_modules/",
+    "webui/dist/",
+    "webui/.mypy_cache/",
 )
 WEBUI_STYLE_FORBIDDEN_PATTERNS = (
     ("handwritten SVG", re.compile(r"<svg\b")),
@@ -134,6 +202,12 @@ def run_release_smoke(*, require_webui_dist: bool = True) -> list[str]:
         raise RuntimeError(f"{README_FILE} must not document the removed legacy Tk fallback")
     checks.append("README install path")
 
+    gitignore = GITIGNORE_FILE.read_text(encoding="utf-8")
+    for needle in GENERATED_IGNORE_NEEDLES:
+        if needle not in gitignore:
+            raise RuntimeError(f"{GITIGNORE_FILE} must ignore generated growth path: {needle}")
+    checks.append("generated file ignore rules")
+
     existing_legacy = [path for path in LEGACY_TK_ENTRYPOINTS if path.exists()]
     if existing_legacy:
         raise RuntimeError(f"Legacy Tk entrypoints must stay removed: {existing_legacy}")
@@ -156,6 +230,11 @@ def run_release_smoke(*, require_webui_dist: bool = True) -> list[str]:
         raise RuntimeError(f"Package legacy namespaces must stay removed: {existing_package_legacy}")
     checks.append("package legacy namespace removed")
 
+    existing_retired = [path for path in REMOVED_FEATURE_PATHS if path.exists()]
+    if existing_retired:
+        raise RuntimeError(f"Retired feature paths must stay removed: {existing_retired}")
+    checks.append("retired feature paths removed")
+
     build_script = BUILD_SCRIPT.read_text(encoding="utf-8")
     for needle in ('VERSION_FILE="${PROJECT_ROOT}/data/version.txt"', "CFBundleShortVersionString", "CFBundleVersion"):
         if needle not in build_script:
@@ -169,11 +248,41 @@ def run_release_smoke(*, require_webui_dist: bool = True) -> list[str]:
     for needle in (
         "desktop_webview.py",
         '--add-data "webui/dist:webui/dist"',
-        "--collect-submodules skyscanner_multi_domain",
+        "--hidden-import webview.platforms.cocoa",
     ):
         if needle not in build_script:
             raise RuntimeError(f"{BUILD_SCRIPT} is missing required PyInstaller entry/data: {needle}")
-    checks.append("PyInstaller build data")
+    if "--collect-submodules skyscanner_multi_domain" in build_script:
+        raise RuntimeError(f"{BUILD_SCRIPT} must not collect the whole application package")
+    checks.append("minimal PyInstaller module set")
+
+    for needle in BUILD_SIZE_GUARD_NEEDLES:
+        if needle not in build_script:
+            raise RuntimeError(f"{BUILD_SCRIPT} is missing generated-size guardrail: {needle}")
+    checks.append("release artifact size guardrails")
+
+    for needle in BUILD_RUNTIME_SMOKE_NEEDLES:
+        if needle not in build_script:
+            raise RuntimeError(f"{BUILD_SCRIPT} is missing packaged runtime smoke guardrail: {needle}")
+    checks.append("packaged runtime smoke guardrails")
+
+    desktop_webview = (PROJECT_ROOT / "desktop_webview.py").read_text(encoding="utf-8")
+    for needle in DESKTOP_RUNTIME_GUARD_NEEDLES:
+        if needle not in desktop_webview:
+            raise RuntimeError(f"desktop_webview.py is missing runtime smoke guardrail: {needle}")
+    checks.append("desktop runtime smoke guardrails")
+
+    launch_gui = LAUNCH_GUI_SCRIPT.read_text(encoding="utf-8")
+    for needle in SOURCE_LINKED_RUNTIME_NEEDLES:
+        if needle not in launch_gui:
+            raise RuntimeError(f"{LAUNCH_GUI_SCRIPT} is missing source-linked runtime guardrail: {needle}")
+    checks.append("source-linked runtime guardrails")
+
+    cli_source = (PROJECT_ROOT / "cli.py").read_text(encoding="utf-8")
+    for needle in CLI_RUNTIME_GUARD_NEEDLES:
+        if needle not in cli_source:
+            raise RuntimeError(f"cli.py is missing runtime path guardrail: {needle}")
+    checks.append("CLI runtime path guardrails")
 
     ci_workflow = CI_WORKFLOW_FILE.read_text(encoding="utf-8")
     for needle in CI_GATE_NEEDLES:

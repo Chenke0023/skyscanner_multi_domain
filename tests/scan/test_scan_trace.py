@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
 
+from skyscanner_multi_domain.scan.config import ScanConfig
+from skyscanner_multi_domain.scan import orchestrator
 from skyscanner_multi_domain.scan.trace import (
     ScanTraceContext,
     ScanTraceEvent,
@@ -30,7 +34,7 @@ def _fake_quote(**overrides):
         price=None,
         currency="SGD",
         source_url="https://www.skyscanner.com.sg/test",
-        status="opencli_error",
+        status="page_parse_failed",
         confidence=0.0,
         rankable=False,
         result_visibility=None,
@@ -43,10 +47,9 @@ def _fake_quote(**overrides):
 
 def _fake_plan(**overrides):
     defaults = dict(
-        action=AttemptAction.FALLBACK_CDP,
+        action=AttemptAction.TERMINAL,
         failure_class="network",
-        reason="Network timeout — fallback to CDP",
-        transports_remaining=["cdp", "scrapling"],
+        reason="Direct CDP attempt failed",
         confidence=0.0,
         manual_review_required=False,
         max_attempts=2,
@@ -66,6 +69,67 @@ def _make_trace_ctx(writer):
     )
 
 
+def test_run_page_scan_without_config_uses_runtime_trace_dir_when_cwd_is_read_only(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    runtime_traces = tmp_path / "app-home" / "traces"
+    readonly_cwd = tmp_path / "readonly-cwd"
+    readonly_cwd.mkdir()
+    readonly_cwd.chmod(0o555)
+    previous_cwd = Path.cwd()
+    monkeypatch.setattr(orchestrator, "get_traces_dir", lambda: runtime_traces)
+
+    try:
+        os.chdir(readonly_cwd)
+        quotes = asyncio.run(
+            orchestrator.run_page_scan(
+                origin="BJSA",
+                destination="ALA",
+                date="2026-05-20",
+                region_codes=[],
+            )
+        )
+    finally:
+        os.chdir(previous_cwd)
+        readonly_cwd.chmod(0o755)
+
+    assert quotes == []
+    assert not runtime_traces.exists()
+    assert not (readonly_cwd / "traces").exists()
+
+
+def test_run_page_scan_default_config_uses_runtime_trace_dir_when_cwd_is_read_only(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    runtime_traces = tmp_path / "app-home" / "traces"
+    readonly_cwd = tmp_path / "readonly-cwd"
+    readonly_cwd.mkdir()
+    readonly_cwd.chmod(0o555)
+    previous_cwd = Path.cwd()
+    monkeypatch.setattr(orchestrator, "get_traces_dir", lambda: runtime_traces)
+
+    try:
+        os.chdir(readonly_cwd)
+        quotes = asyncio.run(
+            orchestrator.run_page_scan(
+                origin="BJSA",
+                destination="ALA",
+                date="2026-05-20",
+                region_codes=[],
+                config=ScanConfig(),
+            )
+        )
+    finally:
+        os.chdir(previous_cwd)
+        readonly_cwd.chmod(0o755)
+
+    assert quotes == []
+    assert not runtime_traces.exists()
+    assert not (readonly_cwd / "traces").exists()
+
+
 # ── ScanTraceEvent ────────────────────────────────────────────────────────────
 
 
@@ -80,9 +144,9 @@ class ScanTraceEventTests(unittest.TestCase):
             region="SG",
             domain="https://www.skyscanner.com.sg",
             attempt_index=1,
-            transport="opencli",
-            status="opencli_error",
-            action="fallback_cdp",
+            transport="page",
+            status="page_parse_failed",
+            action="terminal",
             failure_class="network",
             reason="timeout",
             price=None,
@@ -103,9 +167,9 @@ class ScanTraceEventTests(unittest.TestCase):
         assert d["scan_id"] == "abc123"
         assert d["route_id"] == "BJS-ALA-20260610"
         assert d["region"] == "SG"
-        assert d["transport"] == "opencli"
+        assert d["transport"] == "page"
         assert d["attempt_index"] == 1
-        assert d["action"] == "fallback_cdp"
+        assert d["action"] == "terminal"
         assert d["failure_class"] == "network"
         assert d["elapsed_ms"] == 18021
         assert d["phase"] == "wait_interactive"
@@ -124,7 +188,7 @@ class ScanTraceEventTests(unittest.TestCase):
             region="CN",
             domain=None,
             attempt_index=0,
-            transport="opencli",
+            transport="page",
             status="ok",
             action="accept",
         )
@@ -145,7 +209,7 @@ class ScanTraceEventTests(unittest.TestCase):
             region="CN",
             domain="https://example.com",
             attempt_index=0,
-            transport="opencli",
+            transport="page",
             status="ok",
             action="accept",
             metadata={"nested": {"key": "value"}},
@@ -167,7 +231,7 @@ class ScanTraceWriterTests(unittest.TestCase):
             event = ScanTraceEvent(
                 scan_id="s1", route_id="r1", origin="A", destination="B",
                 depart_date="2026-01-01", region="CN", domain="example.com",
-                attempt_index=0, transport="opencli", status="ok", action="accept",
+                attempt_index=0, transport="page", status="ok", action="accept",
             )
             writer.write(event)
             writer.flush()
@@ -186,7 +250,7 @@ class ScanTraceWriterTests(unittest.TestCase):
                 writer.write(ScanTraceEvent(
                     scan_id="s1", route_id="r1", origin="A", destination="B",
                     depart_date="2026-01-01", region="CN", domain="x.com",
-                    attempt_index=i, transport="opencli", status="ok", action="accept",
+                    attempt_index=i, transport="page", status="ok", action="accept",
                 ))
 
             # Should have auto-flushed at 50 lines
@@ -202,7 +266,7 @@ class ScanTraceWriterTests(unittest.TestCase):
                 writer.write(ScanTraceEvent(
                     scan_id="s1", route_id="r1", origin="A", destination="B",
                     depart_date="2026-01-01", region="CN", domain="x.com",
-                    attempt_index=i, transport="opencli", status="ok", action="accept",
+                    attempt_index=i, transport="page", status="ok", action="accept",
                 ))
             writer.flush()
 
@@ -216,7 +280,7 @@ class ScanTraceWriterTests(unittest.TestCase):
         event = ScanTraceEvent(
             scan_id="s1", route_id="r1", origin="A", destination="B",
             depart_date="2026-01-01", region="CN", domain="x.com",
-            attempt_index=0, transport="opencli", status="ok", action="accept",
+            attempt_index=0, transport="page", status="ok", action="accept",
         )
         writer.write(event)  # should not raise
         writer.flush()       # should not raise
@@ -228,7 +292,7 @@ class ScanTraceWriterTests(unittest.TestCase):
             writer.write(ScanTraceEvent(
                 scan_id="s1", route_id="r1", origin="A", destination="B",
                 depart_date="2026-01-01", region="CN", domain="x.com",
-                attempt_index=0, transport="opencli", status="ok", action="accept",
+                attempt_index=0, transport="page", status="ok", action="accept",
             ))
             writer.flush()
             assert path.exists()
@@ -251,8 +315,8 @@ class EmitAttemptTraceTests(unittest.TestCase):
             writer = ScanTraceWriter(path)
             ctx = _make_trace_ctx(writer)
 
-            quote = _fake_quote(region="SG", status="opencli_error", price=None)
-            plan = _fake_plan(action=AttemptAction.FALLBACK_CDP, failure_class="network")
+            quote = _fake_quote(region="SG", status="page_parse_failed", price=None)
+            plan = _fake_plan(action=AttemptAction.TERMINAL, failure_class="network")
 
             emit_attempt_trace(
                 trace_ctx=ctx,
@@ -260,7 +324,7 @@ class EmitAttemptTraceTests(unittest.TestCase):
                 plan=plan,
                 region="SG",
                 domain="https://www.skyscanner.com.sg",
-                transport="opencli",
+                transport="page",
                 attempt_index=1,
             )
             writer.flush()
@@ -269,9 +333,9 @@ class EmitAttemptTraceTests(unittest.TestCase):
             assert len(lines) == 1
             record = json.loads(lines[0])
             assert record["region"] == "SG"
-            assert record["transport"] == "opencli"
+            assert record["transport"] == "page"
             assert record["attempt_index"] == 1
-            assert record["action"] == "fallback_cdp"
+            assert record["action"] == "terminal"
             assert record["failure_class"] == "network"
             assert record["elapsed_ms"] == 18021
             assert record["phase"] == "wait_interactive"
@@ -287,7 +351,7 @@ class EmitAttemptTraceTests(unittest.TestCase):
             plan=plan,
             region="SG",
             domain="x.com",
-            transport="opencli",
+            transport="page",
             attempt_index=1,
         )
 
@@ -302,7 +366,7 @@ class EmitAttemptTraceTests(unittest.TestCase):
 
             emit_attempt_trace(
                 trace_ctx=ctx, quote=quote, plan=plan,
-                region="CN", domain="x.com", transport="opencli", attempt_index=0,
+                region="CN", domain="x.com", transport="page", attempt_index=0,
             )
             writer.flush()
 
@@ -316,35 +380,31 @@ class EmitAttemptTraceTests(unittest.TestCase):
 
 class AppendAttemptHistoryTests(unittest.TestCase):
     def test_appends_to_empty_history(self) -> None:
-        quote = _fake_quote(region="SG", status="opencli_error", confidence=0.0)
-        plan = _fake_plan(action=AttemptAction.FALLBACK_CDP, failure_class="network")
+        quote = _fake_quote(region="SG", status="page_parse_failed", confidence=0.0)
+        plan = _fake_plan(action=AttemptAction.TERMINAL, failure_class="network")
 
-        append_attempt_history(quote, transport="opencli", attempt_index=1, plan=plan)
+        append_attempt_history(quote, transport="page", attempt_index=1, plan=plan)
 
         assert len(quote.attempt_history) == 1
         entry = quote.attempt_history[0]
         assert entry["attempt_index"] == 1
-        assert entry["transport"] == "opencli"
-        assert entry["status"] == "opencli_error"
-        assert entry["action"] == "fallback_cdp"
+        assert entry["transport"] == "page"
+        assert entry["status"] == "page_parse_failed"
+        assert entry["action"] == "terminal"
         assert entry["failure_class"] == "network"
         assert entry["elapsed_ms"] == 18021
         assert entry["phase"] == "wait_interactive"
 
     def test_appends_multiple_attempts(self) -> None:
         quote = _fake_quote(region="SG", status="ok", price=410.0, confidence=0.88)
-        plan1 = _fake_plan(action=AttemptAction.FALLBACK_CDP)
-        plan2 = _fake_plan(action=AttemptAction.FALLBACK_SCRAPLING)
-        plan3 = _fake_plan(action=AttemptAction.ACCEPT)
+        plan1 = _fake_plan(action=AttemptAction.TERMINAL)
+        plan2 = _fake_plan(action=AttemptAction.ACCEPT)
 
-        append_attempt_history(quote, transport="opencli", attempt_index=1, plan=plan1)
-        append_attempt_history(quote, transport="cdp", attempt_index=2, plan=plan2)
-        append_attempt_history(quote, transport="scrapling", attempt_index=3, plan=plan3)
+        append_attempt_history(quote, transport="page", attempt_index=1, plan=plan1)
+        append_attempt_history(quote, transport="page", attempt_index=2, plan=plan2)
 
-        assert len(quote.attempt_history) == 3
-        assert quote.attempt_history[0]["transport"] == "opencli"
-        assert quote.attempt_history[1]["transport"] == "cdp"
-        assert quote.attempt_history[2]["transport"] == "scrapling"
+        assert len(quote.attempt_history) == 2
+        assert {entry["transport"] for entry in quote.attempt_history} == {"page"}
 
 
 # ── merge_attempt_history ─────────────────────────────────────────────────────
@@ -354,7 +414,7 @@ class MergeAttemptHistoryTests(unittest.TestCase):
     def test_merge_prepends_source_history(self) -> None:
         source = _fake_quote(region="SG")
         source.attempt_history = [
-            {"attempt_index": 1, "transport": "opencli", "action": "fallback_cdp"},
+            {"attempt_index": 1, "transport": "page", "action": "terminal"},
         ]
         target = _fake_quote(region="SG", price=410.0, status="ok")
         target.attempt_history = [
@@ -364,7 +424,7 @@ class MergeAttemptHistoryTests(unittest.TestCase):
         merge_attempt_history(source, target)
 
         assert len(target.attempt_history) == 2
-        assert target.attempt_history[0]["transport"] == "opencli"
+        assert target.attempt_history[0]["transport"] == "page"
         assert target.attempt_history[1]["transport"] == "cdp"
 
     def test_merge_with_empty_source(self) -> None:
@@ -378,7 +438,7 @@ class MergeAttemptHistoryTests(unittest.TestCase):
 
     def test_merge_with_empty_target(self) -> None:
         source = _fake_quote()
-        source.attempt_history = [{"attempt_index": 1, "transport": "opencli", "action": "fallback_cdp"}]
+        source.attempt_history = [{"attempt_index": 1, "transport": "page", "action": "terminal"}]
         target = _fake_quote()
 
         merge_attempt_history(source, target)

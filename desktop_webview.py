@@ -203,10 +203,21 @@ def _error_page_uri(title: str, body: str, detail: str = "") -> str:
     return f"data:text/html;charset=utf-8,{quote(html)}"
 
 
+def _run_desktop_smoke_test() -> None:
+    DesktopUIService()
+    from desktop_ui_service import _normalize_desktop_error_message
+
+    normalized = _normalize_desktop_error_message(
+        RuntimeError("browser-unavailable: no launchable browser")
+    )
+    if "browser-unavailable" not in normalized:
+        raise RuntimeError("browser-unavailable error was not normalized")
+    print("smoke-ok")
+
+
 def main() -> None:
     if os.environ.get("SKYSCANNER_GUI_SMOKE_TEST") == "1":
-        DesktopUIService()
-        print("smoke-ok")
+        _run_desktop_smoke_test()
         return
 
     frontend_index = _frontend_index_path()

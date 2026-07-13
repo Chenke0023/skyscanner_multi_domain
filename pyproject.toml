@@ -38,12 +38,10 @@ files = [
     "skyscanner_multi_domain",
     "tools",
     "scripts",
-    "captcha_solver.py",
     "cli.py",
     "desktop_logic.py",
     "desktop_ui_service.py",
     "desktop_webview.py",
-    "failure_replay.py",
 ]
 exclude = [
     "vendor/",

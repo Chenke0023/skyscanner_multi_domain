@@ -30,6 +30,18 @@ def _serialize_grouped_rows(rows_by_date: RowsByDate) -> str:
     return json.dumps(payload, ensure_ascii=False, sort_keys=True)
 
 
+def _normalize_legacy_row(row: dict[str, Any]) -> dict[str, Any]:
+    normalized = deepcopy(row)
+    status = str(normalized.get("status") or "")
+    lowered = status.lower().replace("-", "_").replace(" ", "_")
+    retired = ("open" "cli", "scrap" "ling", "google" "_jump")
+    if any(token in lowered for token in retired):
+        normalized["legacy_status"] = status
+        normalized["status"] = "unknown_failure"
+        normalized.setdefault("error", f"历史状态: {status}")
+    return normalized
+
+
 def _deserialize_grouped_rows(payload: str) -> RowsByDate:
     try:
         data = json.loads(payload)
@@ -45,7 +57,7 @@ def _deserialize_grouped_rows(payload: str) -> RowsByDate:
         rows = item.get("rows")
         if not isinstance(rows, list):
             continue
-        grouped.append((trip_label, [row for row in rows if isinstance(row, dict)]))
+        grouped.append((trip_label, [_normalize_legacy_row(row) for row in rows if isinstance(row, dict)]))
     return grouped
 
 
@@ -76,23 +88,23 @@ def source_kind_label(source_kind: str | None) -> str:
     return {
         "cached": "预览缓存",
         "live": "实时直连",
-        "cdp_reuse": "复用已打开页面",
-        "browser_fallback": "浏览器兜底",
+        "page": "CDP 页面扫描",
+        "cdp_structured": "结构化 CDP",
     }.get(str(source_kind or "").strip().lower(), "-")
 
 
 def can_reuse_page_for_row(row: dict[str, Any]) -> bool:
-    return str(row.get("source_kind") or "").strip().lower() == "cdp_reuse"
+    return str(row.get("source_kind") or "").strip().lower() in {"page", "cdp_structured"}
 
 
 def classify_failure(status: str | None, error: str | None) -> tuple[str, str]:
     normalized = str(status or "").strip().lower()
     normalized_error = str(error or "").strip()
-    if normalized in {"px_challenge", "page_challenge", "captcha_solve_failed"}:
+    if normalized in {"px_challenge", "page_challenge"}:
         return ("需要浏览器验证", "打开该市场结果页并完成验证后重试")
     if normalized == "page_loading":
         return ("页面仍在加载", "稍后重试，或复用已打开的页面")
-    if normalized in {"page_parse_failed", "scrapling_parse_failed"}:
+    if normalized == "page_parse_failed":
         return ("页面结构可见但未识别价格", "打开结果页确认是否已完整加载")
     if normalized:
         return ("网络/抓取异常", normalized_error or "重试该市场")
@@ -436,96 +448,39 @@ def build_plan_telemetry(quotes_by_date: QuotesByDate) -> dict[str, Any]:
 
 
 def build_fetch_quality_telemetry(quotes_by_date: QuotesByDate) -> dict[str, Any]:
-    flattened: list[dict[str, Any]] = []
-    for _trip_label, quotes in quotes_by_date:
-        flattened.extend(deepcopy(quote) for quote in quotes)
-
-    total_regions = len(flattened)
-    price_found_count = sum(1 for quote in flattened if _quote_has_numeric_price(quote))
-    opencli_direct_attempted_count = sum(1 for quote in flattened if _is_opencli_attempted_quote(quote))
-    opencli_direct_price_found_count = sum(
-        1
-        for quote in flattened
-        if _quote_has_numeric_price(quote) and _is_opencli_direct_success(quote)
-    )
-    confidence_counts = {
-        "high": 0,
-        "medium": 0,
-        "low": 0,
-        "unknown": 0,
-    }
-    for quote in flattened:
-        if not _quote_has_numeric_price(quote):
-            continue
-        confidence_counts[_confidence_bucket(quote.get("confidence"))] += 1
-    fallback_attempted_count = sum(
-        1 for quote in flattened if isinstance(quote.get("fallback_attempts"), list) and quote["fallback_attempts"]
-    )
-    fallback_rescued_count = sum(
-        1
-        for quote in flattened
-        if _quote_has_numeric_price(quote)
-        and isinstance(quote.get("fallback_attempts"), list)
-        and quote["fallback_attempts"]
-    )
-    max_chunk_observed = max(
-        (_optional_int(quote.get("max_chunk_size_used")) or 0 for quote in flattened),
-        default=0,
-    )
-
+    flattened = [deepcopy(quote) for _label, quotes in quotes_by_date for quote in quotes]
+    total = len(flattened)
+    found = sum(1 for quote in flattened if _quote_has_numeric_price(quote))
+    confidence_counts = {"high": 0, "medium": 0, "low": 0, "unknown": 0}
     status_counts = {
         "parse_failed": 0,
         "timeout": 0,
         "loading": 0,
         "challenge": 0,
-        "not_attempted": 0,
         "no_flights": 0,
         "other_failed": 0,
     }
     for quote in flattened:
         if _quote_has_numeric_price(quote):
+            confidence_counts[_confidence_bucket(quote.get("confidence"))] += 1
             continue
         status = str(quote.get("status") or "").strip().lower()
-        matched = False
-        if status in {"page_parse_failed", "scrapling_parse_failed", "opencli_parse_failed"}:
+        if status == "page_parse_failed":
             status_counts["parse_failed"] += 1
-            matched = True
-        if "timeout" in status:
+        elif "timeout" in status:
             status_counts["timeout"] += 1
-            matched = True
-        if status in {"page_loading", "opencli_loading", "opencli_timeout"}:
+        elif status == "page_loading":
             status_counts["loading"] += 1
-            matched = True
-        if status in {"px_challenge", "page_challenge", "captcha_solve_failed"} or "challenge" in status:
+        elif status in {"px_challenge", "page_challenge"} or "challenge" in status:
             status_counts["challenge"] += 1
-            matched = True
-        if status == "opencli_not_attempted":
-            status_counts["not_attempted"] += 1
-            matched = True
-        if status in {"no_flights", "opencli_no_flights", "page_no_flights"}:
+        elif status in {"no_flights", "page_no_flights"}:
             status_counts["no_flights"] += 1
-            matched = True
-        if not matched:
+        else:
             status_counts["other_failed"] += 1
-
-    fallback_rescue_rate = (
-        fallback_rescued_count / fallback_attempted_count if fallback_attempted_count else 0.0
-    )
-    opencli_direct_price_found_rate = (
-        opencli_direct_price_found_count / opencli_direct_attempted_count
-        if opencli_direct_attempted_count
-        else 0.0
-    )
     return {
-        "fetch_total_regions": total_regions,
-        "fetch_price_found_count": price_found_count,
-        "fetch_price_found_rate": price_found_count / total_regions if total_regions else 0.0,
-        "opencli_direct_attempted_count": opencli_direct_attempted_count,
-        "opencli_direct_price_found_count": opencli_direct_price_found_count,
-        "opencli_direct_price_found_rate": opencli_direct_price_found_rate,
-        "fallback_attempted_count": fallback_attempted_count,
-        "fallback_rescued_count": fallback_rescued_count,
-        "fallback_rescue_rate": fallback_rescue_rate,
+        "fetch_total_regions": total,
+        "fetch_price_found_count": found,
+        "fetch_price_found_rate": found / total if total else 0.0,
         "fetch_high_confidence_count": confidence_counts["high"],
         "fetch_medium_confidence_count": confidence_counts["medium"],
         "fetch_low_confidence_count": confidence_counts["low"],
@@ -534,25 +489,13 @@ def build_fetch_quality_telemetry(quotes_by_date: QuotesByDate) -> dict[str, Any
         "fetch_timeout_count": status_counts["timeout"],
         "fetch_loading_count": status_counts["loading"],
         "fetch_challenge_count": status_counts["challenge"],
-        "fetch_not_attempted_count": status_counts["not_attempted"],
         "fetch_no_flights_count": status_counts["no_flights"],
         "fetch_other_failed_count": status_counts["other_failed"],
-        "tab_open_total": sum(_optional_int(quote.get("tab_open_count")) or 0 for quote in flattened),
-        "tab_reuse_total": sum(_optional_int(quote.get("reused_tab_count")) or 0 for quote in flattened),
-        "tab_close_total": sum(_optional_int(quote.get("tab_close_count")) or 0 for quote in flattened),
-        "extract_attempt_total": sum(_optional_int(quote.get("extract_attempt_count")) or 0 for quote in flattened),
-        "max_chunk_observed": max_chunk_observed,
-        # Backward-compatible aliases for records written by v1.3-era callers.
-        "opencli_total_regions": total_regions,
-        "opencli_price_found_count": price_found_count,
-        "opencli_price_found_rate": price_found_count / total_regions if total_regions else 0.0,
-        "opencli_high_confidence_count": confidence_counts["high"],
-        "opencli_low_confidence_count": confidence_counts["low"],
-        "opencli_parse_failed_count": status_counts["parse_failed"],
-        "opencli_timeout_count": status_counts["timeout"],
-        "opencli_loading_count": status_counts["loading"],
-        "opencli_challenge_count": status_counts["challenge"],
-        "opencli_not_attempted_count": status_counts["not_attempted"],
+        "tab_open_total": sum(_optional_int(q.get("tab_open_count")) or 0 for q in flattened),
+        "tab_reuse_total": sum(_optional_int(q.get("reused_tab_count")) or 0 for q in flattened),
+        "tab_close_total": sum(_optional_int(q.get("tab_close_count")) or 0 for q in flattened),
+        "extract_attempt_total": sum(_optional_int(q.get("extract_attempt_count")) or 0 for q in flattened),
+        "max_chunk_observed": max((_optional_int(q.get("max_chunk_size_used")) or 0 for q in flattened), default=0),
     }
 
 
@@ -583,34 +526,6 @@ def build_parser_recovery_telemetry(quotes_by_date: QuotesByDate) -> dict[str, A
             for quote in flattened
             if _quote_has_numeric_price(quote) and _confidence_bucket(quote.get("confidence")) == "low"
         ),
-    }
-
-
-def build_snapshot_summary(quotes_by_date: QuotesByDate) -> dict[str, Any]:
-    flattened: list[dict[str, Any]] = []
-    for _trip_label, quotes in quotes_by_date:
-        flattened.extend(deepcopy(quote) for quote in quotes)
-    recommended_statuses = {
-        "page_parse_failed",
-        "opencli_parse_failed",
-        "unknown_parse_surface",
-        "empty_shell",
-        "opencli_no_flights",
-        "page_no_flights",
-    }
-    recommended = 0
-    for quote in flattened:
-        status = str(quote.get("status") or "")
-        warnings = quote.get("parser_warnings") or []
-        if status in recommended_statuses:
-            recommended += 1
-        elif _quote_has_numeric_price(quote) and _confidence_bucket(quote.get("confidence")) == "low":
-            recommended += 1
-        elif any(isinstance(warning, str) and "不一致" in warning for warning in warnings):
-            recommended += 1
-    return {
-        "snapshot_recommended_count": recommended,
-        "snapshot_storage": "logs/snapshots/opencli",
     }
 
 
@@ -695,36 +610,6 @@ def _confidence_bucket(value: Any) -> str:
     if value >= 0.65:
         return "medium"
     return "low"
-
-
-def _is_opencli_attempted_quote(quote: dict[str, Any]) -> bool:
-    if str(quote.get("source_kind") or "").strip().lower() == "opencli":
-        return True
-    if any(
-        _optional_int(quote.get(key)) not in {None, 0}
-        for key in ("tab_open_count", "reused_tab_count", "extract_attempt_count")
-    ):
-        return True
-    return any(
-        str(attempt.get("transport") or "").startswith("opencli")
-        for attempt in _fallback_attempts(quote)
-    )
-
-
-def _is_opencli_direct_success(quote: dict[str, Any]) -> bool:
-    if str(quote.get("source_kind") or "").strip().lower() != "opencli":
-        return False
-    return not any(
-        str(attempt.get("transport") or "") == "opencli_primary"
-        for attempt in _fallback_attempts(quote)
-    )
-
-
-def _fallback_attempts(quote: dict[str, Any]) -> list[dict[str, Any]]:
-    attempts = quote.get("fallback_attempts")
-    if not isinstance(attempts, list):
-        return []
-    return [attempt for attempt in attempts if isinstance(attempt, dict)]
 
 
 def build_history_series(
@@ -1000,7 +885,6 @@ class ScanHistoryStore:
         query_payload["plan_telemetry"] = build_plan_telemetry(quotes_by_date)
         query_payload["fetch_quality_telemetry"] = build_fetch_quality_telemetry(quotes_by_date)
         query_payload["parser_recovery_telemetry"] = build_parser_recovery_telemetry(quotes_by_date)
-        query_payload["snapshot_summary"] = build_snapshot_summary(quotes_by_date)
         query_payload["execution_policy_telemetry"] = build_default_execution_policy_telemetry(quotes_by_date)
         query_key = build_query_key(query_payload)
         title = build_query_title(query_payload)

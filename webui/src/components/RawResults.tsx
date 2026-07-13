@@ -5,12 +5,26 @@ import { EmptyState, ToolbarButton } from "./common";
 import {
   confidenceClass,
   confidenceLabel,
-  fallbackAttemptLabel,
   formatMoney,
   listSummary,
   priceSourceLabel,
   warningsSummary,
 } from "./resultUtils";
+
+function visibleText(value: unknown): string {
+  const text = String(value ?? "").trim();
+  return text && text !== "-" ? text : "";
+}
+
+function failureDetailEntries(row: ResultRow): Array<[string, string]> {
+  const entries: Array<[string, string]> = [
+    ["状态", visibleText(row.status)],
+    ["失败分类", visibleText(row.failure_category)],
+    ["建议动作", visibleText(row.failure_action)],
+    ["错误原因", visibleText(row.error)],
+  ];
+  return entries.filter(([, value]) => Boolean(value));
+}
 
 function DataTable({
   columns,
@@ -41,7 +55,7 @@ function DataTable({
       (row.parser_warnings && row.parser_warnings.length > 0) ||
         row.evidence_text ||
         row.candidate_sources?.length ||
-        row.fallback_attempts?.length,
+        failureDetailEntries(row).length,
     );
 
   return (
@@ -73,25 +87,35 @@ function DataTable({
             return (
               <Fragment key={key}>
                 <tr className={rowClassName}>
-                  {columns.map((column) => (
-                    <td key={column.key} className={column.align === "right" ? "align-right" : ""}>
-                      {column.key.includes("price") ? (
-                        formatMoney(row[column.key])
-                      ) : column.key === "confidence" ? (
-                        <span className={`trust-badge ${confidenceClass(row.confidence)}`}>
-                          {confidenceLabel(row.confidence)}
-                        </span>
-                      ) : column.key === "price_source" ? (
-                        <span className="source-badge">{priceSourceLabel(row.price_source)}</span>
-                      ) : column.key === "parser_warnings" ? (
-                        <span className={warningsSummary(row.parser_warnings) === "-" ? "muted-cell" : "warning-cell"}>
-                          {warningsSummary(row.parser_warnings)}
-                        </span>
-                      ) : (
-                        String(row[column.key] ?? "-")
-                      )}
-                    </td>
-                  ))}
+                  {columns.map((column) => {
+                    const cellClassName = [
+                      column.align === "right" ? "align-right" : "",
+                      column.key === "error" ? "error-cell" : "",
+                    ].filter(Boolean).join(" ");
+                    return (
+                      <td key={column.key} className={cellClassName}>
+                        {column.key.includes("price") ? (
+                          formatMoney(row[column.key])
+                        ) : column.key === "confidence" ? (
+                          <span className={`trust-badge ${confidenceClass(row.confidence)}`}>
+                            {confidenceLabel(row.confidence)}
+                          </span>
+                        ) : column.key === "price_source" ? (
+                          <span className="source-badge">{priceSourceLabel(row.price_source)}</span>
+                        ) : column.key === "parser_warnings" ? (
+                          <span className={warningsSummary(row.parser_warnings) === "-" ? "muted-cell" : "warning-cell"}>
+                            {warningsSummary(row.parser_warnings)}
+                          </span>
+                        ) : column.key === "error" ? (
+                          <span className={visibleText(row.error) ? "error-cell-text" : "muted-cell"}>
+                            {visibleText(row.error) || "-"}
+                          </span>
+                        ) : (
+                          String(row[column.key] ?? "-")
+                        )}
+                      </td>
+                    );
+                  })}
                   <td>
                     <div className="row-actions">
                       {typeof row.link === "string" && row.link.startsWith("http") ? (
@@ -130,6 +154,19 @@ function DataTable({
                   <tr className="warning-detail-row" key={`${key}-detail`}>
                     <td colSpan={columns.length + 1}>
                       <div className="warning-detail-panel">
+                        {failureDetailEntries(row).length > 0 ? (
+                          <div className="warning-detail-section">
+                            <strong>失败详情</strong>
+                            <dl className="failure-detail-list">
+                              {failureDetailEntries(row).map(([label, value]) => (
+                                <Fragment key={label}>
+                                  <dt>{label}</dt>
+                                  <dd>{value}</dd>
+                                </Fragment>
+                              ))}
+                            </dl>
+                          </div>
+                        ) : null}
                         {row.parser_warnings && row.parser_warnings.length > 0 ? (
                           <div className="warning-detail-section">
                             <strong>完整警告</strong>
@@ -154,12 +191,6 @@ function DataTable({
                                 <li key={sidx}>{String(source)}</li>
                               ))}
                             </ul>
-                          </div>
-                        ) : null}
-                        {row.fallback_attempts && row.fallback_attempts.length > 0 ? (
-                          <div className="warning-detail-section">
-                            <strong>Fallback chain</strong>
-                            <p>{row.fallback_attempts.map((attempt) => fallbackAttemptLabel(attempt)).join(" -> ")}</p>
                           </div>
                         ) : null}
                         <div className="warning-detail-meta">
@@ -234,7 +265,7 @@ function FailureReasonPanel({
 }
 
 function ParserEvidencePanel({ rows }: { rows: ResultRow[] }) {
-  const interesting = rows.filter((row) => row.evidence_text || row.price_candidates_count || row.fallback_attempts?.length).slice(0, 5);
+  const interesting = rows.filter((row) => row.evidence_text || row.price_candidates_count).slice(0, 5);
   if (!interesting.length) return null;
   return (
     <section className="trust-detail-panel">
@@ -247,7 +278,6 @@ function ParserEvidencePanel({ rows }: { rows: ResultRow[] }) {
             <small>候选来源：{listSummary(row.candidate_sources)}</small>
             <small>Readiness：{String(row.readiness ?? "-")}</small>
             {row.evidence_text ? <p>{String(row.evidence_text)}</p> : null}
-            {row.fallback_attempts?.length ? <small>Fallback chain: {row.fallback_attempts.map((attempt) => fallbackAttemptLabel(attempt)).join(" -> ")}</small> : null}
           </div>
         ))}
       </div>
@@ -371,6 +401,7 @@ export function RawResults({
             { key: "failure_category", label: "失败分类" },
             { key: "failure_action", label: "建议动作" },
             { key: "status", label: "状态" },
+            { key: "error", label: "错误原因" },
           ]}
           rows={filteredResults.failureRows}
           onOpenLink={onOpenLink}

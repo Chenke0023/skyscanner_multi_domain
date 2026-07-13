@@ -1,9 +1,4 @@
-"""Scan configuration: transport mode, CDP mode, confidence policy, challenge policy.
-
-A single ScanConfig object carries all user-facing choices through the
-orchestrator, planner, and trust policy.  CLI flags map to this dataclass;
-nothing in the scan pipeline reads CLI flags directly.
-"""
+"""Configuration for the direct CDP scanner."""
 
 from __future__ import annotations
 
@@ -12,10 +7,8 @@ from enum import Enum
 
 
 class TransportMode(str, Enum):
-    AUTO = "auto"
-    OPENCLI = "opencli"
-    CDP = "cdp"
-    SCRAPLING = "scrapling"
+    PAGE = "page"
+    CDP_STRUCTURED = "cdp_structured"
 
 
 class CdpMode(str, Enum):
@@ -25,7 +18,6 @@ class CdpMode(str, Enum):
 
 
 class LowConfidencePolicy(str, Enum):
-    FALLBACK = "fallback"
     SHOW = "show"
     HIDE = "hide"
     ACCEPT_REVIEW = "accept-review"
@@ -38,36 +30,19 @@ class ChallengePolicy(str, Enum):
 
 @dataclass
 class ScanConfig:
-    """All user-facing scan options in one place.
-
-    Defaults match the existing production behavior so existing callers
-    (desktop UI, background refresh) are unaffected until they opt in.
-    """
-
-    # ── Transport ─────────────────────────────────────────────────────────
-    transport: TransportMode = TransportMode.AUTO
-
-    # ── CDP ───────────────────────────────────────────────────────────────
+    transport: TransportMode = TransportMode.PAGE
     cdp_mode: CdpMode = CdpMode.ATTACH
     cdp_host: str = "http://localhost:9222"
     keep_tabs: bool = False
     manual_tabs: dict[str, str] = field(default_factory=dict)
-
-    # ── Confidence / trust policy ─────────────────────────────────────────
-    low_confidence_policy: LowConfidencePolicy = LowConfidencePolicy.FALLBACK
+    low_confidence_policy: LowConfidencePolicy = LowConfidencePolicy.ACCEPT_REVIEW
     rankable_confidence: float = 0.80
     review_confidence: float = 0.50
-
-    # ── Challenge ─────────────────────────────────────────────────────────
     challenge_policy: ChallengePolicy = ChallengePolicy.STOP
-
-    # ── Trace / debug ─────────────────────────────────────────────────────
-    trace_dir: str | None = "traces"
+    trace_dir: str | None = None
     no_trace: bool = False
-    failure_log_dir: str | None = "failures"
+    failure_log_dir: str | None = None
     debug_page_text: bool = False
-
-    # ── Output ────────────────────────────────────────────────────────────
     output: str = "table"
     output_file: str | None = None
     show_attempts: bool = False

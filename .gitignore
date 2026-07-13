@@ -1,8 +1,13 @@
 __pycache__/
 *.pyc
 .DS_Store
+.coverage
+coverage.xml
+htmlcov/
 
+.mypy_cache/
 .ruff_cache/
+.pytest_cache/
 
 # Runtime directories
 logs/
@@ -26,6 +31,8 @@ dist/
 /runtime/
 webui/node_modules/
 webui/dist/
+webui/.mypy_cache/
 webui/*.tsbuildinfo
 webui/*.js
 webui/*.d.ts
+vendor/neo/node_modules/

@@ -1,8 +1,4 @@
-"""Captcha/challenge detection and quote builders.
-
-This module is transport-neutral: both scrapling, cdp, and opencli
-use these helpers to detect challenges and build challenge quotes.
-"""
+"""CDP page challenge detection and quote builders."""
 
 from __future__ import annotations
 

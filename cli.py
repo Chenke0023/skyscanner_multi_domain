@@ -22,14 +22,9 @@ import subprocess
 import sys
 from pathlib import Path
 
-from skyscanner_multi_domain.runtime.paths import PROJECT_ROOT, RUNTIME_DIR, get_log_file
+from skyscanner_multi_domain.runtime.paths import PROJECT_ROOT, RUNTIME_DIR, get_log_file, get_traces_dir
 from skyscanner_multi_domain.planning.date_window import (
     format_trip_date_label,
-)
-from failure_replay import (
-    DEFAULT_FAILURE_DIR,
-    build_failure_replay_report,
-    render_failure_replay_report,
 )
 from skyscanner_multi_domain.pricing.fx_rates import FxRateService
 from skyscanner_multi_domain.geo.location_resolver import (
@@ -43,7 +38,6 @@ from skyscanner_multi_domain.scan.history import (
     build_delta_summary_lines,
     build_fetch_quality_telemetry,
     build_parser_recovery_telemetry,
-    build_snapshot_summary,
     get_failed_region_codes,
     get_quotes_for_trip_label,
     get_rows_for_trip_label,
@@ -77,9 +71,10 @@ from skyscanner_multi_domain.scan.result_service import (
     warnings_summary as _warnings_summary,
 )
 from skyscanner_multi_domain.geo.regions import DEFAULT_REGIONS
-from skyscanner_multi_domain.neo import NeoCli, print_doctor
 from skyscanner_multi_domain.scan.orchestrator import quotes_to_dicts, run_page_scan
-from skyscanner_multi_domain.transports.cdp import detect_cdp_version
+from skyscanner_multi_domain.scan.report import format_output
+from skyscanner_multi_domain.runtime.browsers import detect_browser_binaries
+from skyscanner_multi_domain.transports.cdp import detect_cdp_version, verify_browser_session_persistence
 
 logger = logging.getLogger(__name__)
 
@@ -92,12 +87,6 @@ CLI_AIRPORT_PAIR_CONCURRENCY = 2
 LAUNCHD_LABEL = "com.skyscanner-multi-domain.auto-refresh"
 DEFAULT_LAUNCHD_INTERVAL_MINUTES = 600
 
-
-def run_failure_replay_command(args: argparse.Namespace) -> int:
-    failure_dir = Path(args.failure_dir).expanduser()
-    report = build_failure_replay_report(failure_dir)
-    print(render_failure_replay_report(report, show_samples=args.show_samples))
-    return 0 if report.total_samples else 1
 
 
 def run_export_confirmations_command(args: argparse.Namespace) -> int:
@@ -157,13 +146,12 @@ def _build_args_from_saved_query(
         regions=regions,
         wait=int(getattr(args, "wait", 10)),
         timeout=int(getattr(args, "timeout", 30)),
-        transport=str(getattr(args, "transport", "opencli")),
+        transport=str(getattr(args, "transport", "page")),
         exact_airport=bool(identity.get("exact_airport")),
         preview_only=False,
         rerun_failed=False,
         show_delta=bool(getattr(args, "show_delta", False)),
         show_plan=False,
-        fetch_pipeline=str(getattr(args, "fetch_pipeline", "balanced")),
         save=bool(getattr(args, "save", True)),
     )
 
@@ -202,30 +190,51 @@ class SimpleCLI:
         if total <= 0:
             return
         found = int(telemetry.get("fetch_price_found_count") or 0)
-        opencli_direct = int(telemetry.get("opencli_direct_price_found_count") or 0)
-        fallback_rescued = int(telemetry.get("fallback_rescued_count") or 0)
         challenge = int(telemetry.get("fetch_challenge_count") or 0)
         opened = int(telemetry.get("tab_open_total") or 0)
         reused = int(telemetry.get("tab_reuse_total") or 0)
         print(
             "[fetch] final "
             f"{found}/{total} markets found price, "
-            f"opencli direct {opencli_direct}, "
-            f"fallback rescued {fallback_rescued}, "
             f"challenge {challenge}, "
             f"tabs opened {opened}, reused {reused}"
         )
         parser_telemetry = build_parser_recovery_telemetry(quotes_by_date)
-        snapshot_summary = build_snapshot_summary(quotes_by_date)
         candidate_total = int(parser_telemetry.get("price_candidate_total") or 0)
         if candidate_total:
             print(
                 "[parse] "
                 f"candidates {candidate_total}, "
                 f"recovered {int(parser_telemetry.get('candidate_recovered_price_count') or 0)}, "
-                f"low confidence {int(parser_telemetry.get('low_confidence_price_count') or 0)}, "
-                f"snapshots recommended {int(snapshot_summary.get('snapshot_recommended_count') or 0)}"
+                f"low confidence {int(parser_telemetry.get('low_confidence_price_count') or 0)}"
             )
+
+    @staticmethod
+    def _emit_structured_output(
+        config: ScanConfig,
+        quotes_by_date: list[tuple[str, list[QuoteRow]]],
+        *,
+        route_label: str,
+    ) -> bool:
+        if config.output == "table":
+            return True
+        quotes = [
+            argparse.Namespace(**quote)
+            for _, date_quotes in quotes_by_date
+            for quote in date_quotes
+        ]
+        payload = format_output(quotes, output=config.output, route_label=route_label)
+        if not config.output_file:
+            print(payload)
+            return True
+        try:
+            output_path = Path(config.output_file).expanduser()
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            output_path.write_text(payload + ("\n" if payload else ""), encoding="utf-8")
+        except OSError as exc:
+            print(f"无法写入输出文件: {exc}", file=sys.stderr)
+            return False
+        return True
 
     def print_quotes(self, rows: list[SimplifiedQuoteRow]) -> None:
         if not rows:
@@ -262,6 +271,7 @@ class SimpleCLI:
         manual_regions: list[str],
         config: ScanConfig,
     ) -> int:
+        human_output = config.output == "table"
         if not args.origin or not args.destination:
             print("参数错误: 点对点模式下必须同时提供 --origin 和 --destination。")
             return 2
@@ -301,10 +311,11 @@ class SimpleCLI:
         preview_only = bool(getattr(args, "preview_only", False))
         show_delta = bool(getattr(args, "show_delta", False))
         show_plan = bool(getattr(args, "show_plan", False))
-        if rerun_failed and latest_record is None:
+        if human_output and rerun_failed and latest_record is None:
             print("未找到历史记录，`--rerun-failed` 本次退化为全量扫描。")
 
-        print(f"本次实际地区: {', '.join(regions)}")
+        if human_output:
+            print(f"本次实际地区: {', '.join(regions)}")
 
         if show_plan:
             plan = build_search_plan(
@@ -364,8 +375,9 @@ class SimpleCLI:
                     get_rows_for_trip_label(cached_rows_by_date, trip_label)
                 )
                 rows_by_date.append((trip_label, rows))
-                print(f"\n日期: {trip_label}（预览缓存）")
-                self.print_quotes(rows)
+                if human_output:
+                    print(f"\n日期: {trip_label}（预览缓存）")
+                    self.print_quotes(rows)
                 if rows:
                     any_rows = True
                 if any(
@@ -374,8 +386,14 @@ class SimpleCLI:
                     for row in rows
                 ):
                     any_winner = True
-            if show_delta:
+            if human_output and show_delta:
                 self._print_delta_summary(rows_by_date)
+            if not self._emit_structured_output(
+                config,
+                preview_record.quotes_by_date,
+                route_label=f"{origin.code} -> {destination.code}",
+            ):
+                return 2
             return 0 if any_winner else (1 if not any_rows else 2)
 
         async def scan_trip(
@@ -431,6 +449,8 @@ class SimpleCLI:
             printed_stages: set[str] = set()
 
             async def on_progress(progress_payload: dict[str, object]) -> None:
+                if not human_output:
+                    return
                 stage = str(progress_payload.get("stage") or "").strip().lower()
                 if not stage:
                     return
@@ -477,8 +497,6 @@ class SimpleCLI:
                 region_concurrency=CLI_REGION_CONCURRENCY,
                 query_payload=query_payload,
                 on_progress=on_progress,
-                fetch_pipeline=getattr(args, "fetch_pipeline", "balanced"),
-                allow_browser_fallback=not bool(getattr(args, "no_fallback", False)),
                 config=config,
             )
             if not quotes:
@@ -571,16 +589,19 @@ class SimpleCLI:
         any_winner = False
 
         for _, trip_label, current_date, current_return_date, rows, quote_snapshots in trip_results:
-            print(f"\n日期: {trip_label}")
-            if rerun_failed and latest_record is not None and not rows:
-                print("没有返回任何结果。检查地区代码或浏览器/CDP 环境。")
+            if human_output:
+                print(f"\n日期: {trip_label}")
+                if rerun_failed and latest_record is not None and not rows:
+                    print("没有返回任何结果。检查地区代码或浏览器/CDP 环境。")
             scanned_rows_by_date.append((trip_label, rows))
             scanned_quote_snapshots_by_date.append((trip_label, quote_snapshots))
-            self._print_fetch_quality_summary([(trip_label, quote_snapshots)])
+            if human_output:
+                self._print_fetch_quality_summary([(trip_label, quote_snapshots)])
             if rows:
                 any_rows = True
 
-            self.print_quotes(rows)
+            if human_output:
+                self.print_quotes(rows)
 
             best_winner = next(
                 (
@@ -600,17 +621,19 @@ class SimpleCLI:
             )
             if best_winner:
                 any_winner = True
-                print(
-                    f"最佳: ¥{best_winner['best_cny_price']:,.2f} 来自 {best_winner['region_name']}"
-                )
+                if human_output:
+                    print(
+                        f"最佳: ¥{best_winner['best_cny_price']:,.2f} 来自 {best_winner['region_name']}"
+                    )
             if cheapest_winner:
                 any_winner = True
-                print(
-                    f"最低价: ¥{cheapest_winner['cheapest_cny_price']:,.2f} 来自 {cheapest_winner['region_name']}"
-                )
-            elif rows:
+                if human_output:
+                    print(
+                        f"最低价: ¥{cheapest_winner['cheapest_cny_price']:,.2f} 来自 {cheapest_winner['region_name']}"
+                    )
+            elif human_output and rows:
                 print("已提取市场价格，但人民币换算暂不可用。")
-            else:
+            elif human_output:
                 print("未能成功提取任何市场价格。")
 
             if args.save:
@@ -621,7 +644,8 @@ class SimpleCLI:
                     date=current_date,
                     return_date=current_return_date,
                 )
-                print(f"结果已保存到: {saved}")
+                if human_output:
+                    print(f"结果已保存到: {saved}")
 
         if scanned_rows_by_date:
             self.history_store.record_scan(
@@ -643,18 +667,22 @@ class SimpleCLI:
                 start_return_date=start_return_date,
                 end_return_date=end_return_date,
             )
-            print(f"窗口汇总已保存到: {summary_path}")
+            if human_output:
+                print(f"窗口汇总已保存到: {summary_path}")
 
-        if not args.exact_airport and args.origin in {"北京", "beijing", "BEIJING"}:
+        if human_output and not args.exact_airport and args.origin in {"北京", "beijing", "BEIJING"}:
             print(
                 "提示: 本次默认使用 BJSA（北京任意机场）。如需严格 PEK，请加 --exact-airport 或直接传 PEK。"
             )
-        if show_delta:
+        if human_output and show_delta:
             self._print_delta_summary(scanned_rows_by_date)
-        cdp_only_smoke = (
-            getattr(args, "transport", "") == "cdp_structured"
-            and bool(getattr(args, "no_fallback", False))
-        )
+        if not self._emit_structured_output(
+            config,
+            scanned_quote_snapshots_by_date,
+            route_label=f"{origin.code} -> {destination.code}",
+        ):
+            return 2
+        cdp_only_smoke = getattr(args, "transport", "") == "cdp_structured"
         if cdp_only_smoke and scanned_quote_snapshots_by_date:
             return 0
         if not any_rows:
@@ -668,6 +696,7 @@ class SimpleCLI:
         manual_regions: list[str],
         config: ScanConfig,
     ) -> int:
+        human_output = config.output == "table"
         airport_limit = max(
             int(
                 getattr(
@@ -700,25 +729,26 @@ class SimpleCLI:
             print(f"扩展模式参数错误: {exc}")
             return 2
 
-        mode_label = []
-        mode_label.append("国家" if getattr(args, "origin_country", None) else "地点")
-        mode_label.append("国家" if getattr(args, "destination_country", None) else "地点")
-        print(f"扩展模式: {'-'.join(mode_label)} {origin_label} -> {destination_label}")
-        print(
-            "出发候选机场: "
-            + ", ".join(
-                f"{airport.code}({airport.municipality or airport.name})"
-                for airport in origin_points
+        if human_output:
+            mode_label = []
+            mode_label.append("国家" if getattr(args, "origin_country", None) else "地点")
+            mode_label.append("国家" if getattr(args, "destination_country", None) else "地点")
+            print(f"扩展模式: {'-'.join(mode_label)} {origin_label} -> {destination_label}")
+            print(
+                "出发候选机场: "
+                + ", ".join(
+                    f"{airport.code}({airport.municipality or airport.name})"
+                    for airport in origin_points
+                )
             )
-        )
-        print(
-            "目的候选机场: "
-            + ", ".join(
-                f"{airport.code}({airport.municipality or airport.name})"
-                for airport in destination_points
+            print(
+                "目的候选机场: "
+                + ", ".join(
+                    f"{airport.code}({airport.municipality or airport.name})"
+                    for airport in destination_points
+                )
             )
-        )
-        print(f"本次实际地区: {', '.join(regions)}")
+            print(f"本次实际地区: {', '.join(regions)}")
 
         date_window_days = max(int(getattr(args, "date_window", 0)), 0)
         try:
@@ -754,7 +784,7 @@ class SimpleCLI:
         preview_only = bool(getattr(args, "preview_only", False))
         show_delta = bool(getattr(args, "show_delta", False))
         show_plan = bool(getattr(args, "show_plan", False))
-        if rerun_failed and latest_record is None:
+        if human_output and rerun_failed and latest_record is None:
             print("未找到历史记录，`--rerun-failed` 本次退化为全量扫描。")
 
         if show_plan:
@@ -807,8 +837,9 @@ class SimpleCLI:
                     get_rows_for_trip_label(cached_rows_by_date, trip_label)
                 )
                 rows_by_date.append((trip_label, rows))
-                print(f"\n日期: {trip_label}（预览缓存）")
-                self.print_quotes(rows)
+                if human_output:
+                    print(f"\n日期: {trip_label}（预览缓存）")
+                    self.print_quotes(rows)
                 if rows:
                     any_rows = True
                 if any(
@@ -817,8 +848,14 @@ class SimpleCLI:
                     for row in rows
                 ):
                     any_winner = True
-            if show_delta:
+            if human_output and show_delta:
                 self._print_delta_summary(rows_by_date)
+            if not self._emit_structured_output(
+                config,
+                preview_record.quotes_by_date,
+                route_label=f"{origin_label} -> {destination_label}",
+            ):
+                return 2
             return 0 if any_winner else (1 if not any_rows else 2)
 
         pair_routes = rank_route_pairs(
@@ -889,6 +926,8 @@ class SimpleCLI:
                 printed_stages: set[str] = set()
 
                 async def on_progress(progress_payload: dict[str, object]) -> None:
+                    if not human_output:
+                        return
                     stage = str(progress_payload.get("stage") or "").strip().lower()
                     if not stage:
                         return
@@ -936,8 +975,6 @@ class SimpleCLI:
                         region_concurrency=CLI_REGION_CONCURRENCY,
                         query_payload=query_payload,
                         on_progress=on_progress,
-                        fetch_pipeline=getattr(args, "fetch_pipeline", "balanced"),
-                        allow_browser_fallback=not bool(getattr(args, "no_fallback", False)),
                         config=config,
                     )
                 if not quotes:
@@ -1034,24 +1071,27 @@ class SimpleCLI:
         any_winner = False
 
         for _, trip_label, current_date, current_return_date, rows, quote_snapshots in trip_results:
-            print(f"\n日期: {trip_label}，共 {pair_count} 个候选航段")
-            if rerun_failed and latest_record is not None:
-                failed_region_codes = get_failed_region_codes(
-                    latest_record.quotes_by_date,
-                    trip_label=trip_label,
-                )
-                if failed_region_codes:
-                    print(f"仅重跑上次失败市场: {', '.join(failed_region_codes)}")
-                else:
-                    print("上次该日期没有失败市场，直接复用已有结果。")
+            if human_output:
+                print(f"\n日期: {trip_label}，共 {pair_count} 个候选航段")
+                if rerun_failed and latest_record is not None:
+                    failed_region_codes = get_failed_region_codes(
+                        latest_record.quotes_by_date,
+                        trip_label=trip_label,
+                    )
+                    if failed_region_codes:
+                        print(f"仅重跑上次失败市场: {', '.join(failed_region_codes)}")
+                    else:
+                        print("上次该日期没有失败市场，直接复用已有结果。")
 
             scanned_rows_by_date.append((trip_label, rows))
             scanned_quote_snapshots_by_date.append((trip_label, quote_snapshots))
-            self._print_fetch_quality_summary([(trip_label, quote_snapshots)])
+            if human_output:
+                self._print_fetch_quality_summary([(trip_label, quote_snapshots)])
             if rows:
                 any_rows = True
 
-            self.print_quotes(rows)
+            if human_output:
+                self.print_quotes(rows)
 
             best_winner = next(
                 (
@@ -1072,26 +1112,28 @@ class SimpleCLI:
             best_price = best_winner.get("best_cny_price") if best_winner else None
             if best_winner and isinstance(best_price, (int, float)):
                 any_winner = True
-                print(
-                    "最佳: ¥{price:,.2f} 来自 {region}，航段 {route}".format(
-                        price=float(best_price),
-                        region=best_winner["region_name"],
-                        route=best_winner.get("route") or "-",
+                if human_output:
+                    print(
+                        "最佳: ¥{price:,.2f} 来自 {region}，航段 {route}".format(
+                            price=float(best_price),
+                            region=best_winner["region_name"],
+                            route=best_winner.get("route") or "-",
+                        )
                     )
-                )
             cheapest_price = cheapest_winner.get("cheapest_cny_price") if cheapest_winner else None
             if cheapest_winner and isinstance(cheapest_price, (int, float)):
                 any_winner = True
-                print(
-                    "最低价: ¥{price:,.2f} 来自 {region}，航段 {route}".format(
-                        price=float(cheapest_price),
-                        region=cheapest_winner["region_name"],
-                        route=cheapest_winner.get("route") or "-",
+                if human_output:
+                    print(
+                        "最低价: ¥{price:,.2f} 来自 {region}，航段 {route}".format(
+                            price=float(cheapest_price),
+                            region=cheapest_winner["region_name"],
+                            route=cheapest_winner.get("route") or "-",
+                        )
                     )
-                )
-            elif rows:
+            elif human_output and rows:
                 print("已提取市场价格，但人民币换算暂不可用。")
-            else:
+            elif human_output:
                 print("未能从候选机场组合里提取出有效价格。")
 
             if args.save:
@@ -1104,7 +1146,8 @@ class SimpleCLI:
                     file_origin_token=origin_file_token,
                     file_destination_token=destination_file_token,
                 )
-                print(f"结果已保存到: {saved}")
+                if human_output:
+                    print(f"结果已保存到: {saved}")
 
         if scanned_rows_by_date:
             self.history_store.record_scan(
@@ -1128,14 +1171,18 @@ class SimpleCLI:
                 file_origin_token=origin_file_token,
                 file_destination_token=destination_file_token,
             )
-            print(f"窗口汇总已保存到: {summary_path}")
+            if human_output:
+                print(f"窗口汇总已保存到: {summary_path}")
 
-        if show_delta:
+        if human_output and show_delta:
             self._print_delta_summary(scanned_rows_by_date)
-        cdp_only_smoke = (
-            getattr(args, "transport", "") == "cdp_structured"
-            and bool(getattr(args, "no_fallback", False))
-        )
+        if not self._emit_structured_output(
+            config,
+            scanned_quote_snapshots_by_date,
+            route_label=f"{origin_label} -> {destination_label}",
+        ):
+            return 2
+        cdp_only_smoke = getattr(args, "transport", "") == "cdp_structured"
         if cdp_only_smoke and scanned_quote_snapshots_by_date:
             return 0
         if not any_rows:
@@ -1171,33 +1218,21 @@ class SimpleCLI:
             except (OSError, json.JSONDecodeError) as exc:
                 logger.warning("Failed to load --manual-tabs-json from %s", manual_tabs_json, exc_info=exc)
 
-        # ScanConfig.transport is the strict-mode override.  Default is AUTO,
-        # which preserves the existing --transport flag's "primary + fallback"
-        # semantic.  Setting --transport-mode opencli/cdp/scrapling forces a
-        # single transport with fallback disabled.
-        transport_mode_raw = getattr(args, "transport_mode", None) or "auto"
-        try:
-            transport_mode = TransportMode(transport_mode_raw)
-        except ValueError:
-            transport_mode = TransportMode.AUTO
-
+        transport = TransportMode(getattr(args, "transport", "page"))
+        trace_dir_arg = getattr(args, "trace_dir", None)
         return ScanConfig(
-            transport=transport_mode,
+            transport=transport,
             cdp_mode=CdpMode(getattr(args, "cdp_mode", "attach")),
             cdp_host=getattr(args, "cdp_host", "http://localhost:9222"),
             keep_tabs=bool(getattr(args, "keep_tabs", False)),
             manual_tabs=manual_tabs,
-            low_confidence_policy=LowConfidencePolicy(
-                getattr(args, "low_confidence_policy", "fallback")
-            ),
+            low_confidence_policy=LowConfidencePolicy(getattr(args, "low_confidence_policy", "accept-review")),
             rankable_confidence=float(getattr(args, "rankable_confidence", 0.80)),
             review_confidence=float(getattr(args, "review_confidence", 0.50)),
-            challenge_policy=ChallengePolicy(
-                getattr(args, "challenge_policy", "stop")
-            ),
-            trace_dir=getattr(args, "trace_dir", "traces") or None,
+            challenge_policy=ChallengePolicy(getattr(args, "challenge_policy", "stop")),
+            trace_dir=str(Path(trace_dir_arg).expanduser()) if trace_dir_arg else str(get_traces_dir()),
             no_trace=bool(getattr(args, "no_trace", False)),
-            failure_log_dir=getattr(args, "failure_log_dir", "failures") or None,
+            failure_log_dir=getattr(args, "failure_log_dir", None) or None,
             debug_page_text=bool(getattr(args, "debug_page_text", False)),
             output=getattr(args, "output", "table"),
             output_file=getattr(args, "output_file", None),
@@ -1228,8 +1263,7 @@ class SimpleCLI:
             date_window=int(date_window_raw) if date_window_raw else 3,
             exact_airport=False,
             country_airport_limit=COUNTRY_ROUTE_DEFAULT_AIRPORT_LIMIT,
-            transport="opencli",
-            fetch_pipeline="balanced",
+            transport="page",
             preview_only=False,
             rerun_failed=False,
             show_delta=False,
@@ -1334,7 +1368,7 @@ def uninstall_auto_refresh_launchd() -> int:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Skyscanner 多市场 CLI。默认推荐浏览器页面模式（Comet 优先）。",
+        description="Skyscanner 多市场 CLI。默认使用系统浏览器直接 CDP 页面模式。",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 示例:
@@ -1348,8 +1382,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     subparsers = parser.add_subparsers(dest="command")
 
-    doctor = subparsers.add_parser("doctor", help="检查浏览器/CDP/Neo 环境")
-    doctor.add_argument("--capture-file", help="可选：检查某个 Neo export 文件是否存在")
+    doctor = subparsers.add_parser("doctor", help="检查系统浏览器和 CDP 环境")
     doctor.add_argument(
         "--verify-session-persistence",
         action="store_true",
@@ -1361,28 +1394,6 @@ def build_parser() -> argparse.ArgumentParser:
         help="指定要验证 session 持久化的浏览器",
     )
 
-    replay = subparsers.add_parser(
-        "replay-failures",
-        help="回放 logs/failures 并统计各市场 parser 稳定性",
-    )
-    replay.add_argument(
-        "--failure-dir",
-        default=str(DEFAULT_FAILURE_DIR),
-        help="失败样本目录，默认指向运行时 logs/failures",
-    )
-    replay.add_argument(
-        "--show-samples",
-        dest="show_samples",
-        action="store_true",
-        default=True,
-        help="打印逐样本回放详情",
-    )
-    replay.add_argument(
-        "--no-show-samples",
-        dest="show_samples",
-        action="store_false",
-        help="仅打印汇总统计",
-    )
 
     export_confirmations = subparsers.add_parser(
         "export-confirmations",
@@ -1403,15 +1414,9 @@ def build_parser() -> argparse.ArgumentParser:
     auto_once.add_argument("--timeout", type=int, default=30, help="HTTP/CDP 超时")
     auto_once.add_argument(
         "--transport",
-        choices=["scrapling", "page", "opencli", "cdp_structured"],
-        default="opencli",
-        help="后台复扫使用的抓取传输",
-    )
-    auto_once.add_argument(
-        "--fetch-pipeline",
-        choices=["fast", "balanced", "session_heavy"],
-        default="balanced",
-        help="Scrapling 抓取策略链",
+        choices=["page", "cdp_structured"],
+        default="page",
+        help="后台复扫使用的 CDP 解析模式",
     )
     auto_once.add_argument("--show-delta", action="store_true", help="扫描结束后打印变化摘要")
     auto_once.add_argument("--dry-run", action="store_true", help="只打印到期任务，不执行扫描")
@@ -1480,9 +1485,9 @@ def build_parser() -> argparse.ArgumentParser:
     page.add_argument("--timeout", type=int, default=30, help="HTTP/CDP 超时")
     page.add_argument(
         "--transport",
-        choices=["scrapling", "page", "opencli", "cdp_structured"],
-        default="opencli",
-        help="opencli: 使用 opencli 浏览器自动化（默认）；cdp_structured: 实验性结构化 CDP；page: 通过浏览器 CDP 读取结果页；scrapling: 备用页面文本抓取",
+        choices=["page", "cdp_structured"],
+        default="page",
+        help="page: 稳定的直接 CDP 扫描（默认）；cdp_structured: 实验性结构化 CDP 解析",
     )
     page.add_argument(
         "--exact-airport",
@@ -1510,12 +1515,6 @@ def build_parser() -> argparse.ArgumentParser:
         help="打印 SearchPlan 扫描计划并退出，不发起实时扫描",
     )
     page.add_argument(
-        "--fetch-pipeline",
-        choices=["fast", "balanced", "session_heavy"],
-        default="balanced",
-        help="Scrapling 抓取策略链: fast=快速直连, balanced=CDP复用+Stealth+验证码 (默认), session_heavy=完整浏览器会话链",
-    )
-    page.add_argument(
         "--save",
         dest="save",
         action="store_true",
@@ -1524,22 +1523,6 @@ def build_parser() -> argparse.ArgumentParser:
     )
     page.add_argument(
         "--no-save", dest="save", action="store_false", help="不保存 Markdown 结果"
-    )
-    page.add_argument(
-        "--no-fallback",
-        action="store_true",
-        help="实验/调试用: 禁用 transport fallback，仅运行当前 --transport",
-    )
-
-    # ── P7: Transport mode ────────────────────────────────────────────
-    page.add_argument(
-        "--transport-mode",
-        choices=["auto", "opencli", "cdp", "scrapling"],
-        default="auto",
-        help=(
-            "传输模式严格控制: auto=按 --transport 选择并允许 fallback (默认), "
-            "opencli/cdp/scrapling=只跑该传输，禁用 fallback"
-        ),
     )
 
     # ── P7: CDP mode ──────────────────────────────────────────────────
@@ -1568,9 +1551,9 @@ def build_parser() -> argparse.ArgumentParser:
     # ── P7: Confidence / trust policy ──────────────────────────────────
     page.add_argument(
         "--low-confidence-policy",
-        choices=["fallback", "show", "hide", "accept-review"],
-        default="fallback",
-        help="低置信度价格处理策略: fallback=触发回退 (默认), show=展示但不参与排序, hide=仅写入 trace, accept-review=接受但标记需人工复核",
+        choices=["show", "hide", "accept-review"],
+        default="accept-review",
+        help="低置信度价格处理策略（默认保留并标记人工复核）",
     )
     page.add_argument(
         "--rankable-confidence",
@@ -1596,8 +1579,8 @@ def build_parser() -> argparse.ArgumentParser:
     # ── P7: Trace / debug ─────────────────────────────────────────────
     page.add_argument(
         "--trace-dir",
-        default="traces",
-        help="Trace JSONL 输出目录 (默认 traces/)",
+        default=None,
+        help="Trace JSONL 输出目录 (默认运行时 traces 目录)",
     )
     page.add_argument(
         "--no-trace",
@@ -1606,8 +1589,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     page.add_argument(
         "--failure-log-dir",
-        default="failures",
-        help="Failure log 输出目录 (默认 failures/)",
+        default=None,
+        help="Failure log 输出目录 (默认运行时 logs/failures)",
     )
     page.add_argument(
         "--debug-page-text",
@@ -1630,7 +1613,7 @@ def build_parser() -> argparse.ArgumentParser:
     page.add_argument(
         "--show-attempts",
         action="store_true",
-        help="展示每个 region 的完整 fallback attempt 链路",
+        help="展示每个 region 的 CDP attempt 记录",
     )
     page.add_argument(
         "--show-low-confidence",
@@ -1650,20 +1633,20 @@ def main() -> int:
         return cli.interactive_page()
 
     if args.command == "doctor":
-        neo = NeoCli(cli.project_root)
-        print_doctor(
-            neo,
-            Path(args.capture_file) if args.capture_file else None,
-            verify_session_persistence=args.verify_session_persistence,
-            persistence_browser=args.persistence_browser,
-        )
         cdp_info = detect_cdp_version()
+        browsers = detect_browser_binaries()
         if cdp_info:
-            print(f"\n当前 CDP 浏览器: {cdp_info.get('Browser', 'unknown')}")
+            print(f"CDP 已连接: {cdp_info.get('Browser', 'unknown')}")
+        elif browsers:
+            print("可启动浏览器: " + ", ".join(name.capitalize() for name in browsers))
+        else:
+            print("browser-unavailable: 未检测到 Chrome、Edge 或 Comet，请安装或启动其中之一。")
+            return 1
+        if args.verify_session_persistence:
+            ok, message = verify_browser_session_persistence(args.persistence_browser)
+            print(message)
+            return 0 if ok else 1
         return 0
-
-    if args.command == "replay-failures":
-        return run_failure_replay_command(args)
 
     if args.command == "export-confirmations":
         return run_export_confirmations_command(args)

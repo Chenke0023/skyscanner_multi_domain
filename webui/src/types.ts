@@ -68,9 +68,12 @@ export type ResultRow = Record<string, unknown> & {
   isReuseReady?: boolean;
   confidence?: number | null;
   price_source?: string | null;
+  status?: string | null;
+  error?: string | null;
+  failure_category?: string | null;
+  failure_action?: string | null;
   parser_warnings?: string[];
   evidence_text?: string | null;
-  fallback_attempts?: Array<Record<string, unknown>>;
   readiness?: string | null;
   price_candidates_count?: number | null;
   selected_candidate_rank?: number | null;
@@ -133,7 +136,6 @@ export type UIState = {
     trust?: {
       fetchQualityTelemetry?: Record<string, unknown>;
       parserRecoveryTelemetry?: Record<string, unknown>;
-      snapshotSummary?: Record<string, unknown>;
       priceConfirmationSummary?: Record<string, unknown>;
       repairPlan?: {
         summary?: Record<string, unknown>;

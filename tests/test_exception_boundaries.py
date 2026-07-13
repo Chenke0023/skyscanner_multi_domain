@@ -62,7 +62,7 @@ def _is_in_scope(path: Path) -> bool:
 
 
 def test_package_modules_stay_in_exception_audit_scope() -> None:
-    assert _is_in_scope(ROOT / "skyscanner_multi_domain" / "neo.py")
+    assert _is_in_scope(ROOT / "skyscanner_multi_domain" / "models.py")
     assert not _is_in_scope(ROOT / "legacy" / "gui.py")
 
 

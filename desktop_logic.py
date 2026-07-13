@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import importlib.util
-import inspect
 import json
 import subprocess
 import sys
@@ -21,13 +19,6 @@ MAX_LOCATION_SUGGESTIONS = 8
 
 _TRIP_TYPE_ONE_WAY = "one_way"
 _TRIP_TYPE_ROUND_TRIP = "round_trip"
-_REQUIRED_APIFY_DATA_FILES = (
-    "browser-helper-file.json",
-    "fingerprint-network-definition.zip",
-    "header-network-definition.zip",
-    "headers-order.json",
-    "input-network-definition.zip",
-)
 _GUI_REGION_CONCURRENCY = 3
 _GUI_DATE_WINDOW_CONCURRENCY = 2
 _GUI_AIRPORT_PAIR_CONCURRENCY = 2
@@ -159,23 +150,22 @@ def _compute_market_reliability_label(
                 if str(candidate.get("status") or "").strip().lower() in {
                     "px_challenge",
                     "page_challenge",
-                    "captcha_solve_failed",
                 }:
                     challenge_like += 1
                 if str(candidate.get("source_kind") or "").strip().lower() in {
-                    "browser_fallback",
-                    "cdp_reuse",
+                    "page",
+                    "cdp_structured",
                 }:
                     browser_like += 1
     source_kind = str(row.get("source_kind") or "").strip().lower()
     if total == 0:
-        if source_kind in {"browser_fallback", "cdp_reuse"}:
-            return "需浏览器兜底"
+        if source_kind in {"page", "cdp_structured"}:
+            return "CDP 扫描"
         return "历史样本少"
     success_rate = success / total
     if challenge_like >= max(2, total // 2):
         return "常触发验证"
-    if browser_like >= max(2, total // 2) or source_kind in {"browser_fallback", "cdp_reuse"}:
+    if browser_like >= max(2, total // 2) or source_kind in {"page", "cdp_structured"}:
         return "偏依赖浏览器"
     if success_rate >= 0.8:
         return "稳定可下单"
@@ -695,35 +685,10 @@ def _order_grouped_by_trip_labels(
     )
 
 
-def _find_missing_apify_data_files() -> list[str]:
-    try:
-        import apify_fingerprint_datapoints
-    except ImportError:
-        return list(_REQUIRED_APIFY_DATA_FILES)
-
-    package_dir = Path(inspect.getfile(apify_fingerprint_datapoints)).resolve().parent
-    data_dir = package_dir / "data"
-    return [name for name in _REQUIRED_APIFY_DATA_FILES if not (data_dir / name).exists()]
-
-
 def _collect_startup_issues() -> list[str]:
     issues: list[str] = []
-
-    if importlib.util.find_spec("scrapling") is None:
-        issues.append("缺少 Scrapling 主抓取依赖，请重新安装项目依赖。")
-
     if not AIRPORT_DATASET_PATH.exists():
         issues.append(f"缺少机场数据文件：{AIRPORT_DATASET_PATH}")
-
     if not LOCATION_MAPPINGS_PATH.exists():
         issues.append(f"缺少地点映射文件：{LOCATION_MAPPINGS_PATH}")
-
-    missing_apify_files = _find_missing_apify_data_files()
-    if missing_apify_files:
-        missing_text = "、".join(missing_apify_files)
-        issues.append(
-            "缺少 Scrapling 指纹数据资源："
-            f"{missing_text}。请使用最新桌面包重新解压后再试。"
-        )
-
     return issues

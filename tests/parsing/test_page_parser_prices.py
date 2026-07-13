@@ -7,34 +7,9 @@ import unittest
 from skyscanner_multi_domain.geo.regions import REGIONS
 from skyscanner_multi_domain.parsing.page_parser import PAGE_TEXT_CAPTURE_LIMIT, extract_page_quote
 from skyscanner_multi_domain.parsing.page_parser import slice_page_text_for_scan
-from skyscanner_multi_domain.transports.scrapling import _extract_scrapling_page_text
 
 
 class ExtractPageQuoteTests(unittest.TestCase):
-    def test_extract_scrapling_page_text_ignores_script_payloads(self) -> None:
-        class FakePage:
-            html = """
-                <html>
-                  <body>
-                    <script>window.__internal = {"state":"loading"};</script>
-                    <div>显示结果依据</div>
-                    <div>综合最佳</div>
-                    <div>¥3,215</div>
-                    <div>最便宜</div>
-                    <div>¥2,184</div>
-                  </body>
-                </html>
-            """
-
-        page_text = _extract_scrapling_page_text(FakePage())
-        quote = extract_page_quote(REGIONS["CN"], "https://example.com", page_text)
-
-        self.assertNotIn("window.__internal", page_text)
-        self.assertNotIn("loading", page_text.lower())
-        self.assertEqual(quote.status, "page_text")
-        self.assertEqual(quote.best_price, 3215.0)
-        self.assertEqual(quote.cheapest_price, 2184.0)
-
     def test_best_label_allows_extra_text_on_same_line(self) -> None:
         page_text = "\n".join(
             [

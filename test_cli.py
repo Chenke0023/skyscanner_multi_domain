@@ -1,7 +1,10 @@
+import json
+import tempfile
 import unittest
 from argparse import Namespace
 from contextlib import redirect_stdout
 from io import StringIO
+from pathlib import Path
 from unittest.mock import patch
 
 from cli import (
@@ -9,7 +12,6 @@ from cli import (
     _build_args_from_saved_query,
     _is_ac_power_connected,
     build_parser,
-    run_failure_replay_command,
 )
 from skyscanner_multi_domain.scan.result_service import (
     ResultService,
@@ -81,12 +83,10 @@ class CliParserTests(unittest.TestCase):
                 "2026-05-20",
                 "--transport",
                 "cdp_structured",
-                "--no-fallback",
             ]
         )
 
         self.assertEqual(args.transport, "cdp_structured")
-        self.assertTrue(args.no_fallback)
 
     def test_page_command_accepts_country_mode_arguments(self) -> None:
         parser = build_parser()
@@ -146,20 +146,12 @@ class CliParserTests(unittest.TestCase):
         self.assertTrue(args.rerun_failed)
         self.assertTrue(args.show_delta)
 
-    def test_replay_failures_command_accepts_custom_directory(self) -> None:
+    def test_retired_commands_and_transports_are_rejected(self) -> None:
         parser = build_parser()
-
-        args = parser.parse_args(
-            [
-                "replay-failures",
-                "--failure-dir",
-                "/tmp/failures",
-                "--no-show-samples",
-            ]
-        )
-
-        self.assertEqual(args.failure_dir, "/tmp/failures")
-        self.assertFalse(args.show_samples)
+        with self.assertRaises(SystemExit):
+            parser.parse_args(["replay-failures"])
+        with self.assertRaises(SystemExit):
+            parser.parse_args(["page", "-o", "北京", "-d", "香港", "-t", "2026-05-20", "--transport", "opencli"])
 
     def test_build_args_from_saved_query_supports_background_point_route(self) -> None:
         args = _build_args_from_saved_query(
@@ -175,7 +167,7 @@ class CliParserTests(unittest.TestCase):
                     "exact_airport": False,
                 }
             },
-            Namespace(wait=8, timeout=20, transport="opencli", fetch_pipeline="balanced", save=False),
+            Namespace(wait=8, timeout=20, transport="page", save=False),
         )
 
         self.assertEqual(args.origin, "北京")
@@ -235,35 +227,62 @@ class RoutePlanTests(unittest.TestCase):
         self.assertEqual(destination_points[0].code, "TAS")
         self.assertIn("CN", regions)
 
+    def test_build_expanded_route_plan_supports_pakistan_country(self) -> None:
+        query_service = SimpleCLI()._query_service
 
-class FailureReplayCommandTests(unittest.TestCase):
-    def test_run_failure_replay_command_prints_summary(self) -> None:
-        output = StringIO()
+        (
+            _origin_label,
+            destination_label,
+            _origin_file_token,
+            destination_file_token,
+            _origin_points,
+            destination_points,
+            regions,
+        ) = query_service.build_expanded_route_plan(
+            origin_value="北京",
+            destination_value="巴基斯坦",
+            origin_is_country=False,
+            destination_is_country=True,
+            prefer_origin_metro=True,
+        )
 
-        with (
-            patch("cli.build_failure_replay_report") as build_report,
-            redirect_stdout(output),
-        ):
-            build_report.return_value = type(
-                "Report",
-                (),
-                {
-                    "total_samples": 3,
-                },
-            )()
-            with patch(
-                "cli.render_failure_replay_report",
-                return_value="# 失败样本回放集\n",
-            ):
-                exit_code = run_failure_replay_command(
-                    Namespace(
-                        failure_dir="/tmp/failures",
-                        show_samples=False,
-                    )
+        self.assertEqual(destination_label, "巴基斯坦")
+        self.assertEqual(destination_file_token, "PK_ANY")
+        self.assertGreaterEqual(len(destination_points), 1)
+        self.assertEqual(destination_points[0].code, "ISB")
+        self.assertIn("PK", regions)
+
+
+
+class StructuredOutputTests(unittest.TestCase):
+    def test_json_output_file_is_written(self) -> None:
+        quote = {
+            "region": "CN",
+            "domain": "skyscanner.com",
+            "price": 981.37,
+            "currency": "CNY",
+            "source_url": "https://example.com",
+            "status": "ok",
+            "source_kind": "page",
+            "confidence": 0.9,
+            "rankable": True,
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            output_path = Path(directory) / "scan.json"
+            config = Namespace(output="json", output_file=str(output_path))
+
+            self.assertTrue(
+                SimpleCLI._emit_structured_output(
+                    config,
+                    [("2026-08-01", [quote])],
+                    route_label="PEK -> HKG",
                 )
+            )
+            payload = json.loads(output_path.read_text(encoding="utf-8"))
 
-        self.assertEqual(exit_code, 0)
-        self.assertIn("失败样本回放集", output.getvalue())
+        self.assertEqual(payload["route_label"], "PEK -> HKG")
+        self.assertEqual(payload["quotes"][0]["price"], 981.37)
+        self.assertEqual(payload["quotes"][0]["source_kind"], "page")
 
 
 class RunPageCommandTests(unittest.IsolatedAsyncioTestCase):
@@ -280,7 +299,7 @@ class RunPageCommandTests(unittest.IsolatedAsyncioTestCase):
             save=False,
             date_window=0,
             exact_airport=False,
-            transport="scrapling",
+            transport="page",
         )
         output = StringIO()
 
@@ -346,7 +365,7 @@ class TrustHelperTests(unittest.TestCase):
 
     def test_price_source_label_known_and_unknown(self) -> None:
         self.assertEqual(_price_source_label("cheapest_block"), "Cheapest 区块")
-        self.assertEqual(_price_source_label("first_price_fallback"), "首个价格 fallback")
+        self.assertEqual(_price_source_label("first_price_fallback"), "首个价格弱匹配")
         self.assertEqual(_price_source_label("unpriced"), "未取价")
         self.assertEqual(_price_source_label(None), "未知")
         self.assertEqual(_price_source_label(""), "未知")
@@ -452,7 +471,7 @@ class DecisionSummaryTests(unittest.TestCase):
         text = "\n".join(_build_decision_summary(rows))
 
         self.assertIn("最低价需复核；第二低价可信度更高且价差较小。", text)
-        self.assertIn("最低价来自首个价格 fallback，必须人工确认。", text)
+        self.assertIn("最低价来自首个价格弱匹配，必须人工确认。", text)
 
     def test_decision_summary_emits_parser_warning_hint(self) -> None:
         rows = [
@@ -504,7 +523,7 @@ class DecisionSummaryTests(unittest.TestCase):
         text = "\n".join(_build_decision_summary(rows))
 
         self.assertIn(
-            "所有有效价格均来自 fallback 解析，作为初筛结果，需人工复核。",
+            "所有有效价格均来自弱匹配/恢复解析，作为初筛结果，需人工复核。",
             text,
         )
 

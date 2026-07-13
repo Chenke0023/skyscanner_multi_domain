@@ -24,6 +24,11 @@ from urllib.parse import urlparse
 
 import aiohttp
 
+from skyscanner_multi_domain.runtime.browsers import (
+    detect_browser_binaries,
+    first_launchable_browser,
+    ordered_browser_names,
+)
 from skyscanner_multi_domain.runtime.paths import get_browser_profile_dir
 from skyscanner_multi_domain.diagnostics.attempt_trace import emit_trace
 from skyscanner_multi_domain.models import FlightQuote, RegionConfig
@@ -62,12 +67,7 @@ PROFILE_CACHE_PATHS = (
 
 
 def detect_browsers() -> dict[str, Path]:
-    candidates = {
-        "comet": Path("/Applications/Comet.app/Contents/MacOS/Comet"),
-        "chrome": Path("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"),
-        "edge": Path("/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge"),
-    }
-    return {name: path for name, path in candidates.items() if path.exists()}
+    return detect_browser_binaries()
 
 
 def profile_dir_for(browser_name: str) -> Path:
@@ -161,22 +161,17 @@ def _kill_comet() -> bool:
 def _select_browser_launch_target(
     preferred_browser: str | None = None,
 ) -> tuple[str, Path, Path]:
-    browsers = detect_browsers()
-    browser_order = (
-        (preferred_browser.lower(),)
-        if preferred_browser
-        else ("comet", "edge", "chrome")
-    )
-    for browser_name in browser_order:
-        binary = browsers.get(browser_name)
-        if not binary:
-            continue
-        if browser_name == "comet":
-            profile_dir = _comet_default_profile()
-        else:
-            profile_dir = profile_dir_for(browser_name)
-        return browser_name, binary, profile_dir
-    raise RuntimeError("没有找到可自动启动的 Comet、Edge 或 Chrome")
+    selected = first_launchable_browser(preferred_browser)
+    if selected is None:
+        candidates = ", ".join(ordered_browser_names(preferred_browser))
+        raise RuntimeError(f"没有找到可自动启动的浏览器（已检查: {candidates}）")
+
+    browser_name, binary = selected
+    if browser_name == "comet":
+        profile_dir = _comet_default_profile()
+    else:
+        profile_dir = profile_dir_for(browser_name)
+    return browser_name, binary, profile_dir
 
 
 def _launch_browser_process(
@@ -284,9 +279,9 @@ def ensure_cdp_ready(
             return cdp_info
 
     raise RuntimeError(
-        "未检测到浏览器调试端口 9222。"
+        "browser-unavailable: 未检测到可连接的浏览器调试端口 9222。"
         + (f" {launch_note}。" if launch_note else "")
-        + " 请关闭已打开的浏览器后重试，或手动启动带 --remote-debugging-port=9222 的 Comet / Edge / Chrome。"
+        + " 请安装 Chrome、Edge 或 Comet 后重试，或手动使用 --remote-debugging-port=9222 启动浏览器。"
     )
 
 
@@ -610,7 +605,7 @@ def _quote_from_cdp_payload(
     page_url = str(payload.get("url", fallback_url))
     page_text = str(payload.get("text", ""))
     quote = extract_page_quote(region, page_url, page_text)
-    quote.source_kind = "browser_fallback"
+    quote.source_kind = "page"
     if quote.price is not None:
         return quote
 
@@ -625,7 +620,7 @@ def _quote_from_cdp_payload(
             captcha_type,
             source_label="页面模式",
         )
-        quote.source_kind = "browser_fallback"
+        quote.source_kind = "page"
         return quote
     return quote
 
@@ -882,7 +877,7 @@ async def compare_via_pages(
                 region=quote.region,
                 transport="page",
                 attempt_index=0,
-                source_kind=quote.source_kind or "browser_fallback",
+                source_kind=quote.source_kind or "page",
                 used_cdp_cookies=False,
                 used_profile_dir=False,
                 wait_ms=max(args.timeout, args.page_wait + 60, 45) * 1000,

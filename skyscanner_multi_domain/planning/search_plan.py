@@ -105,7 +105,6 @@ class SearchStats:
     market_success_rate: dict[str, float]
     market_win_rate: dict[str, float]
     market_average_confidence: dict[str, float]
-    market_fallback_rate: dict[str, float]
     market_problem_rate: dict[str, float]
 
 
@@ -118,7 +117,6 @@ def collect_search_stats(previous_rows_by_date: RowsByDate | None) -> SearchStat
     market_wins: dict[str, int] = {}
     market_confidence_total: dict[str, float] = {}
     market_confidence_count: dict[str, int] = {}
-    market_fallback: dict[str, int] = {}
     market_problem: dict[str, int] = {}
 
     for _trip_label, rows in previous_rows_by_date or []:
@@ -139,8 +137,6 @@ def collect_search_stats(previous_rows_by_date: RowsByDate | None) -> SearchStat
                 if confidence is not None:
                     market_confidence_total[market] = market_confidence_total.get(market, 0.0) + confidence
                     market_confidence_count[market] = market_confidence_count.get(market, 0) + 1
-                if _uses_fallback(row):
-                    market_fallback[market] = market_fallback.get(market, 0) + 1
                 if _has_market_problem(row):
                     market_problem[market] = market_problem.get(market, 0) + 1
             if has_price:
@@ -164,7 +160,6 @@ def collect_search_stats(previous_rows_by_date: RowsByDate | None) -> SearchStat
         market_success_rate=_rates(market_success, market_total),
         market_win_rate=_rates(market_wins, market_total),
         market_average_confidence=_averages(market_confidence_total, market_confidence_count),
-        market_fallback_rate=_rates(market_fallback, market_total),
         market_problem_rate=_rates(market_problem, market_total),
     )
 
@@ -271,13 +266,11 @@ def build_market_candidates(
         success_rate = stats.market_success_rate.get(code, 0.5)
         win_rate = stats.market_win_rate.get(code, 0.0)
         confidence_score = stats.market_average_confidence.get(code, 0.72)
-        fallback_rate = stats.market_fallback_rate.get(code, 0.0)
         problem_rate = stats.market_problem_rate.get(code, 0.0)
         reliability_score = _market_reliability_score(
             success_rate=success_rate,
             confidence_score=confidence_score,
             win_rate=win_rate,
-            fallback_rate=fallback_rate,
             problem_rate=problem_rate,
         )
         usability_score = _currency_usability_score(code)
@@ -311,7 +304,6 @@ def build_market_candidates(
                     manual_score,
                     win_rate,
                     reliability_score,
-                    fallback_rate,
                     problem_rate,
                 ),
                 reliability=reliability_score,
@@ -652,14 +644,6 @@ def _numeric_confidence(value: object) -> float | None:
     return None
 
 
-def _uses_fallback(row: dict[str, object]) -> bool:
-    source_kind = str(row.get("source_kind") or "").strip().lower()
-    price_source = str(row.get("price_source") or "").strip().lower()
-    if source_kind in {"browser_fallback", "cdp_reuse", "cached"}:
-        return True
-    return price_source in {"first_price_fallback", "recovered_best", "manual_confirmed"}
-
-
 def _has_market_problem(row: dict[str, object]) -> bool:
     status = str(row.get("status") or row.get("failure_reason") or "").strip().lower()
     if any(marker in status for marker in ("challenge", "captcha", "loading", "timeout")):
@@ -673,7 +657,6 @@ def _market_reliability_score(
     success_rate: float,
     confidence_score: float,
     win_rate: float,
-    fallback_rate: float,
     problem_rate: float,
 ) -> float:
     raw_score = (
@@ -681,7 +664,6 @@ def _market_reliability_score(
         + 0.34 * confidence_score
         + 0.12 * win_rate
         + 0.06
-        - 0.16 * fallback_rate
         - 0.22 * problem_rate
     )
     return max(0.0, min(raw_score, 1.0))
@@ -710,7 +692,6 @@ def _market_reason(
     manual_score: float,
     win_rate: float,
     reliability_score: float,
-    fallback_rate: float,
     problem_rate: float,
 ) -> str:
     reasons: list[str] = []
@@ -726,8 +707,6 @@ def _market_reason(
         reasons.append(f"可靠度 {reliability_score:.0%}")
     elif reliability_score < 0.45:
         reasons.append(f"可靠度偏低 {reliability_score:.0%}")
-    if fallback_rate >= 0.5:
-        reasons.append(f"兜底依赖 {fallback_rate:.0%}")
     if problem_rate >= 0.34:
         reasons.append(f"验证/加载风险 {problem_rate:.0%}")
     return "，".join(reasons) if reasons else "候选对照市场"

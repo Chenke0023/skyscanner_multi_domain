@@ -12,6 +12,7 @@ from skyscanner_multi_domain.transports.cdp import (
     _quote_from_cdp_payload,
     compare_via_pages,
     detect_cdp_version,
+    ensure_cdp_ready,
     launch_browser_with_cdp,
 )
 
@@ -334,3 +335,31 @@ def test_verify_browser_session_persistence_async_restarts_browser_and_confirms_
         assert terminate_process.call_count == 2
 
     asyncio.run(run_case())
+
+
+def test_ensure_cdp_ready_uses_existing_endpoint_without_launch() -> None:
+    endpoint = {"Browser": "Chrome/1"}
+    with (
+        patch("skyscanner_multi_domain.transports.cdp.detect_cdp_version", return_value=endpoint),
+        patch("skyscanner_multi_domain.transports.cdp.launch_browser_with_cdp") as launch,
+    ):
+        assert ensure_cdp_ready() == endpoint
+
+    launch.assert_not_called()
+
+
+def test_ensure_cdp_ready_reports_browser_unavailable() -> None:
+    with (
+        patch("skyscanner_multi_domain.transports.cdp.detect_cdp_version", return_value=None),
+        patch("skyscanner_multi_domain.transports.cdp.launch_browser_with_cdp", return_value="没有找到可自动启动的浏览器"),
+        patch("skyscanner_multi_domain.transports.cdp.wait_for_cdp", return_value=None),
+    ):
+        try:
+            ensure_cdp_ready()
+        except RuntimeError as exc:
+            message = str(exc)
+        else:
+            raise AssertionError("expected browser-unavailable error")
+
+    assert message.startswith("browser-unavailable:")
+    assert "Chrome、Edge 或 Comet" in message

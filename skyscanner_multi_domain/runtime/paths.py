@@ -36,6 +36,7 @@ APP_HOME_DIR = _resolve_runtime_root()
 OUTPUTS_DIR = APP_HOME_DIR / "outputs"
 REPORTS_DIR = OUTPUTS_DIR / "reports"
 LOGS_DIR = APP_HOME_DIR / "logs"
+TRACES_DIR = APP_HOME_DIR / "traces"
 DATA_DIR = PROJECT_ROOT / "data"
 RUNTIME_DIR = APP_HOME_DIR / "runtime"
 BROWSER_PROFILES_DIR = RUNTIME_DIR / "browser-profiles"
@@ -66,6 +67,7 @@ _BUILD_SOURCE_ROOT = _load_build_source_root()
 def ensure_runtime_dirs() -> None:
     REPORTS_DIR.mkdir(parents=True, exist_ok=True)
     LOGS_DIR.mkdir(parents=True, exist_ok=True)
+    TRACES_DIR.mkdir(parents=True, exist_ok=True)
     RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
     BROWSER_PROFILES_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -73,6 +75,11 @@ def ensure_runtime_dirs() -> None:
 def get_reports_dir() -> Path:
     ensure_runtime_dirs()
     return REPORTS_DIR
+
+
+def get_traces_dir() -> Path:
+    ensure_runtime_dirs()
+    return TRACES_DIR
 
 
 def get_log_file(name: str) -> Path:

@@ -16,6 +16,7 @@ else
   VERSION="$(date +%Y.%m.%d)"
 fi
 echo "Building ${APP_NAME} v${VERSION}"
+RELEASE_ZIP="${DIST_DIR}/skyscanner-multi-domain-v${VERSION}-macos-arm64.zip"
 
 # ── Record source root for bundled runtime paths ────────────────
 python3 -c "
@@ -44,9 +45,13 @@ fi
 "${PROJECT_ROOT}/scripts/build_web_ui.sh"
 
 # ── Clean previous build ─────────────────────────────────────────
+mkdir -p "${DIST_DIR}"
+find "${DIST_DIR}" -maxdepth 1 -type f -name "*.zip" -delete
 rm -rf "${DIST_DIR}/${APP_NAME}" \
+       "${DIST_DIR}/${APP_NAME}-Standalone" \
        "${APP_BUNDLE}" \
-       "${PROJECT_ROOT}/build/${APP_NAME}"
+       "${PROJECT_ROOT}/build/${APP_NAME}" \
+       "${PROJECT_ROOT}/build/${APP_NAME}-Standalone"
 
 # ── PyInstaller build ────────────────────────────────────────────
 cd "${PROJECT_ROOT}"
@@ -63,29 +68,30 @@ python3 -m PyInstaller \
   --hidden-import webview \
   --hidden-import webview.platforms.cocoa \
   --hidden-import aiohttp \
-  --hidden-import curl_cffi \
-  --hidden-import lxml \
-  --hidden-import bs4 \
-  --hidden-import scrapling \
   --hidden-import cli \
   --hidden-import desktop_logic \
   --hidden-import desktop_ui_service \
-  --hidden-import failure_replay \
-  --hidden-import captcha_solver \
-  --collect-submodules skyscanner_multi_domain \
-  --collect-data apify_fingerprint_datapoints \
+  --exclude-module opencli \
+  --exclude-module scrapling \
+  --exclude-module patchright \
+  --exclude-module playwright \
+  --exclude-module babel \
+  --exclude-module apify_fingerprint_datapoints \
+  --exclude-module numpy \
+  --exclude-module mypy \
+  --exclude-module neo \
+  --exclude-module captcha_solver \
+  --exclude-module failure_replay \
+  --exclude-module bs4 \
+  --exclude-module lxml \
+  --exclude-module fastapi \
+  --exclude-module uvicorn \
+  --exclude-module httpx \
+  --exclude-module pydantic \
+  --exclude-module openai \
+  --exclude-module PIL \
   --exclude-module pytest \
   --exclude-module unittest \
-  --exclude-module test_cli \
-  --exclude-module test_date_window \
-  --exclude-module test_transport_cdp \
-  --exclude-module test_transport_scrapling \
-  --exclude-module test_desktop_ui_service \
-  --exclude-module test_location_resolver \
-  --exclude-module test_scan_history \
-  --exclude-module test_failure_replay \
-  --exclude-module test_app_paths \
-  --exclude-module test_transport_opencli \
   --strip \
   desktop_webview.py
 
@@ -114,9 +120,87 @@ if [[ ! -x "${APP_EXEC}" ]]; then
   exit 1
 fi
 
+
+# ── Reject retired or development-only modules ───────────────────
+FORBIDDEN_PATTERN='(^|/)(opencli|scrapling|patchright|playwright|babel|apify_fingerprint_datapoints|numpy|mypy|neo|captcha_solver|failure_replay)([./]|$)'
+FORBIDDEN_PATHS="$(find "${APP_BUNDLE}" -print | sed "s#${APP_BUNDLE}/##" | grep -Ei "${FORBIDDEN_PATTERN}" || true)"
+if [[ -n "${FORBIDDEN_PATHS}" ]]; then
+  echo "ERROR: 应用包包含已退役或禁止模块:"
+  echo "${FORBIDDEN_PATHS}"
+  exit 1
+fi
+
+print_largest_components() {
+  echo "应用包最大组件:"
+  du -ak "${APP_BUNDLE}" | sort -nr | head -30
+}
+
+APP_SIZE_LIMIT=$((150 * 1024 * 1024))
+ZIP_SIZE_LIMIT=$((60 * 1024 * 1024))
+APP_SIZE_BYTES=$(( $(du -sk "${APP_BUNDLE}" | awk '{print $1}') * 1024 ))
+if (( APP_SIZE_BYTES > APP_SIZE_LIMIT )); then
+  echo "ERROR: .app 大小 ${APP_SIZE_BYTES} bytes，超过 150MB 门禁 ${APP_SIZE_LIMIT} bytes"
+  print_largest_components
+  exit 1
+fi
+
+# ── Runtime smoke from a read-only cwd ───────────────────────────
+SMOKE_TMP="$(mktemp -d)"
+SMOKE_READONLY="${SMOKE_TMP}/readonly"
+SMOKE_HOME="${SMOKE_TMP}/app-home"
+mkdir -p "${SMOKE_READONLY}" "${SMOKE_HOME}"
+chmod 555 "${SMOKE_READONLY}"
+set +e
+SMOKE_OUTPUT="$(
+  cd "${SMOKE_READONLY}" && \
+  SKYSCANNER_APP_HOME="${SMOKE_HOME}" \
+  SKYSCANNER_GUI_SMOKE_TEST=1 \
+  "${APP_EXEC}" 2>&1
+)"
+SMOKE_STATUS=$?
+set -e
+chmod 755 "${SMOKE_READONLY}"
+if [[ ${SMOKE_STATUS} -ne 0 || "${SMOKE_OUTPUT}" != *"smoke-ok"* ]]; then
+  echo "ERROR: 打包 app smoke 失败"
+  echo "${SMOKE_OUTPUT}"
+  rm -rf "${SMOKE_TMP}"
+  exit 1
+fi
+if [[ ! -d "${SMOKE_HOME}/traces" ]]; then
+  echo "ERROR: 打包 app smoke 未创建 runtime traces 目录"
+  rm -rf "${SMOKE_TMP}"
+  exit 1
+fi
+if [[ -d "${SMOKE_READONLY}/traces" ]]; then
+  echo "ERROR: 打包 app smoke 在只读 cwd 下创建了 traces"
+  rm -rf "${SMOKE_TMP}"
+  exit 1
+fi
+rm -rf "${SMOKE_TMP}"
+echo "Bundle runtime smoke passed"
+
+# PyInstaller leaves a redundant onedir tree next to the .app on some runs.
+rm -rf "${DIST_DIR}/${APP_NAME}"
+
+# Keep exactly one distributable archive in dist/.
+/usr/bin/ditto -c -k --keepParent "${APP_BUNDLE}" "${RELEASE_ZIP}"
+
+ZIP_SIZE_BYTES="$(stat -f%z "${RELEASE_ZIP}")"
+if (( ZIP_SIZE_BYTES > ZIP_SIZE_LIMIT )); then
+  echo "ERROR: 发布 ZIP 大小 ${ZIP_SIZE_BYTES} bytes，超过 60MB 门禁 ${ZIP_SIZE_LIMIT} bytes"
+  print_largest_components
+  exit 1
+fi
+
+# Build intermediates are large and fully reproducible.
+rm -rf "${PROJECT_ROOT}/build/${APP_NAME}" \
+       "${PROJECT_ROOT}/build/${APP_NAME}-Standalone"
+
 echo ""
 echo "────────────────────────────────────────────"
 echo "  Built: ${APP_BUNDLE}"
+echo "  Zip: ${RELEASE_ZIP}"
 echo "  Version: ${VERSION}"
 echo "  Size: $(du -sh "${APP_BUNDLE}" | cut -f1)"
+echo "  Zip size: $(du -sh "${RELEASE_ZIP}" | cut -f1)"
 echo "────────────────────────────────────────────"

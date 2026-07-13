@@ -43,7 +43,6 @@ function stateWithEvidence(): UIState {
         price_source: "first_price_fallback",
         parser_warnings: ["首个价格 fallback"],
         evidence_text: "Best ¥1300 Cheapest ¥1234",
-        fallback_attempts: [{ transport: "opencli", status: "opencli_error", error: "timeout" }],
         readiness: "unknown_parse_surface",
         price_candidates_count: 2,
         selected_candidate_rank: 1,
@@ -53,7 +52,7 @@ function stateWithEvidence(): UIState {
       displayRows: [],
       rowsByDate: [],
       quoteSnapshotsByDate: [],
-      trust: { fetchQualityTelemetry: {}, parserRecoveryTelemetry: {}, snapshotSummary: {}, repairPlan: { summary: {}, tasks: [] } },
+      trust: { fetchQualityTelemetry: {}, parserRecoveryTelemetry: {}, repairPlan: { summary: {}, tasks: [] } },
     },
     outputs: { currentOutput: null, reportsDir: "" },
   };
@@ -96,7 +95,7 @@ describe("App", () => {
     expect(await screen.findByText("保存汇总")).toBeInTheDocument();
   });
 
-  it("shows full fallback details in result evidence", async () => {
+  it("shows parser details in result evidence", async () => {
     const state = stateWithEvidence();
     window.pywebview = { api: { get_initial_state: async () => state, get_ui_state: async () => state } };
 
@@ -106,8 +105,88 @@ describe("App", () => {
     expect(await screen.findByText("显示原始结果")).toBeInTheDocument();
     expect(screen.queryByText("成功结果")).not.toBeInTheDocument();
     fireEvent.click(await screen.findByText("显示原始结果"));
-    expect(await screen.findByText(/opencli · opencli_error · timeout/)).toBeInTheDocument();
+    expect(await screen.findByText("Best ¥1300 Cheapest ¥1234")).toBeInTheDocument();
     fireEvent.click(await screen.findByText("详情"));
     expect(await screen.findByText("完整警告")).toBeInTheDocument();
+  });
+
+  it("shows scan error reason directly in the status bar", async () => {
+    const state = stateWithEvidence();
+    state.status = {
+      message: "失败",
+      busy: false,
+      error: "目的地不能为空。",
+      progress: { step: 0, total: 0, date: "", regionName: "" },
+    };
+    state.results.successRows = [];
+    window.pywebview = { api: { get_initial_state: async () => state, get_ui_state: async () => state } };
+
+    render(<App />);
+
+    expect(await screen.findByText("失败: 目的地不能为空。")).toBeInTheDocument();
+  });
+
+  it("shows failure row error reasons in the raw results table and detail panel", async () => {
+    const state = stateWithEvidence();
+    state.results.successRows = [];
+    state.results.failureRows = [
+      {
+        date: "2026-05-20",
+        route: "PEK-ISB",
+        region_name: "巴基斯坦",
+        region_code: "PK",
+        status: "browser_unavailable",
+        error: "browser-unavailable: no launchable browser",
+        failure_category: "network",
+        failure_action: "复用已打开的页面后重试",
+        link: "https://example.test/pk",
+      },
+    ];
+    window.pywebview = { api: { get_initial_state: async () => state, get_ui_state: async () => state } };
+
+    render(<App />);
+
+    fireEvent.click(await screen.findByText("查看详细结果"));
+    fireEvent.click(await screen.findByText("显示原始结果"));
+
+    expect(await screen.findByText("错误原因")).toBeInTheDocument();
+    expect(await screen.findByText("browser-unavailable: no launchable browser")).toBeInTheDocument();
+    fireEvent.click(await screen.findByText("详情"));
+    expect(await screen.findByText("失败详情")).toBeInTheDocument();
+    expect(await screen.findAllByText("browser_unavailable")).toHaveLength(2);
+  });
+
+  it("opens the complete country dropdown for an empty country field", async () => {
+    const state = stateWithEvidence();
+    state.form.destination = "";
+    state.form.destination_country = true;
+    state.results.successRows = [];
+    let emptyCountryLookupSeen = false;
+    window.pywebview = {
+      api: {
+        get_initial_state: async () => state,
+        get_ui_state: async () => state,
+        update_query_state: async () => state,
+        get_location_suggestions: async (field, query, options) => {
+          emptyCountryLookupSeen =
+            emptyCountryLookupSeen ||
+            (field === "destination" && query === "" && Boolean(options?.destinationCountry));
+          return {
+            field,
+            items: [
+              { name: "中国", code: "CN", kind: "country", label: "中国 (CN, 国家)" },
+              { name: "巴基斯坦", code: "PK", kind: "country", label: "巴基斯坦 (PK, 国家)" },
+            ],
+          };
+        },
+      },
+    };
+
+    render(<App />);
+
+    fireEvent.focus(await screen.findByPlaceholderText("例如：东京"));
+
+    expect(await screen.findByText("巴基斯坦 (PK, 国家)")).toBeInTheDocument();
+    expect(emptyCountryLookupSeen).toBe(true);
   });
 });
