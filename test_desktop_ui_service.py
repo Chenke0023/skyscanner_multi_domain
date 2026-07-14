@@ -397,3 +397,24 @@ def test_history_detail_includes_plan_telemetry_and_trust_summary(tmp_path: Path
     assert "first_price_fallback×1" in detail
     assert "低可信度结果: 1" in detail
     assert "Parser warnings: 1" in detail
+
+
+def test_manual_challenge_waiting_and_resolved_update_status(tmp_path: Path) -> None:
+    service = build_service(tmp_path)
+    region = RegionConfig(
+        code="HK",
+        name="香港",
+        domain="https://www.skyscanner.com.hk",
+        locale="zh-HK",
+        currency="HKD",
+    )
+
+    service._handle_bot_challenge_waiting(region, trip_label="2026-08-01")
+    waiting_state = service.get_ui_state()
+    assert "正在等待人工验证" in waiting_state["status"]["message"]
+    assert "自动恢复并刷新结果" in waiting_state["status"]["message"]
+
+    service._handle_bot_challenge_resolved(region, trip_label="2026-08-01")
+    resolved_state = service.get_ui_state()
+    assert "人工验证已通过" in resolved_state["status"]["message"]
+    assert "正在恢复采集" in resolved_state["status"]["message"]

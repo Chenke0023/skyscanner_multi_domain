@@ -6,6 +6,7 @@
 - Combine city, airport, and country suggestions directly in the main route fields, automatically switching to country-scope searches when a country is selected.
 - Dismiss origin and destination suggestion menus immediately after a location is selected, and ignore stale suggestion responses.
 - Notify the desktop user immediately when a market triggers a bot/CAPTCHA challenge, and retain unresolved challenge tabs instead of closing them when the scan wait expires.
+- Keep timed-out CAPTCHA markets in a manual-verification wait state, then automatically resume extraction and refresh desktop results after verification succeeds.
 
 ## 1.3.0 - 2026-07-13
 
