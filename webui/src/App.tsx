@@ -161,11 +161,12 @@ function App() {
   }, [form]);
 
   useEffect(() => {
-    const shouldFetchCompleteCountryList =
-      Boolean(form?.origin_country) && activeField === "origin";
-    if (!form || (!originDeferred.trim() && !shouldFetchCompleteCountryList)) {
+    let cancelled = false;
+    if (activeField !== "origin" || !form || !originDeferred.trim()) {
       setSuggestions((current) => ({ ...current, origin: [] }));
-      return;
+      return () => {
+        cancelled = true;
+      };
     }
     desktopApi
       .get_location_suggestions("origin", originDeferred, {
@@ -173,19 +174,26 @@ function App() {
         originCountry: form.origin_country,
         destinationCountry: form.destination_country,
         preferMetro: !form.exact_airport,
+        smartMode: true,
       })
       .then((response) => {
-        setSuggestions((current) => ({ ...current, origin: response.items }));
+        if (!cancelled) {
+          setSuggestions((current) => ({ ...current, origin: response.items }));
+        }
       })
       .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
   }, [activeField, form, originDeferred]);
 
   useEffect(() => {
-    const shouldFetchCompleteCountryList =
-      Boolean(form?.destination_country) && activeField === "destination";
-    if (!form || (!destinationDeferred.trim() && !shouldFetchCompleteCountryList)) {
+    let cancelled = false;
+    if (activeField !== "destination" || !form || !destinationDeferred.trim()) {
       setSuggestions((current) => ({ ...current, destination: [] }));
-      return;
+      return () => {
+        cancelled = true;
+      };
     }
     desktopApi
       .get_location_suggestions("destination", destinationDeferred, {
@@ -193,11 +201,17 @@ function App() {
         originCountry: form.origin_country,
         destinationCountry: form.destination_country,
         preferMetro: false,
+        smartMode: true,
       })
       .then((response) => {
-        setSuggestions((current) => ({ ...current, destination: response.items }));
+        if (!cancelled) {
+          setSuggestions((current) => ({ ...current, destination: response.items }));
+        }
       })
       .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
   }, [activeField, destinationDeferred, form]);
 
   const filteredResults = useMemo(() => {

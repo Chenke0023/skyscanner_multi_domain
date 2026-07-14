@@ -50,6 +50,15 @@ class CliParserTests(unittest.TestCase):
             run.return_value = Namespace(returncode=0, stdout="Now drawing from 'Battery Power'\\n", stderr="")
             self.assertFalse(_is_ac_power_connected())
 
+    def test_page_command_defaults_to_exact_date(self) -> None:
+        parser = build_parser()
+
+        args = parser.parse_args(
+            ["page", "-o", "北京", "-d", "阿拉木图", "-t", "2026-05-20"]
+        )
+
+        self.assertEqual(args.date_window, 0)
+
     def test_page_command_accepts_return_date(self) -> None:
         parser = build_parser()
 
@@ -429,6 +438,7 @@ class DecisionSummaryTests(unittest.TestCase):
                 best_cny_price=2700.0,
                 confidence=0.78,
                 price_source="best_block",
+                rankable=True,
             ),
             _make_simplified_row(
                 region_name="新加坡",
@@ -449,7 +459,7 @@ class DecisionSummaryTests(unittest.TestCase):
         self.assertIn("价差：¥172.00", text)
         self.assertIn("challenge×1", text)
 
-    def test_decision_summary_marks_low_confidence_primary_with_runner_advantage(
+    def test_decision_summary_excludes_low_confidence_fallback_from_minimum(
         self,
     ) -> None:
         rows = [
@@ -470,8 +480,10 @@ class DecisionSummaryTests(unittest.TestCase):
         ]
         text = "\n".join(_build_decision_summary(rows))
 
-        self.assertIn("最低价需复核；第二低价可信度更高且价差较小。", text)
-        self.assertIn("最低价来自首个价格弱匹配，必须人工确认。", text)
+        self.assertIn("最低价：¥2,480.00", text)
+        self.assertIn("市场：香港", text)
+        self.assertNotIn("¥2,438.00", text)
+        self.assertNotIn("最低价来自首个价格弱匹配", text)
 
     def test_decision_summary_emits_parser_warning_hint(self) -> None:
         rows = [
@@ -505,7 +517,7 @@ class DecisionSummaryTests(unittest.TestCase):
         self.assertIn("- challenge: 1", text)
         self.assertIn("- parse_failed: 1", text)
 
-    def test_decision_summary_warns_when_only_fallback_sources_priced(self) -> None:
+    def test_decision_summary_rejects_only_unrankable_fallback_sources(self) -> None:
         rows = [
             _make_simplified_row(
                 region_name="中国",
@@ -522,10 +534,9 @@ class DecisionSummaryTests(unittest.TestCase):
         ]
         text = "\n".join(_build_decision_summary(rows))
 
-        self.assertIn(
-            "所有有效价格均来自弱匹配/恢复解析，作为初筛结果，需人工复核。",
-            text,
-        )
+        self.assertIn("本次未抓取到任何有效价格", text)
+        self.assertNotIn("¥2,438.00", text)
+        self.assertNotIn("¥2,520.00", text)
 
     def test_decision_summary_includes_date_when_requested(self) -> None:
         row = _make_simplified_row(date="2026-05-20")

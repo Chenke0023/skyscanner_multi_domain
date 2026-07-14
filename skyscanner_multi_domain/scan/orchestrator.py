@@ -298,12 +298,16 @@ def quotes_to_dicts(quotes: list[FlightQuote]) -> list[dict[str, Any]]:
             "selected_candidate_rank": quote.selected_candidate_rank,
             "candidate_sources": list(quote.candidate_sources or []),
             "readiness": quote.readiness,
+            "rankable": quote.rankable,
+            "result_visibility": quote.result_visibility,
+            "requires_manual_review": quote.requires_manual_review,
             "route_detected": quote.route_detected,
             "date_detected": quote.date_detected,
             "currency_detected": quote.currency_detected,
             "route_mismatch": quote.route_mismatch,
             "date_mismatch": quote.date_mismatch,
             "currency_mismatch": quote.currency_mismatch,
+            "itinerary_legs": [dict(leg) for leg in quote.itinerary_legs],
             "tab_open_count": quote.tab_open_count,
             "tab_close_count": quote.tab_close_count,
             "reused_tab_count": quote.reused_tab_count,
@@ -336,6 +340,8 @@ async def run_page_scan(
     on_progress: ScanProgressCallback | None = None,
     config: Any | None = None,
     on_challenge: Callable[[RegionConfig, FlightQuote], Any] | None = None,
+    on_challenge_waiting: Callable[[RegionConfig, FlightQuote], Any] | None = None,
+    on_challenge_resolved: Callable[[RegionConfig, FlightQuote], Any] | None = None,
 ) -> list[FlightQuote]:
     """Scan selected markets through the system browser's CDP endpoint.
 
@@ -548,6 +554,8 @@ async def run_page_scan(
                         keep_tabs=keep_tabs,
                         keep_challenge_tabs=keep_challenge_tabs,
                         on_challenge=on_challenge,
+                        on_challenge_waiting=on_challenge_waiting,
+                        on_challenge_resolved=on_challenge_resolved,
                     )
                 else:
                     quotes = await compare_via_cdp_structured(

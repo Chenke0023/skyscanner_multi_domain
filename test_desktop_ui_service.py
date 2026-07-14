@@ -19,6 +19,18 @@ def build_service(tmp_path: Path) -> DesktopUIService:
     return service
 
 
+def test_new_desktop_state_uses_cn_hk_and_exact_date_defaults(tmp_path: Path) -> None:
+    state_path = tmp_path / "gui_last_query.json"
+    with patch("desktop_ui_service.get_gui_state_file", return_value=state_path):
+        service = DesktopUIService()
+
+    state = service.get_initial_state()
+
+    assert state["form"]["date_window"] == "0"
+    assert state["hints"]["effectiveRegions"] == ["CN", "HK", "KZ"]
+    assert state["hints"]["regions"].startswith("默认包含 CN,HK；")
+
+
 def test_bot_challenge_updates_status_log_and_sends_notification(tmp_path: Path) -> None:
     service = build_service(tmp_path)
     region = RegionConfig(
@@ -112,6 +124,23 @@ def test_country_suggestions_are_not_truncated_for_short_queries(tmp_path: Path)
     assert len(codes) > 8
     assert "PK" in codes
     assert "BR" in codes
+
+
+def test_smart_location_suggestions_mix_places_and_countries(tmp_path: Path) -> None:
+    service = build_service(tmp_path)
+
+    payload = service.get_location_suggestions(
+        "destination",
+        "巴",
+        {"smartMode": True, "destinationCountry": False},
+    )
+    kinds = {item["kind"] for item in payload["items"]}
+    codes = {item["code"] for item in payload["items"]}
+
+    assert "country" in kinds
+    assert "airport" in kinds or "metro" in kinds
+    assert "PK" in codes
+    assert "BCN" in codes
 
 
 def test_country_mode_empty_query_returns_complete_dropdown(tmp_path: Path) -> None:
@@ -368,3 +397,24 @@ def test_history_detail_includes_plan_telemetry_and_trust_summary(tmp_path: Path
     assert "first_price_fallback×1" in detail
     assert "低可信度结果: 1" in detail
     assert "Parser warnings: 1" in detail
+
+
+def test_manual_challenge_waiting_and_resolved_update_status(tmp_path: Path) -> None:
+    service = build_service(tmp_path)
+    region = RegionConfig(
+        code="HK",
+        name="香港",
+        domain="https://www.skyscanner.com.hk",
+        locale="zh-HK",
+        currency="HKD",
+    )
+
+    service._handle_bot_challenge_waiting(region, trip_label="2026-08-01")
+    waiting_state = service.get_ui_state()
+    assert "正在等待人工验证" in waiting_state["status"]["message"]
+    assert "自动恢复并刷新结果" in waiting_state["status"]["message"]
+
+    service._handle_bot_challenge_resolved(region, trip_label="2026-08-01")
+    resolved_state = service.get_ui_state()
+    assert "人工验证已通过" in resolved_state["status"]["message"]
+    assert "正在恢复采集" in resolved_state["status"]["message"]

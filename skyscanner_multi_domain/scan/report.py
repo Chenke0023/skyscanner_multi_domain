@@ -168,6 +168,7 @@ def format_json(
             "error": getattr(q, "error", None),
             "attempt_history": getattr(q, "attempt_history", []),
             "parser_warnings": getattr(q, "parser_warnings", []),
+            "itinerary_legs": getattr(q, "itinerary_legs", []),
         }
         result["quotes"].append(entry)
 
@@ -189,6 +190,7 @@ def format_jsonl(quotes: list[Any], *, scan_id: str = "") -> str:
             "rankable": getattr(q, "rankable", None),
             "source_kind": getattr(q, "source_kind", None),
             "attempt_count": _attempt_count(q),
+            "itinerary_legs": getattr(q, "itinerary_legs", []),
         }
         lines.append(json.dumps(entry, ensure_ascii=False, sort_keys=True))
     return "\n".join(lines)

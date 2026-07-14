@@ -99,16 +99,24 @@ def can_reuse_page_for_row(row: dict[str, Any]) -> bool:
 
 def classify_failure(status: str | None, error: str | None) -> tuple[str, str]:
     normalized = str(status or "").strip().lower()
-    normalized_error = str(error or "").strip()
-    if normalized in {"px_challenge", "page_challenge"}:
-        return ("需要浏览器验证", "打开该市场结果页并完成验证后重试")
-    if normalized == "page_loading":
-        return ("页面仍在加载", "稍后重试，或复用已打开的页面")
-    if normalized == "page_parse_failed":
-        return ("页面结构可见但未识别价格", "打开结果页确认是否已完整加载")
-    if normalized:
-        return ("网络/抓取异常", normalized_error or "重试该市场")
-    return ("网络/抓取异常", normalized_error or "重试该市场")
+    normalized_error = str(error or "").strip().lower()
+    combined = f"{normalized} {normalized_error}"
+
+    if any(token in combined for token in ("cancelled", "canceled", "已取消")):
+        return ("扫描已取消", "重新开始扫描")
+    if any(token in combined for token in ("challenge", "captcha", "verify you are human", "robot")):
+        return ("需要人工验证", "打开页面完成验证；当前扫描会自动恢复")
+    if any(token in combined for token in ("browser-unavailable", "browser_unavailable", "browser missing", "no browser")):
+        return ("浏览器不可用", "启动 Chrome、Edge 或 Comet 后重试")
+    if any(token in combined for token in ("no_flights", "no flights", "no_results", "no results", "unsupported_route")):
+        return ("未找到可用航班", "调整日期或航线后重新搜索")
+    if any(token in combined for token in ("loading", "timeout", "incomplete_params", "empty_shell")):
+        return ("页面未加载完成", "重新扫描，或打开页面等待加载完成")
+    if any(token in combined for token in ("parse", "no price", "no structured price", "unpriced")):
+        return ("未能读取价格", "打开页面确认结果后重新扫描")
+    if any(token in combined for token in ("network", "connection", "eval_error", "page_missing", "missing_ws", "websocket")):
+        return ("连接失败", "检查浏览器连接后重新扫描")
+    return ("连接失败", "重新扫描该市场")
 
 
 def flatten_rows_by_date(rows_by_date: RowsByDate) -> list[dict[str, Any]]:

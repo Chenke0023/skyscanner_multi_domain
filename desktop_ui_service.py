@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import argparse
+import csv
+import io
 import subprocess
 import threading
 import time
@@ -23,7 +25,7 @@ from skyscanner_multi_domain.runtime.paths import PROJECT_ROOT, get_gui_state_fi
 from skyscanner_multi_domain.scan.confirmation import ConfirmationStatus, PriceConfirmationStore, sample_from_row
 from skyscanner_multi_domain.scan.config import ScanConfig
 from skyscanner_multi_domain.scan.query_service import QueryService
-from skyscanner_multi_domain.scan.result_service import ResultService
+from skyscanner_multi_domain.scan.result_service import ResultService, format_itinerary_legs
 from skyscanner_multi_domain.scan.output_rows import CombinedQuoteRow
 from skyscanner_multi_domain.planning.date_window import format_trip_date_label
 from desktop_logic import (
@@ -51,6 +53,7 @@ from desktop_logic import (
     _normalize_query_state,
     _order_grouped_by_trip_labels,
     _row_has_price,
+    _row_is_decision_eligible,
     _row_signature,
     _send_desktop_notification,
     _sort_combined_rows,
@@ -206,11 +209,13 @@ class DesktopUIService:
             )
         use_country = current_form["origin_country"] if field_name == "origin" else current_form["destination_country"]
         prefer_metro = bool(options.get("preferMetro", not current_form["exact_airport"])) if options else not current_form["exact_airport"]
+        smart_mode = bool(options.get("smartMode")) if options else False
         suggestions = self._resolve_location_suggestions(
             field=field_name,
             value=query,
             use_country_mode=use_country,
             prefer_metro=prefer_metro,
+            smart_mode=smart_mode,
         )
         return {
             "field": field_name,
@@ -273,12 +278,14 @@ class DesktopUIService:
                 "",
                 f"- 生成时间: `{datetime.now().isoformat(timespec='seconds')}`",
                 "",
-                "| 排名 | 日期 | 航段 | 地区 | 最低价 | 稳定性 | 可信度 | 来源 | 链接 |",
-                "| --- | --- | --- | --- | ---: | --- | --- | --- | --- |",
+                "| 排名 | 日期 | 航段 | 地区 | 最低价 | 最低价行程 | 稳定性 | 可信度 | 来源 | 链接 |",
+                "| --- | --- | --- | --- | ---: | --- | --- | --- | --- | --- |",
             ]
-            csv_rows = [
-                "rank,date,route,region,cheapest_cny,stability,reliability,source,link"
-            ]
+            csv_buffer = io.StringIO(newline="")
+            csv_writer = csv.writer(csv_buffer)
+            csv_writer.writerow(
+                ["rank", "date", "route", "region", "cheapest_cny", "itinerary", "stability", "reliability", "source", "link"]
+            )
             for index, row in enumerate(recommendations, start=1):
                 price = row.get("cheapest_cny_price")
                 price_text = f"¥{float(price):,.2f}" if isinstance(price, (int, float)) else "-"
@@ -297,6 +304,7 @@ class DesktopUIService:
                             str(row.get("route") or "-"),
                             str(row.get("region_name") or "-"),
                             price_text,
+                            format_itinerary_legs(row.get("itinerary_legs"), separator="<br>"),
                             str(row.get("stability_label") or "-"),
                             str(row.get("market_reliability_label") or "-"),
                             source_label,
@@ -305,23 +313,22 @@ class DesktopUIService:
                     )
                     + " |"
                 )
-                csv_rows.append(
-                    ",".join(
-                        [
-                            str(index),
-                            str(row.get("date") or "-"),
-                            str(row.get("route") or "-"),
-                            str(row.get("region_name") or "-"),
-                            str(float(price)) if isinstance(price, (int, float)) else "",
-                            str(row.get("stability_label") or "-"),
-                            str(row.get("market_reliability_label") or "-"),
-                            source_label,
-                            link,
-                        ]
-                    )
+                csv_writer.writerow(
+                    [
+                        index,
+                        str(row.get("date") or "-"),
+                        str(row.get("route") or "-"),
+                        str(row.get("region_name") or "-"),
+                        str(float(price)) if isinstance(price, (int, float)) else "",
+                        format_itinerary_legs(row.get("itinerary_legs")),
+                        str(row.get("stability_label") or "-"),
+                        str(row.get("market_reliability_label") or "-"),
+                        source_label,
+                        link,
+                    ]
                 )
             markdown_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
-            csv_path.write_text("\n".join(csv_rows) + "\n", encoding="utf-8")
+            csv_path.write_text(csv_buffer.getvalue(), encoding="utf-8")
             self._log_locked(f"已导出决策摘要: {markdown_path.name} / {csv_path.name}")
             return {
                 "markdownPath": str(markdown_path),
@@ -927,7 +934,22 @@ class DesktopUIService:
         value: str,
         use_country_mode: bool,
         prefer_metro: bool,
+        smart_mode: bool = False,
     ) -> list[LocationRecord]:
+        if smart_mode:
+            raw = value.strip()
+            if not raw:
+                return []
+            locations = self.query.location_resolver.search_locations(
+                raw,
+                prefer_metro=prefer_metro,
+                limit=5,
+            )
+            countries = self.query.location_resolver.search_countries(raw, limit=None)
+            return [
+                *locations,
+                *(LocationRecord(name=item.name, code=item.code, kind="country") for item in countries),
+            ]
         if use_country_mode:
             country_records = (
                 self.query.location_resolver.search_countries(value, limit=None)
@@ -1068,6 +1090,35 @@ class DesktopUIService:
             self._status_message = message
             self._log_locked(message)
         _send_desktop_notification("Skyscanner 需要人工验证", message)
+
+    def _handle_bot_challenge_waiting(
+        self,
+        region: Any,
+        *,
+        trip_label: str,
+        route_label: str | None = None,
+    ) -> None:
+        context = f"{trip_label} / {route_label}" if route_label else trip_label
+        message = (
+            f"{context}：{region.name}（{region.code}）正在等待人工验证。"
+            "完成浏览器中的验证后，扫描会自动恢复并刷新结果。"
+        )
+        with self._lock:
+            self._status_message = message
+            self._log_locked(message)
+
+    def _handle_bot_challenge_resolved(
+        self,
+        region: Any,
+        *,
+        trip_label: str,
+        route_label: str | None = None,
+    ) -> None:
+        context = f"{trip_label} / {route_label}" if route_label else trip_label
+        message = f"{context}：{region.name}（{region.code}）人工验证已通过，正在恢复采集..."
+        with self._lock:
+            self._status_message = message
+            self._log_locked(message)
 
     def _reset_derived_state(self) -> None:
         self._cheapest_conclusion = _build_cheapest_conclusion([])
@@ -1527,7 +1578,12 @@ class DesktopUIService:
             self._apply_alert_config_locked(config)
             return
         current_rows = [{"date": trip_label, **row} for trip_label, rows in rows_by_date for row in rows]
-        priced_rows = [row for row in current_rows if isinstance(row.get("cheapest_cny_price"), (int, float))]
+        priced_rows = [
+            row
+            for row in current_rows
+            if _row_is_decision_eligible(row)
+            and isinstance(row.get("cheapest_cny_price"), (int, float))
+        ]
         previous_rows = []
         if self._previous_scan_record is not None:
             previous_rows = [
@@ -1551,7 +1607,10 @@ class DesktopUIService:
                         f"达到目标价：{winner.get('region_name') or '-'} ¥{winner_price:,.2f}"
                     )
             previous_priced = [
-                row for row in previous_rows if isinstance(row.get("cheapest_cny_price"), (int, float))
+                row
+                for row in previous_rows
+                if _row_is_decision_eligible(row)
+                and isinstance(row.get("cheapest_cny_price"), (int, float))
             ]
             if config.drop_amount is not None and previous_priced:
                 previous_winner = min(previous_priced, key=_decision_price_key)
@@ -1567,7 +1626,8 @@ class DesktopUIService:
 
         if config.notify_on_recovery:
             previous_success = any(
-                isinstance(row.get("cheapest_cny_price"), (int, float))
+                _row_is_decision_eligible(row)
+                and isinstance(row.get("cheapest_cny_price"), (int, float))
                 for row in previous_rows
             )
             current_success = bool(priced_rows)
@@ -1835,6 +1895,12 @@ class DesktopUIService:
                         def on_challenge(region: Any, quote: Any, _trip_label: str = trip_label) -> None:
                             self._handle_bot_challenge(region, quote, trip_label=_trip_label)
 
+                        def on_challenge_waiting(region: Any, _quote: Any, _trip_label: str = trip_label) -> None:
+                            self._handle_bot_challenge_waiting(region, trip_label=_trip_label)
+
+                        def on_challenge_resolved(region: Any, _quote: Any, _trip_label: str = trip_label) -> None:
+                            self._handle_bot_challenge_resolved(region, trip_label=_trip_label)
+
                         self._log(f"开始扫描行程 {trip_label}。")
                         current_scope = rerun_scope
                         current_selected_codes = set(normalized_selected_codes)
@@ -1976,6 +2042,8 @@ class DesktopUIService:
                             transport="page",
                             on_region_start=on_region_start,
                             on_challenge=on_challenge,
+                            on_challenge_waiting=on_challenge_waiting,
+                            on_challenge_resolved=on_challenge_resolved,
                             scan_mode="preview_first",
                             rerun_scope=current_scope,
                             selected_region_codes=sorted(current_selected_codes),
@@ -2268,6 +2336,26 @@ class DesktopUIService:
                                         route_label=_route_label,
                                     )
 
+                                def on_challenge_waiting(
+                                    region: Any,
+                                    _quote: Any,
+                                    _trip_label: str = trip_label,
+                                    _route_label: str = route_label,
+                                ) -> None:
+                                    self._handle_bot_challenge_waiting(
+                                        region, trip_label=_trip_label, route_label=_route_label
+                                    )
+
+                                def on_challenge_resolved(
+                                    region: Any,
+                                    _quote: Any,
+                                    _trip_label: str = trip_label,
+                                    _route_label: str = route_label,
+                                ) -> None:
+                                    self._handle_bot_challenge_resolved(
+                                        region, trip_label=_trip_label, route_label=_route_label
+                                    )
+
                                 async def on_pair_progress(progress_payload: dict[str, Any]) -> None:
                                     if self._cancel_event.is_set():
                                         raise asyncio.CancelledError
@@ -2359,6 +2447,8 @@ class DesktopUIService:
                                     transport="page",
                                     on_region_start=on_region_start,
                                     on_challenge=on_challenge,
+                                    on_challenge_waiting=on_challenge_waiting,
+                                    on_challenge_resolved=on_challenge_resolved,
                                     scan_mode="preview_first",
                                     rerun_scope=current_scope,
                                     selected_region_codes=sorted(current_selected_codes),

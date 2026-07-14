@@ -54,6 +54,14 @@ export type AlertConfig = {
   last_auto_refresh_at: string | null;
 };
 
+export type ItineraryLeg = {
+  direction: "outbound" | "return";
+  departure_time?: string | null;
+  arrival_time?: string | null;
+  stop_count?: number | null;
+  duration_minutes?: number | null;
+};
+
 export type ResultRow = Record<string, unknown> & {
   date?: string;
   route?: string;
@@ -78,6 +86,7 @@ export type ResultRow = Record<string, unknown> & {
   price_candidates_count?: number | null;
   selected_candidate_rank?: number | null;
   candidate_sources?: string[];
+  itinerary_legs?: ItineraryLeg[];
 };
 
 export type CalendarPayload = {

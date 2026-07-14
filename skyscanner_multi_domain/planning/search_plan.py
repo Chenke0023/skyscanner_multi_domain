@@ -7,14 +7,13 @@ from typing import Iterable, Literal, Sequence
 from skyscanner_multi_domain.planning.date_window import format_iso_date, parse_iso_date
 from skyscanner_multi_domain.geo.location_resolver import LocationRecord
 from skyscanner_multi_domain.geo.regions import (
-    BASELINE_REGIONS,
+    MARKET_RANK_BASELINE_REGIONS,
     COUNTRY_TO_REGION_CODES,
     REGIONS,
     dedupe_region_codes,
 )
 
 
-SearchMode = Literal["fast", "balanced", "deep"]
 DatePhase = Literal["anchor", "edge", "nearby", "full"]
 TaskPhase = Literal["probe", "expand", "verify", "deep"]
 RowsByDate = list[tuple[str, list[dict[str, object]]]]
@@ -31,7 +30,6 @@ class TripIntent:
     destination_is_country: bool
     date_window: int
     user_regions: list[str]
-    mode: SearchMode = "balanced"
 
 
 @dataclass(frozen=True)
@@ -260,7 +258,7 @@ def build_market_candidates(
 
     candidates: list[MarketCandidate] = []
     for index, code in enumerate(ordered_codes):
-        baseline_score = 1.0 if code in BASELINE_REGIONS else 0.0
+        baseline_score = 1.0 if code in MARKET_RANK_BASELINE_REGIONS else 0.0
         route_score = 1.0 if code in route_relevant else 0.0
         manual_score = 1.0 if code in manual_regions else 0.0
         success_rate = stats.market_success_rate.get(code, 0.5)
@@ -532,8 +530,6 @@ def build_search_plan(
         warnings.append(
             f"计划任务数 {len(tasks)} 与候选笛卡尔积 {expected_task_count} 不一致。"
         )
-    if intent.mode != "balanced":
-        warnings.append(f"{intent.mode} 模式当前只影响计划说明，暂不减少扫描全集。")
     return SearchPlan(
         intent=intent,
         route_candidates=routes,
@@ -549,7 +545,6 @@ def render_search_plan(plan: SearchPlan, *, max_tasks: int = 12) -> str:
     lines = [
         "扫描计划",
         "",
-        f"模式: {plan.intent.mode}",
         f"任务总数: {len(plan.tasks)}",
         f"批次数: {len(plan.batches)}",
     ]

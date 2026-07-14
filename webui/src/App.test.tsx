@@ -47,6 +47,10 @@ function stateWithEvidence(): UIState {
         price_candidates_count: 2,
         selected_candidate_rank: 1,
         candidate_sources: ["visible_text"],
+        itinerary_legs: [
+          { direction: "outbound", departure_time: "08:10", arrival_time: "11:25", stop_count: 0, duration_minutes: 195 },
+          { direction: "return", departure_time: "18:30", arrival_time: "23:10", stop_count: 1, duration_minutes: 280 },
+        ],
       }],
       failureRows: [],
       displayRows: [],
@@ -105,9 +109,13 @@ describe("App", () => {
     expect(await screen.findByText("显示原始结果")).toBeInTheDocument();
     expect(screen.queryByText("成功结果")).not.toBeInTheDocument();
     fireEvent.click(await screen.findByText("显示原始结果"));
+    expect(await screen.findByText("去程")).toBeInTheDocument();
+    expect(await screen.findByText(/08:10–11:25 · 直飞 · 3小时15分/)).toBeInTheDocument();
+    expect(await screen.findByText("返程")).toBeInTheDocument();
+    expect(await screen.findByText(/18:30–23:10 · 经停1次 · 4小时40分/)).toBeInTheDocument();
+    fireEvent.click(await screen.findByText("技术详情"));
+    expect(await screen.findByText("解析警告")).toBeInTheDocument();
     expect(await screen.findByText("Best ¥1300 Cheapest ¥1234")).toBeInTheDocument();
-    fireEvent.click(await screen.findByText("详情"));
-    expect(await screen.findByText("完整警告")).toBeInTheDocument();
   });
 
   it("shows scan error reason directly in the status bar", async () => {
@@ -149,32 +157,33 @@ describe("App", () => {
     fireEvent.click(await screen.findByText("查看详细结果"));
     fireEvent.click(await screen.findByText("显示原始结果"));
 
-    expect(await screen.findByText("错误原因")).toBeInTheDocument();
+    expect(await screen.findByText("遇到的问题")).toBeInTheDocument();
+    expect(await screen.findByText("处理方式")).toBeInTheDocument();
+    expect(screen.queryByText("browser-unavailable: no launchable browser")).not.toBeInTheDocument();
+    fireEvent.click(await screen.findByText("技术详情"));
+    expect(await screen.findByText("原始状态码")).toBeInTheDocument();
+    expect(await screen.findByText("browser_unavailable")).toBeInTheDocument();
     expect(await screen.findByText("browser-unavailable: no launchable browser")).toBeInTheDocument();
-    fireEvent.click(await screen.findByText("详情"));
-    expect(await screen.findByText("失败详情")).toBeInTheDocument();
-    expect(await screen.findAllByText("browser_unavailable")).toHaveLength(2);
   });
 
-  it("opens the complete country dropdown for an empty country field", async () => {
+  it("offers countries and cities together and switches to country scope", async () => {
     const state = stateWithEvidence();
     state.form.destination = "";
-    state.form.destination_country = true;
     state.results.successRows = [];
-    let emptyCountryLookupSeen = false;
+    let smartLookupSeen = false;
     window.pywebview = {
       api: {
         get_initial_state: async () => state,
         get_ui_state: async () => state,
         update_query_state: async () => state,
         get_location_suggestions: async (field, query, options) => {
-          emptyCountryLookupSeen =
-            emptyCountryLookupSeen ||
-            (field === "destination" && query === "" && Boolean(options?.destinationCountry));
+          smartLookupSeen =
+            smartLookupSeen ||
+            (field === "destination" && query === "巴" && Boolean(options?.smartMode));
           return {
             field,
             items: [
-              { name: "中国", code: "CN", kind: "country", label: "中国 (CN, 国家)" },
+              { name: "巴塞罗那", code: "BCN", kind: "metro", label: "巴塞罗那 (BCN, 城市)" },
               { name: "巴基斯坦", code: "PK", kind: "country", label: "巴基斯坦 (PK, 国家)" },
             ],
           };
@@ -184,9 +193,49 @@ describe("App", () => {
 
     render(<App />);
 
-    fireEvent.focus(await screen.findByPlaceholderText("例如：东京"));
+    const destinationInput = await screen.findByPlaceholderText("例如：东京");
+    fireEvent.focus(destinationInput);
+    fireEvent.change(destinationInput, { target: { value: "巴" } });
 
-    expect(await screen.findByText("巴基斯坦 (PK, 国家)")).toBeInTheDocument();
-    expect(emptyCountryLookupSeen).toBe(true);
+    expect(await screen.findByRole("button", { name: /巴塞罗那.*城市/ })).toBeInTheDocument();
+    fireEvent.click(await screen.findByRole("button", { name: /巴基斯坦.*国家/ }));
+    expect(destinationInput).toHaveValue("巴基斯坦");
+    expect(await screen.findByText("国家范围")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /巴基斯坦.*国家/ })).not.toBeInTheDocument();
+    expect(smartLookupSeen).toBe(true);
   });
+
+  it("dismisses location suggestions after selecting an airport", async () => {
+    const state = stateWithEvidence();
+    state.form.origin = "";
+    let suggestionLookups = 0;
+    window.pywebview = {
+      api: {
+        get_initial_state: async () => state,
+        get_ui_state: async () => state,
+        update_query_state: async () => state,
+        get_location_suggestions: async (field) => {
+          suggestionLookups += 1;
+          return {
+            field,
+            items: [
+              { name: "巴塞罗那", code: "BCN", kind: "airport", label: "巴塞罗那 (BCN) - ES" },
+            ],
+          };
+        },
+      },
+    };
+
+    render(<App />);
+
+    const originInput = await screen.findByPlaceholderText("例如：北京");
+    fireEvent.focus(originInput);
+    fireEvent.change(originInput, { target: { value: "巴" } });
+    fireEvent.click(await screen.findByRole("button", { name: /巴塞罗那.*机场/ }));
+
+    expect(originInput).toHaveValue("巴塞罗那");
+    expect(screen.queryByRole("button", { name: /巴塞罗那.*机场/ })).not.toBeInTheDocument();
+    expect(suggestionLookups).toBe(1);
+  });
+
 });

@@ -80,13 +80,13 @@ class LocationResolverTests(unittest.TestCase):
         self.assertEqual([airport.code for airport in airports], ["ISB", "KHI", "LHE", "PEW", "SKT"])
 
     def test_effective_regions_include_route_country_market_without_changing_default(self) -> None:
-        self.assertEqual(DEFAULT_REGIONS, ["CN", "HK", "SG", "UK"])
+        self.assertEqual(DEFAULT_REGIONS, ["CN", "HK"])
         self.assertIn("PK", REGIONS)
         self.assertEqual(dedupe_region_codes(["GB"]), ["UK"])
 
         regions = build_effective_region_codes(destination_country="PK")
 
-        self.assertEqual(regions[:4], ["CN", "HK", "SG", "UK"])
+        self.assertEqual(regions, ["CN", "HK", "PK"])
         self.assertIn("PK", regions)
 
     def test_all_valid_airport_country_codes_resolve_by_iso_code(self) -> None:
