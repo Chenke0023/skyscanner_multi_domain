@@ -150,6 +150,7 @@ export function QueryCard({
                   type="button"
                   onClick={() => {
                     onFormPatch({ origin: item.name });
+                    onActiveFieldChange(null);
                     onSuggestionsChange((current) => ({ ...current, origin: [] }));
                   }}
                 >
@@ -177,6 +178,7 @@ export function QueryCard({
                   type="button"
                   onClick={() => {
                     onFormPatch({ destination: item.name });
+                    onActiveFieldChange(null);
                     onSuggestionsChange((current) => ({ ...current, destination: [] }));
                   }}
                 >

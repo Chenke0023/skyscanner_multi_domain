@@ -189,4 +189,38 @@ describe("App", () => {
     expect(await screen.findByText("巴基斯坦 (PK, 国家)")).toBeInTheDocument();
     expect(emptyCountryLookupSeen).toBe(true);
   });
+
+  it("dismisses location suggestions after selecting an airport", async () => {
+    const state = stateWithEvidence();
+    state.form.origin = "";
+    let suggestionLookups = 0;
+    window.pywebview = {
+      api: {
+        get_initial_state: async () => state,
+        get_ui_state: async () => state,
+        update_query_state: async () => state,
+        get_location_suggestions: async (field) => {
+          suggestionLookups += 1;
+          return {
+            field,
+            items: [
+              { name: "巴塞罗那", code: "BCN", kind: "airport", label: "巴塞罗那 (BCN) - ES" },
+            ],
+          };
+        },
+      },
+    };
+
+    render(<App />);
+
+    const originInput = await screen.findByPlaceholderText("例如：北京");
+    fireEvent.focus(originInput);
+    fireEvent.change(originInput, { target: { value: "巴" } });
+    fireEvent.click(await screen.findByRole("button", { name: "巴塞罗那 (BCN) - ES" }));
+
+    expect(originInput).toHaveValue("巴塞罗那");
+    expect(screen.queryByRole("button", { name: "巴塞罗那 (BCN) - ES" })).not.toBeInTheDocument();
+    expect(suggestionLookups).toBe(1);
+  });
+
 });
