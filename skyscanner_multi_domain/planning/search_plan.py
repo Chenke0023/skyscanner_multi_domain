@@ -7,7 +7,7 @@ from typing import Iterable, Literal, Sequence
 from skyscanner_multi_domain.planning.date_window import format_iso_date, parse_iso_date
 from skyscanner_multi_domain.geo.location_resolver import LocationRecord
 from skyscanner_multi_domain.geo.regions import (
-    BASELINE_REGIONS,
+    MARKET_RANK_BASELINE_REGIONS,
     COUNTRY_TO_REGION_CODES,
     REGIONS,
     dedupe_region_codes,
@@ -260,7 +260,7 @@ def build_market_candidates(
 
     candidates: list[MarketCandidate] = []
     for index, code in enumerate(ordered_codes):
-        baseline_score = 1.0 if code in BASELINE_REGIONS else 0.0
+        baseline_score = 1.0 if code in MARKET_RANK_BASELINE_REGIONS else 0.0
         route_score = 1.0 if code in route_relevant else 0.0
         manual_score = 1.0 if code in manual_regions else 0.0
         success_rate = stats.market_success_rate.get(code, 0.5)

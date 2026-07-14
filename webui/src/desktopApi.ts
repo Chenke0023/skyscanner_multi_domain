@@ -45,7 +45,7 @@ const createMockState = (): UIState => ({
     return_date: "",
     regions: "",
     wait: "10",
-    date_window: "3",
+    date_window: "0",
     exact_airport: false,
     origin_country: false,
     destination_country: false,
@@ -54,8 +54,8 @@ const createMockState = (): UIState => ({
   hints: {
     origin: "",
     destination: "",
-    regions: "默认包含 CN,HK,SG,UK；本次实际地区: CN, HK, SG, UK",
-    effectiveRegions: ["CN", "HK", "SG", "UK"],
+    regions: "默认包含 CN,HK；本次实际地区: CN, HK",
+    effectiveRegions: ["CN", "HK"],
   },
   status: {
     message: "就绪",

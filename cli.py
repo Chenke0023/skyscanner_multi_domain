@@ -1245,7 +1245,7 @@ class SimpleCLI:
         origin = input("出发地（如 北京 / PEK）: ").strip()
         destination = input("目的地（如 阿拉木图 / ALA）: ").strip()
         date = input("日期（YYYY-MM-DD）: ").strip()
-        date_window_raw = input("日期窗口 ±天数（默认 3）: ").strip()
+        date_window_raw = input("日期窗口 ±天数（默认 0）: ").strip()
         regions = input(
             f"额外地区代码（默认会自动包含 {','.join(DEFAULT_REGIONS)}）: "
         ).strip()
@@ -1260,7 +1260,7 @@ class SimpleCLI:
             wait=10,
             timeout=30,
             save=True,
-            date_window=int(date_window_raw) if date_window_raw else 3,
+            date_window=int(date_window_raw) if date_window_raw else 0,
             exact_airport=False,
             country_airport_limit=COUNTRY_ROUTE_DEFAULT_AIRPORT_LIMIT,
             transport="page",
@@ -1472,8 +1472,8 @@ def build_parser() -> argparse.ArgumentParser:
     page.add_argument(
         "--date-window",
         type=int,
-        default=3,
-        help="日期前后扫窗天数（默认 ±3 天；往返时保持停留天数不变）",
+        default=0,
+        help="日期前后扫窗天数（默认 ±0 天；往返时保持停留天数不变）",
     )
     page.add_argument(
         "-r",

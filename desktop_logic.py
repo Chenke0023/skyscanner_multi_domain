@@ -424,7 +424,7 @@ def _default_query_state(
         "return_date": default_return,
         "regions": "",
         "wait": "10",
-        "date_window": "3",
+        "date_window": "0",
         "exact_airport": False,
         "origin_country": False,
         "destination_country": False,

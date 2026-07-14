@@ -19,6 +19,18 @@ def build_service(tmp_path: Path) -> DesktopUIService:
     return service
 
 
+def test_new_desktop_state_uses_cn_hk_and_exact_date_defaults(tmp_path: Path) -> None:
+    state_path = tmp_path / "gui_last_query.json"
+    with patch("desktop_ui_service.get_gui_state_file", return_value=state_path):
+        service = DesktopUIService()
+
+    state = service.get_initial_state()
+
+    assert state["form"]["date_window"] == "0"
+    assert state["hints"]["effectiveRegions"] == ["CN", "HK", "KZ"]
+    assert state["hints"]["regions"].startswith("默认包含 CN,HK；")
+
+
 def test_bot_challenge_updates_status_log_and_sends_notification(tmp_path: Path) -> None:
     service = build_service(tmp_path)
     region = RegionConfig(

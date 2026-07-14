@@ -50,6 +50,15 @@ class CliParserTests(unittest.TestCase):
             run.return_value = Namespace(returncode=0, stdout="Now drawing from 'Battery Power'\\n", stderr="")
             self.assertFalse(_is_ac_power_connected())
 
+    def test_page_command_defaults_to_exact_date(self) -> None:
+        parser = build_parser()
+
+        args = parser.parse_args(
+            ["page", "-o", "北京", "-d", "阿拉木图", "-t", "2026-05-20"]
+        )
+
+        self.assertEqual(args.date_window, 0)
+
     def test_page_command_accepts_return_date(self) -> None:
         parser = build_parser()
 

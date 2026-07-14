@@ -10,8 +10,9 @@ from skyscanner_multi_domain.geo.countries import (
 from skyscanner_multi_domain.models import RegionConfig
 
 
-BASELINE_REGIONS = ("CN", "HK", "SG", "UK")
+BASELINE_REGIONS = ("CN", "HK")
 DEFAULT_REGIONS = list(BASELINE_REGIONS)
+MARKET_RANK_BASELINE_REGIONS = ("CN", "HK", "SG", "UK")
 GENERIC_SKYSCANNER_DOMAIN = "https://www.skyscanner.com"
 REGION_CODE_ALIASES = {
     "GB": "UK",
