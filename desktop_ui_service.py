@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import argparse
+import csv
+import io
 import subprocess
 import threading
 import time
@@ -23,7 +25,7 @@ from skyscanner_multi_domain.runtime.paths import PROJECT_ROOT, get_gui_state_fi
 from skyscanner_multi_domain.scan.confirmation import ConfirmationStatus, PriceConfirmationStore, sample_from_row
 from skyscanner_multi_domain.scan.config import ScanConfig
 from skyscanner_multi_domain.scan.query_service import QueryService
-from skyscanner_multi_domain.scan.result_service import ResultService
+from skyscanner_multi_domain.scan.result_service import ResultService, format_itinerary_legs
 from skyscanner_multi_domain.scan.output_rows import CombinedQuoteRow
 from skyscanner_multi_domain.planning.date_window import format_trip_date_label
 from desktop_logic import (
@@ -51,6 +53,7 @@ from desktop_logic import (
     _normalize_query_state,
     _order_grouped_by_trip_labels,
     _row_has_price,
+    _row_is_decision_eligible,
     _row_signature,
     _send_desktop_notification,
     _sort_combined_rows,
@@ -275,12 +278,14 @@ class DesktopUIService:
                 "",
                 f"- 生成时间: `{datetime.now().isoformat(timespec='seconds')}`",
                 "",
-                "| 排名 | 日期 | 航段 | 地区 | 最低价 | 稳定性 | 可信度 | 来源 | 链接 |",
-                "| --- | --- | --- | --- | ---: | --- | --- | --- | --- |",
+                "| 排名 | 日期 | 航段 | 地区 | 最低价 | 最低价行程 | 稳定性 | 可信度 | 来源 | 链接 |",
+                "| --- | --- | --- | --- | ---: | --- | --- | --- | --- | --- |",
             ]
-            csv_rows = [
-                "rank,date,route,region,cheapest_cny,stability,reliability,source,link"
-            ]
+            csv_buffer = io.StringIO(newline="")
+            csv_writer = csv.writer(csv_buffer)
+            csv_writer.writerow(
+                ["rank", "date", "route", "region", "cheapest_cny", "itinerary", "stability", "reliability", "source", "link"]
+            )
             for index, row in enumerate(recommendations, start=1):
                 price = row.get("cheapest_cny_price")
                 price_text = f"¥{float(price):,.2f}" if isinstance(price, (int, float)) else "-"
@@ -299,6 +304,7 @@ class DesktopUIService:
                             str(row.get("route") or "-"),
                             str(row.get("region_name") or "-"),
                             price_text,
+                            format_itinerary_legs(row.get("itinerary_legs"), separator="<br>"),
                             str(row.get("stability_label") or "-"),
                             str(row.get("market_reliability_label") or "-"),
                             source_label,
@@ -307,23 +313,22 @@ class DesktopUIService:
                     )
                     + " |"
                 )
-                csv_rows.append(
-                    ",".join(
-                        [
-                            str(index),
-                            str(row.get("date") or "-"),
-                            str(row.get("route") or "-"),
-                            str(row.get("region_name") or "-"),
-                            str(float(price)) if isinstance(price, (int, float)) else "",
-                            str(row.get("stability_label") or "-"),
-                            str(row.get("market_reliability_label") or "-"),
-                            source_label,
-                            link,
-                        ]
-                    )
+                csv_writer.writerow(
+                    [
+                        index,
+                        str(row.get("date") or "-"),
+                        str(row.get("route") or "-"),
+                        str(row.get("region_name") or "-"),
+                        str(float(price)) if isinstance(price, (int, float)) else "",
+                        format_itinerary_legs(row.get("itinerary_legs")),
+                        str(row.get("stability_label") or "-"),
+                        str(row.get("market_reliability_label") or "-"),
+                        source_label,
+                        link,
+                    ]
                 )
             markdown_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
-            csv_path.write_text("\n".join(csv_rows) + "\n", encoding="utf-8")
+            csv_path.write_text(csv_buffer.getvalue(), encoding="utf-8")
             self._log_locked(f"已导出决策摘要: {markdown_path.name} / {csv_path.name}")
             return {
                 "markdownPath": str(markdown_path),
@@ -1573,7 +1578,12 @@ class DesktopUIService:
             self._apply_alert_config_locked(config)
             return
         current_rows = [{"date": trip_label, **row} for trip_label, rows in rows_by_date for row in rows]
-        priced_rows = [row for row in current_rows if isinstance(row.get("cheapest_cny_price"), (int, float))]
+        priced_rows = [
+            row
+            for row in current_rows
+            if _row_is_decision_eligible(row)
+            and isinstance(row.get("cheapest_cny_price"), (int, float))
+        ]
         previous_rows = []
         if self._previous_scan_record is not None:
             previous_rows = [
@@ -1597,7 +1607,10 @@ class DesktopUIService:
                         f"达到目标价：{winner.get('region_name') or '-'} ¥{winner_price:,.2f}"
                     )
             previous_priced = [
-                row for row in previous_rows if isinstance(row.get("cheapest_cny_price"), (int, float))
+                row
+                for row in previous_rows
+                if _row_is_decision_eligible(row)
+                and isinstance(row.get("cheapest_cny_price"), (int, float))
             ]
             if config.drop_amount is not None and previous_priced:
                 previous_winner = min(previous_priced, key=_decision_price_key)
@@ -1613,7 +1626,8 @@ class DesktopUIService:
 
         if config.notify_on_recovery:
             previous_success = any(
-                isinstance(row.get("cheapest_cny_price"), (int, float))
+                _row_is_decision_eligible(row)
+                and isinstance(row.get("cheapest_cny_price"), (int, float))
                 for row in previous_rows
             )
             current_success = bool(priced_rows)

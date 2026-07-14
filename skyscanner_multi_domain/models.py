@@ -56,6 +56,7 @@ class FlightQuote:
     route_mismatch: bool = False
     date_mismatch: bool = False
     currency_mismatch: bool = False
+    itinerary_legs: list[dict[str, Any]] = field(default_factory=list)
 
     # Telemetry fields
     tab_open_count: int = 0
@@ -79,6 +80,7 @@ class QuoteEvidence:
     raw_ref: Optional[str] = None
     confidence: float = 0.0
     error: Optional[str] = None
+    itinerary_legs: list[dict[str, Any]] = field(default_factory=list)
 
 
 @dataclass

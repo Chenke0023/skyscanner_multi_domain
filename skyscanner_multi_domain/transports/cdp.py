@@ -41,6 +41,7 @@ from skyscanner_multi_domain.parsing.page_parser import (
 )
 from skyscanner_multi_domain.geo.regions import REGION_HOST_ALIASES
 from skyscanner_multi_domain.parsing.challenge import build_captcha_quote, check_captcha_in_page
+from skyscanner_multi_domain.parsing.itinerary_parser import match_itinerary_legs
 
 logger = logging.getLogger(__name__)
 
@@ -583,7 +584,22 @@ def build_page_text_capture_expression(
         f"const contextChars = {context_chars};"
         "const title = document.title;"
         "const url = location.href;"
-        "if (text.length <= maxChars) { return {title, url, text}; }"
+        r"const priceRe = /(?:HK\$|US\$|CA\$|A\$|S\$|¥|￥|£|€|\$|₩|₹|CNY|HKD|SGD|GBP|EUR|USD|JPY|KRW|INR)\s?[\d,]+(?:\.\d+)?/i;"
+        r"const timeRe = /(?:[01]?\d|2[0-3]):[0-5]\d(?:\s*[AP]M)?/ig;"
+        "const visible = el => { const r = el.getBoundingClientRect(); const s = getComputedStyle(el); return r.width > 0 && r.height > 0 && s.visibility !== 'hidden' && s.display !== 'none'; };"
+        "const seen = new Set();"
+        "const cards = [...document.querySelectorAll('body *')].filter(visible).filter(el => priceRe.test(el.innerText || el.textContent || '')).map(el => {"
+        "  let cur = el; let chosen = null;"
+        "  for (let depth = 0; cur && depth < 12; depth += 1, cur = cur.parentElement) {"
+        "    const value = cur.innerText || cur.textContent || ''; const times = value.match(timeRe) || [];"
+        "    if (value.length <= 5000 && priceRe.test(value) && times.length >= 2) { chosen = cur; break; }"
+        "  }"
+        "  return chosen;"
+        "}).filter(Boolean).filter(card => { const key = (card.innerText || card.textContent || '').slice(0, 1200); if (seen.has(key)) return false; seen.add(key); return true; }).slice(0, 80).map(card => {"
+        "  const cardText = (card.innerText || card.textContent || '').slice(0, 5000); const price = cardText.match(priceRe);"
+        "  return {priceText: price ? price[0] : '', cardText};"
+        "});"
+        "if (text.length <= maxChars) { return {title, url, text, cards}; }"
         f"const markers = {json.dumps(markers, ensure_ascii=False)};"
         "const lower = text.toLowerCase();"
         "let index = -1;"
@@ -592,7 +608,7 @@ def build_page_text_capture_expression(
         "  if (markerIndex !== -1) { index = markerIndex; break; }"
         "}"
         "const start = index === -1 ? 0 : Math.max(0, index - contextChars);"
-        "return {title, url, text: text.slice(start, start + maxChars)};"
+        "return {title, url, text: text.slice(start, start + maxChars), cards};"
         "})()"
     )
 
@@ -607,6 +623,14 @@ def _quote_from_cdp_payload(
     quote = extract_page_quote(region, page_url, page_text)
     quote.source_kind = "page"
     if quote.price is not None:
+        target_price = quote.cheapest_price if quote.cheapest_price is not None else quote.price
+        raw_cards = payload.get("cards")
+        cards = [card for card in raw_cards if isinstance(card, dict)] if isinstance(raw_cards, list) else []
+        quote.itinerary_legs = match_itinerary_legs(
+            cards,
+            target_price,
+            round_trip=bool(payload.get("returnDate")),
+        )
         return quote
 
     has_captcha, captcha_type = check_captcha_in_page(
@@ -829,6 +853,7 @@ async def compare_via_pages(
                         if time.monotonic() < deadline:
                             next_pending[region.code] = region
                         continue
+                    payload["returnDate"] = return_date
                     quote = _quote_from_cdp_payload(
                         region,
                         payload,

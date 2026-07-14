@@ -47,6 +47,10 @@ function stateWithEvidence(): UIState {
         price_candidates_count: 2,
         selected_candidate_rank: 1,
         candidate_sources: ["visible_text"],
+        itinerary_legs: [
+          { direction: "outbound", departure_time: "08:10", arrival_time: "11:25", stop_count: 0, duration_minutes: 195 },
+          { direction: "return", departure_time: "18:30", arrival_time: "23:10", stop_count: 1, duration_minutes: 280 },
+        ],
       }],
       failureRows: [],
       displayRows: [],
@@ -105,9 +109,13 @@ describe("App", () => {
     expect(await screen.findByText("显示原始结果")).toBeInTheDocument();
     expect(screen.queryByText("成功结果")).not.toBeInTheDocument();
     fireEvent.click(await screen.findByText("显示原始结果"));
+    expect(await screen.findByText("去程")).toBeInTheDocument();
+    expect(await screen.findByText(/08:10–11:25 · 直飞 · 3小时15分/)).toBeInTheDocument();
+    expect(await screen.findByText("返程")).toBeInTheDocument();
+    expect(await screen.findByText(/18:30–23:10 · 经停1次 · 4小时40分/)).toBeInTheDocument();
+    fireEvent.click(await screen.findByText("技术详情"));
+    expect(await screen.findByText("解析警告")).toBeInTheDocument();
     expect(await screen.findByText("Best ¥1300 Cheapest ¥1234")).toBeInTheDocument();
-    fireEvent.click(await screen.findByText("详情"));
-    expect(await screen.findByText("完整警告")).toBeInTheDocument();
   });
 
   it("shows scan error reason directly in the status bar", async () => {
@@ -149,11 +157,13 @@ describe("App", () => {
     fireEvent.click(await screen.findByText("查看详细结果"));
     fireEvent.click(await screen.findByText("显示原始结果"));
 
-    expect(await screen.findByText("错误原因")).toBeInTheDocument();
+    expect(await screen.findByText("遇到的问题")).toBeInTheDocument();
+    expect(await screen.findByText("处理方式")).toBeInTheDocument();
+    expect(screen.queryByText("browser-unavailable: no launchable browser")).not.toBeInTheDocument();
+    fireEvent.click(await screen.findByText("技术详情"));
+    expect(await screen.findByText("原始状态码")).toBeInTheDocument();
+    expect(await screen.findByText("browser_unavailable")).toBeInTheDocument();
     expect(await screen.findByText("browser-unavailable: no launchable browser")).toBeInTheDocument();
-    fireEvent.click(await screen.findByText("详情"));
-    expect(await screen.findByText("失败详情")).toBeInTheDocument();
-    expect(await screen.findAllByText("browser_unavailable")).toHaveLength(2);
   });
 
   it("offers countries and cities together and switches to country scope", async () => {

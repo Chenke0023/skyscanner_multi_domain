@@ -1109,3 +1109,15 @@ td:last-child {
     grid-template-columns: 1fr 1fr;
   }
 }
+
+.itinerary-cell {
+  display: grid;
+  gap: 0.3rem;
+  min-width: 16rem;
+  white-space: nowrap;
+}
+
+.itinerary-cell strong {
+  color: var(--text-strong, #243447);
+  font-weight: 650;
+}

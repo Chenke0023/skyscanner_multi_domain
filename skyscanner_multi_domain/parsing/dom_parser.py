@@ -4,6 +4,7 @@ import re
 from typing import Any
 
 from skyscanner_multi_domain.models import QuoteEvidence, RegionConfig
+from skyscanner_multi_domain.parsing.itinerary_parser import parse_itinerary_legs
 from skyscanner_multi_domain.parsing.page_parser import extract_page_quote
 
 PRICE_RE = re.compile(
@@ -67,6 +68,8 @@ def parse_dom_cards(
     region: RegionConfig,
     source_url: str,
     cards: list[dict[str, Any]],
+    *,
+    round_trip: bool = False,
 ) -> list[QuoteEvidence]:
     evidences: list[QuoteEvidence] = []
     for index, card in enumerate(cards):
@@ -86,6 +89,7 @@ def parse_dom_cards(
                 source_url=source_url,
                 raw_ref=_raw_ref(card, index, label),
                 confidence=0.75,
+                itinerary_legs=parse_itinerary_legs(card_text, round_trip=round_trip),
             )
         )
     return evidences

@@ -159,3 +159,33 @@ def test_real_smoke_fixture_does_not_emit_false_positive_evidence() -> None:
 
     assert evidences == []
     assert json.loads((fixture / "page_health.json").read_text(encoding="utf-8"))["hasBody"] is True
+
+
+def test_resolve_quote_attaches_only_same_price_dom_itinerary() -> None:
+    region = RegionConfig("UK", "United Kingdom", "https://www.skyscanner.net", "en-GB", "GBP")
+    selected_leg = [{
+        "direction": "outbound",
+        "departure_time": "08:10",
+        "arrival_time": "11:25",
+        "stop_count": 0,
+        "duration_minutes": 195,
+    }]
+    other_leg = [{
+        "direction": "outbound",
+        "departure_time": "13:00",
+        "arrival_time": "18:00",
+        "stop_count": 1,
+        "duration_minutes": 300,
+    }]
+    result = resolve_quote(
+        region,
+        "https://example.test/search",
+        [
+            QuoteEvidence("network", 123, "GBP", "cheapest", "https://example.test/search", confidence=0.9),
+            QuoteEvidence("dom", 123, "GBP", "cheapest", "https://example.test/search", confidence=0.75, itinerary_legs=selected_leg),
+            QuoteEvidence("dom", 145, "GBP", "best", "https://example.test/search", confidence=0.75, itinerary_legs=other_leg),
+        ],
+    )
+
+    assert result.final_quote.price == 123
+    assert result.final_quote.itinerary_legs == selected_leg

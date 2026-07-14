@@ -6,7 +6,6 @@ import {
   confidenceClass,
   confidenceLabel,
   formatMoney,
-  listSummary,
   priceSourceLabel,
   warningsSummary,
 } from "./resultUtils";
@@ -16,14 +15,48 @@ function visibleText(value: unknown): string {
   return text && text !== "-" ? text : "";
 }
 
-function failureDetailEntries(row: ResultRow): Array<[string, string]> {
+function technicalDetailEntries(row: ResultRow): Array<[string, string]> {
   const entries: Array<[string, string]> = [
-    ["状态", visibleText(row.status)],
-    ["失败分类", visibleText(row.failure_category)],
-    ["建议动作", visibleText(row.failure_action)],
-    ["错误原因", visibleText(row.error)],
+    ["原始状态码", visibleText(row.status)],
+    ["原始错误", visibleText(row.error)],
+    ["Readiness", visibleText(row.readiness)],
   ];
   return entries.filter(([, value]) => Boolean(value));
+}
+
+function formatDuration(minutes: number | null | undefined): string {
+  if (!Number.isInteger(minutes) || !minutes || minutes <= 0) return "";
+  const hours = Math.floor(minutes / 60);
+  const remainder = minutes % 60;
+  if (hours && remainder) return `${hours}小时${remainder}分`;
+  if (hours) return `${hours}小时`;
+  return `${remainder}分钟`;
+}
+
+function ItineraryCell({ row }: { row: ResultRow }) {
+  const legs = Array.isArray(row.itinerary_legs) ? row.itinerary_legs.slice(0, 2) : [];
+  const visibleLegs = legs.map((leg, index) => {
+    const details: string[] = [];
+    if (leg.departure_time && leg.arrival_time) details.push(`${leg.departure_time}–${leg.arrival_time}`);
+    if (Number.isInteger(leg.stop_count)) {
+      details.push(leg.stop_count === 0 ? "直飞" : `经停${leg.stop_count}次`);
+    }
+    const duration = formatDuration(leg.duration_minutes);
+    if (duration) details.push(duration);
+    return {
+      label: leg.direction === "return" || index === 1 ? "返程" : "去程",
+      details,
+    };
+  }).filter((leg) => leg.details.length > 0);
+
+  if (!visibleLegs.length) return <span className="muted-cell">-</span>;
+  return (
+    <div className="itinerary-cell">
+      {visibleLegs.map((leg) => (
+        <div key={leg.label}><strong>{leg.label}</strong> {leg.details.join(" · ")}</div>
+      ))}
+    </div>
+  );
 }
 
 function DataTable({
@@ -55,7 +88,7 @@ function DataTable({
       (row.parser_warnings && row.parser_warnings.length > 0) ||
         row.evidence_text ||
         row.candidate_sources?.length ||
-        failureDetailEntries(row).length,
+        technicalDetailEntries(row).length,
     );
 
   return (
@@ -106,6 +139,8 @@ function DataTable({
                           <span className={warningsSummary(row.parser_warnings) === "-" ? "muted-cell" : "warning-cell"}>
                             {warningsSummary(row.parser_warnings)}
                           </span>
+                        ) : column.key === "itinerary_legs" ? (
+                          <ItineraryCell row={row} />
                         ) : column.key === "error" ? (
                           <span className={visibleText(row.error) ? "error-cell-text" : "muted-cell"}>
                             {visibleText(row.error) || "-"}
@@ -120,12 +155,12 @@ function DataTable({
                     <div className="row-actions">
                       {typeof row.link === "string" && row.link.startsWith("http") ? (
                         <button className="toolbar-button" onClick={() => onOpenLink(String(row.link))} type="button">
-                          打开
+                          打开页面
                         </button>
                       ) : null}
                       {highlightFailure && onQueueRetry ? (
                         <button className="toolbar-button" onClick={() => onQueueRetry(row)} type="button">
-                          加入补扫
+                          重新扫描
                         </button>
                       ) : null}
                       {!highlightFailure && onConfirmPrice ? (
@@ -144,7 +179,7 @@ function DataTable({
                           onClick={() => setExpandedKey(expanded ? null : key)}
                           type="button"
                         >
-                          {expanded ? "收起" : "详情"}
+                          {expanded ? "收起技术详情" : "技术详情"}
                         </button>
                       ) : null}
                     </div>
@@ -154,11 +189,11 @@ function DataTable({
                   <tr className="warning-detail-row" key={`${key}-detail`}>
                     <td colSpan={columns.length + 1}>
                       <div className="warning-detail-panel">
-                        {failureDetailEntries(row).length > 0 ? (
+                        {technicalDetailEntries(row).length > 0 ? (
                           <div className="warning-detail-section">
-                            <strong>失败详情</strong>
+                            <strong>技术详情</strong>
                             <dl className="failure-detail-list">
-                              {failureDetailEntries(row).map(([label, value]) => (
+                              {technicalDetailEntries(row).map(([label, value]) => (
                                 <Fragment key={label}>
                                   <dt>{label}</dt>
                                   <dd>{value}</dd>
@@ -169,7 +204,7 @@ function DataTable({
                         ) : null}
                         {row.parser_warnings && row.parser_warnings.length > 0 ? (
                           <div className="warning-detail-section">
-                            <strong>完整警告</strong>
+                            <strong>解析警告</strong>
                             <ul>
                               {row.parser_warnings.map((warning, widx) => (
                                 <li key={widx}>{String(warning)}</li>
@@ -179,7 +214,7 @@ function DataTable({
                         ) : null}
                         {row.evidence_text ? (
                           <div className="warning-detail-section">
-                            <strong>证据片段</strong>
+                            <strong>采集证据</strong>
                             <p>{String(row.evidence_text)}</p>
                           </div>
                         ) : null}
@@ -212,6 +247,16 @@ function DataTable({
   );
 }
 
+function failureClassLabel(value: string): string {
+  if (["challenge", "captcha"].includes(value)) return "需要人工验证";
+  if (["still_loading", "empty_shell", "timeout"].includes(value)) return "页面未加载完成";
+  if (["no_flights", "no_results"].includes(value)) return "未找到可用航班";
+  if (["parse_failed", "unpriced"].includes(value)) return "未能读取价格";
+  if (["browser_missing", "browser_unavailable"].includes(value)) return "浏览器不可用";
+  if (["network", "connection"].includes(value)) return "连接失败";
+  return "需要重新扫描";
+}
+
 function FailureReasonPanel({
   trust,
   onAction,
@@ -227,36 +272,31 @@ function FailureReasonPanel({
   const waitFailureClass = actionable.find(([failureClass]) => failureClass === "still_loading" || failureClass === "empty_shell")?.[0];
   return (
     <section className="trust-detail-panel">
-      <h4>失败市场修复</h4>
+      <h4>问题汇总</h4>
       <div className="failure-chip-row">
         {entries.map(([reason, count]) => (
-          <span key={reason} className="failure-chip">{reason}: {String(count)}</span>
+          <span key={reason} className="failure-chip">{failureClassLabel(reason)}: {String(count)}</span>
         ))}
       </div>
       <div className="repair-action-row">
-        {actionable.slice(0, 4).map(([failureClass]) => (
-          <button
-            className="toolbar-button"
-            key={`queue-${failureClass}`}
-            onClick={() => onAction({ action: "queue_retry", failureClass })}
-            type="button"
-          >
-            加入 {failureClass}
+        {actionable.length ? (
+          <button className="toolbar-button" onClick={() => onAction({ action: "run_retry" })} type="button">
+            重新扫描失败项
           </button>
-        ))}
+        ) : null}
         {waitFailureClass ? (
           <button className="toolbar-button" onClick={() => onAction({ action: "extend_wait", failureClass: waitFailureClass })} type="button">
-            延长等待
+            延长页面等待
           </button>
         ) : null}
         {actionable.some(([failureClass]) => failureClass === "challenge") ? (
           <button className="toolbar-button" onClick={() => onAction({ action: "open_links", failureClass: "challenge" })} type="button">
-            打开验证链接
+            打开验证页面
           </button>
         ) : null}
         {actionable.length ? (
           <button className="toolbar-button" onClick={() => onAction({ action: "skip" })} type="button">
-            本轮跳过
+            暂不处理
           </button>
         ) : null}
       </div>
@@ -264,26 +304,6 @@ function FailureReasonPanel({
   );
 }
 
-function ParserEvidencePanel({ rows }: { rows: ResultRow[] }) {
-  const interesting = rows.filter((row) => row.evidence_text || row.price_candidates_count).slice(0, 5);
-  if (!interesting.length) return null;
-  return (
-    <section className="trust-detail-panel">
-      <h4>解析证据</h4>
-      <div className="evidence-list">
-        {interesting.map((row, index) => (
-          <div key={`${String(row.region_code)}-${index}`} className="evidence-item">
-            <strong>{String(row.region_name ?? row.region_code ?? "-")}</strong>
-            <span>来源 {priceSourceLabel(row.price_source)} · 候选 {String(row.price_candidates_count ?? 0)} · 选中 #{String(row.selected_candidate_rank ?? "-")}</span>
-            <small>候选来源：{listSummary(row.candidate_sources)}</small>
-            <small>Readiness：{String(row.readiness ?? "-")}</small>
-            {row.evidence_text ? <p>{String(row.evidence_text)}</p> : null}
-          </div>
-        ))}
-      </div>
-    </section>
-  );
-}
 
 export function RawResults({
   filteredResults,
@@ -361,7 +381,6 @@ export function RawResults({
 
       <div className="table-section">
         <h4>成功结果 <small>{filteredResults.successRows.length}</small></h4>
-        <ParserEvidencePanel rows={filteredResults.successRows} />
         <DataTable
           columns={[
             { key: "date", label: "日期" },
@@ -370,6 +389,7 @@ export function RawResults({
             { key: "source_label", label: "来源" },
             { key: "best_cny_price", label: "最佳价", align: "right" },
             { key: "cheapest_cny_price", label: "最低价", align: "right" },
+            { key: "itinerary_legs", label: "最低价行程" },
             { key: "confidence", label: "可信度" },
             { key: "price_source", label: "价格来源" },
             { key: "parser_warnings", label: "警告" },
@@ -383,13 +403,13 @@ export function RawResults({
 
       <div className="table-section">
         <h4>
-          失败市场 <small>{filteredResults.failureRows.length}</small>
+          未完成结果 <small>{filteredResults.failureRows.length}</small>
           <button
             className="text-button"
             onClick={() => onRepairAction({ action: "run_retry" })}
             type="button"
           >
-            运行补扫队列
+            重新扫描失败项
           </button>
         </h4>
         <FailureReasonPanel trust={trust} onAction={onRepairAction} />
@@ -398,10 +418,8 @@ export function RawResults({
             { key: "date", label: "日期" },
             { key: "route", label: "航段" },
             { key: "region_name", label: "地区" },
-            { key: "failure_category", label: "失败分类" },
-            { key: "failure_action", label: "建议动作" },
-            { key: "status", label: "状态" },
-            { key: "error", label: "错误原因" },
+            { key: "failure_category", label: "遇到的问题" },
+            { key: "failure_action", label: "处理方式" },
           ]}
           rows={filteredResults.failureRows}
           onOpenLink={onOpenLink}

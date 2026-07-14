@@ -81,6 +81,32 @@ def test_quote_from_cdp_payload_marks_px_challenge_from_url() -> None:
     assert "PX" in (quote.error or "")
 
 
+
+def test_quote_from_cdp_payload_attaches_itinerary_from_cheapest_card() -> None:
+    region = RegionConfig(
+        code="HK",
+        name="香港",
+        domain="https://www.skyscanner.com.hk",
+        currency="HKD",
+        locale="zh-HK",
+    )
+    quote = _quote_from_cdp_payload(
+        region,
+        {
+            "url": "https://www.skyscanner.com.hk/transport/flights/pek/ala/260520/",
+            "text": "Best\nHK$3,305\nCheapest\nHK$3,072",
+            "cards": [
+                {"priceText": "HK$3,305", "cardText": "09:00 15:00 1 stop 6h HK$3,305"},
+                {"priceText": "HK$3,072", "cardText": "08:10 11:25 Non-stop 3h 15m HK$3,072"},
+            ],
+        },
+        "https://www.skyscanner.com.hk/transport/flights/pek/ala/260520/",
+    )
+
+    assert quote.cheapest_price == 3072
+    assert quote.itinerary_legs[0]["departure_time"] == "08:10"
+    assert quote.itinerary_legs[0]["stop_count"] == 0
+
 def test_quote_from_cdp_payload_detects_bot_check_copy() -> None:
     region = RegionConfig(
         code="SG",

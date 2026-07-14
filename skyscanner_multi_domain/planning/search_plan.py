@@ -14,7 +14,6 @@ from skyscanner_multi_domain.geo.regions import (
 )
 
 
-SearchMode = Literal["fast", "balanced", "deep"]
 DatePhase = Literal["anchor", "edge", "nearby", "full"]
 TaskPhase = Literal["probe", "expand", "verify", "deep"]
 RowsByDate = list[tuple[str, list[dict[str, object]]]]
@@ -31,7 +30,6 @@ class TripIntent:
     destination_is_country: bool
     date_window: int
     user_regions: list[str]
-    mode: SearchMode = "balanced"
 
 
 @dataclass(frozen=True)
@@ -532,8 +530,6 @@ def build_search_plan(
         warnings.append(
             f"计划任务数 {len(tasks)} 与候选笛卡尔积 {expected_task_count} 不一致。"
         )
-    if intent.mode != "balanced":
-        warnings.append(f"{intent.mode} 模式当前只影响计划说明，暂不减少扫描全集。")
     return SearchPlan(
         intent=intent,
         route_candidates=routes,
@@ -549,7 +545,6 @@ def render_search_plan(plan: SearchPlan, *, max_tasks: int = 12) -> str:
     lines = [
         "扫描计划",
         "",
-        f"模式: {plan.intent.mode}",
         f"任务总数: {len(plan.tasks)}",
         f"批次数: {len(plan.batches)}",
     ]

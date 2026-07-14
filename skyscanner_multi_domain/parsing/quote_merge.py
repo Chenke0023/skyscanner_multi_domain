@@ -52,6 +52,7 @@ def _quote_from_evidence(
         quote.evidence_text = evidence.raw_ref
         quote.best_price = evidence.price if evidence.label == "best" else None
         quote.cheapest_price = evidence.price if evidence.label == "cheapest" else evidence.price
+        quote.itinerary_legs = [dict(leg) for leg in evidence.itinerary_legs]
     quote.fetch_metadata = {
         "structured_confidence": status,
         "evidence_count": 0,
@@ -102,6 +103,35 @@ def _rejected_candidates(evidences: list[QuoteEvidence], selected: QuoteEvidence
             }
         )
     return rejected[:50]
+
+def _matching_itinerary_evidence(
+    evidences: list[QuoteEvidence],
+    selected: QuoteEvidence | None,
+) -> QuoteEvidence | None:
+    if selected is None or selected.price is None:
+        return None
+    matches = [
+        evidence
+        for evidence in evidences
+        if evidence.layer == "dom"
+        and evidence.price is not None
+        and abs(evidence.price - selected.price) <= 0.01
+        and evidence.itinerary_legs
+    ]
+    if not matches:
+        return selected if selected.itinerary_legs else None
+    return max(
+        matches,
+        key=lambda evidence: (
+            len(evidence.itinerary_legs),
+            sum(
+                value is not None
+                for leg in evidence.itinerary_legs
+                for value in leg.values()
+            ),
+        ),
+    )
+
 
 def resolve_quote(
     region: RegionConfig,
@@ -184,6 +214,10 @@ def resolve_quote(
             confidence=selected.confidence,
             error=conflict_reason,
         )
+    itinerary_evidence = _matching_itinerary_evidence(evidences, selected)
+    if itinerary_evidence is not None:
+        quote.itinerary_legs = [dict(leg) for leg in itinerary_evidence.itinerary_legs]
+        decision_trace.append("itinerary: matched DOM card to selected cheapest price")
     ranking = _evidence_ranking(evidences, selected)
     rejected = _rejected_candidates(evidences, selected)
     if ranking:

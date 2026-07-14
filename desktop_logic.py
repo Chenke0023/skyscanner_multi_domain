@@ -85,6 +85,28 @@ def _numeric_or_none(value: object) -> float | None:
     return float(value) if isinstance(value, (int, float)) else None
 
 
+def _row_is_decision_eligible(row: CombinedQuoteRow) -> bool:
+    """Return whether a row may participate in minimum-price decisions.
+
+    Older saved scans do not carry ``rankable``. For those rows, fall back to
+    the persisted source/confidence metadata so known weak text matches cannot
+    reappear as a current minimum after an app restart.
+    """
+    if row.get("decision_eligible") is False or row.get("rankable") is False:
+        return False
+    if str(row.get("price_source") or "").strip() == "first_price_fallback":
+        return False
+    confidence = row.get("confidence")
+    if (
+        row.get("rankable") is None
+        and isinstance(confidence, (int, float))
+        and not isinstance(confidence, bool)
+        and float(confidence) < 0.80
+    ):
+        return False
+    return True
+
+
 def _compute_stability_label(
     row: CombinedQuoteRow,
     history_records: list[Any],
@@ -180,7 +202,10 @@ def _enrich_decision_rows(
 ) -> list[CombinedQuoteRow]:
     enriched: list[CombinedQuoteRow] = []
     history_summary = summarize_query_history(history_records) if history_records else None
-    recommended_signature = _row_signature(min(rows, key=_decision_price_key)) if rows else None
+    eligible_rows = [row for row in rows if _row_is_decision_eligible(row)]
+    recommended_signature = (
+        _row_signature(min(eligible_rows, key=_decision_price_key)) if eligible_rows else None
+    )
     for row in rows:
         next_row = dict(row)
         stability_label, trend_direction = _compute_stability_label(next_row, history_records)
@@ -206,8 +231,11 @@ def _build_top_recommendations(
     candidates = [
         row
         for row in rows
-        if isinstance(row.get("cheapest_cny_price"), (int, float))
-        or isinstance(row.get("best_cny_price"), (int, float))
+        if _row_is_decision_eligible(row)
+        and (
+            isinstance(row.get("cheapest_cny_price"), (int, float))
+            or isinstance(row.get("best_cny_price"), (int, float))
+        )
     ]
     return sorted(candidates, key=lambda row: _decision_price_key(row, mode))[:limit]
 
@@ -219,7 +247,8 @@ def _build_market_delta_explanation(
     priced_rows = [
         row
         for row in rows
-        if isinstance(row.get("cheapest_cny_price"), (int, float))
+        if _row_is_decision_eligible(row)
+        and isinstance(row.get("cheapest_cny_price"), (int, float))
     ]
     if len(priced_rows) < 2:
         return "当前只有 1 个可比较市场。"
@@ -300,6 +329,8 @@ def _build_calendar_summary(
 ) -> dict[str, dict[str, CombinedQuoteRow]]:
     grouped: dict[str, dict[str, CombinedQuoteRow]] = {}
     for row in rows:
+        if not _row_is_decision_eligible(row):
+            continue
         trip_label = str(row.get("date") or "").strip()
         if not trip_label:
             continue
@@ -332,8 +363,14 @@ def _build_compare_rows(
             str(row.get("region_name") or row.get("region_code") or ""),
         )
         previous = previous_index.get(key)
-        current_price = row.get("cheapest_cny_price")
-        previous_price = previous.get("cheapest_cny_price") if previous else None
+        current_price = (
+            row.get("cheapest_cny_price") if _row_is_decision_eligible(row) else None
+        )
+        previous_price = (
+            previous.get("cheapest_cny_price")
+            if previous and _row_is_decision_eligible(previous)
+            else None
+        )
         if isinstance(current_price, (int, float)) and isinstance(previous_price, (int, float)):
             if abs(float(current_price) - float(previous_price)) < 0.01:
                 change = "持平"
@@ -390,10 +427,11 @@ def _build_window_summary_text(
     priced_rows = [
         row
         for row in rows
-        if isinstance(row.get("cheapest_cny_price"), (int, float))
+        if _row_is_decision_eligible(row)
+        and isinstance(row.get("cheapest_cny_price"), (int, float))
     ]
     if not priced_rows:
-        return "当前窗口暂无可比较价格，可结合失败列表补扫。"
+        return "当前窗口暂无可信可比价格；低可信度弱匹配已排除。"
     ranked = sorted(priced_rows, key=_decision_price_key)
     winner = ranked[0]
     runner_up = ranked[1] if len(ranked) > 1 else None
@@ -507,7 +545,8 @@ def _build_cheapest_conclusion(rows: list[CombinedQuoteRow]) -> dict[str, str | 
     cheapest_candidates = [
         row
         for row in rows
-        if isinstance(row.get("cheapest_cny_price"), (int, float))
+        if _row_is_decision_eligible(row)
+        and isinstance(row.get("cheapest_cny_price"), (int, float))
     ]
     if cheapest_candidates:
         sorted_rows = sorted(
@@ -546,7 +585,10 @@ def _build_cheapest_conclusion(rows: list[CombinedQuoteRow]) -> dict[str, str | 
         }
 
     native_only_candidates = [
-        row for row in rows if isinstance(row.get("cheapest_display_price"), str)
+        row
+        for row in rows
+        if _row_is_decision_eligible(row)
+        and isinstance(row.get("cheapest_display_price"), str)
         and row.get("cheapest_display_price") not in {"", "-"}
     ]
     if native_only_candidates:
@@ -558,6 +600,26 @@ def _build_cheapest_conclusion(rows: list[CombinedQuoteRow]) -> dict[str, str | 
             "insight": "请检查汇率服务，或稍后重试以生成统一结论。",
             "link": None,
             "button_text": "等待换算完成",
+        }
+
+    excluded_rows = [
+        row
+        for row in rows
+        if not _row_is_decision_eligible(row)
+        and (
+            isinstance(row.get("cheapest_cny_price"), (int, float))
+            or bool(row.get("excluded_price_display"))
+        )
+    ]
+    if excluded_rows:
+        return {
+            "headline": "暂无可信最低价",
+            "price": "低可信度价格已排除",
+            "supporting": f"已拦截 {len(excluded_rows)} 条弱匹配价格",
+            "meta": "弱匹配可能来自日历、广告或非当前航班价格。",
+            "insight": "请以结果页实际票价为准，重新扫描后再比较。",
+            "link": None,
+            "button_text": "等待可信结果",
         }
 
     if rows:
@@ -598,7 +660,8 @@ def _find_cheapest_highlight_signatures(
     cheapest_candidates = [
         row
         for row in rows
-        if isinstance(row.get("cheapest_cny_price"), (int, float))
+        if _row_is_decision_eligible(row)
+        and isinstance(row.get("cheapest_cny_price"), (int, float))
     ]
     if not cheapest_candidates:
         return set()
@@ -611,7 +674,7 @@ def _find_cheapest_highlight_signatures(
 
 
 def _row_has_price(row: CombinedQuoteRow) -> bool:
-    return any(
+    return _row_is_decision_eligible(row) and any(
         isinstance(row.get(key), (int, float))
         for key in ("best_cny_price", "cheapest_cny_price")
     )

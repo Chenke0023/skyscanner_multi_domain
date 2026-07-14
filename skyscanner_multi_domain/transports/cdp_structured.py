@@ -692,7 +692,12 @@ async def compare_via_cdp_structured(
                 trace.append(f"hydration_scan:candidates={len(enriched_hydration_candidates)}")
                 evidences.extend(parse_network_json(region, source_url, network_candidates))
                 evidences.extend(parse_hydration_scripts(region, source_url, list(capture.get("hydrationScripts") or [])))
-                evidences.extend(parse_dom_cards(region, source_url, list(capture.get("domCards") or [])))
+                evidences.extend(parse_dom_cards(
+                    region,
+                    source_url,
+                    list(capture.get("domCards") or []),
+                    round_trip=bool(getattr(args, "return_date", None)),
+                ))
                 if not evidences:
                     evidences.extend(parse_text_fallback(region, source_url, str(capture.get("pageText") or "")))
                 result = resolve_quote(region, source_url, evidences)
