@@ -1069,6 +1069,35 @@ class DesktopUIService:
             self._log_locked(message)
         _send_desktop_notification("Skyscanner 需要人工验证", message)
 
+    def _handle_bot_challenge_waiting(
+        self,
+        region: Any,
+        *,
+        trip_label: str,
+        route_label: str | None = None,
+    ) -> None:
+        context = f"{trip_label} / {route_label}" if route_label else trip_label
+        message = (
+            f"{context}：{region.name}（{region.code}）正在等待人工验证。"
+            "完成浏览器中的验证后，扫描会自动恢复并刷新结果。"
+        )
+        with self._lock:
+            self._status_message = message
+            self._log_locked(message)
+
+    def _handle_bot_challenge_resolved(
+        self,
+        region: Any,
+        *,
+        trip_label: str,
+        route_label: str | None = None,
+    ) -> None:
+        context = f"{trip_label} / {route_label}" if route_label else trip_label
+        message = f"{context}：{region.name}（{region.code}）人工验证已通过，正在恢复采集..."
+        with self._lock:
+            self._status_message = message
+            self._log_locked(message)
+
     def _reset_derived_state(self) -> None:
         self._cheapest_conclusion = _build_cheapest_conclusion([])
         self._recommendation_conclusion = _build_recommendation_payload([])
@@ -1835,6 +1864,12 @@ class DesktopUIService:
                         def on_challenge(region: Any, quote: Any, _trip_label: str = trip_label) -> None:
                             self._handle_bot_challenge(region, quote, trip_label=_trip_label)
 
+                        def on_challenge_waiting(region: Any, _quote: Any, _trip_label: str = trip_label) -> None:
+                            self._handle_bot_challenge_waiting(region, trip_label=_trip_label)
+
+                        def on_challenge_resolved(region: Any, _quote: Any, _trip_label: str = trip_label) -> None:
+                            self._handle_bot_challenge_resolved(region, trip_label=_trip_label)
+
                         self._log(f"开始扫描行程 {trip_label}。")
                         current_scope = rerun_scope
                         current_selected_codes = set(normalized_selected_codes)
@@ -1976,6 +2011,8 @@ class DesktopUIService:
                             transport="page",
                             on_region_start=on_region_start,
                             on_challenge=on_challenge,
+                            on_challenge_waiting=on_challenge_waiting,
+                            on_challenge_resolved=on_challenge_resolved,
                             scan_mode="preview_first",
                             rerun_scope=current_scope,
                             selected_region_codes=sorted(current_selected_codes),
@@ -2268,6 +2305,26 @@ class DesktopUIService:
                                         route_label=_route_label,
                                     )
 
+                                def on_challenge_waiting(
+                                    region: Any,
+                                    _quote: Any,
+                                    _trip_label: str = trip_label,
+                                    _route_label: str = route_label,
+                                ) -> None:
+                                    self._handle_bot_challenge_waiting(
+                                        region, trip_label=_trip_label, route_label=_route_label
+                                    )
+
+                                def on_challenge_resolved(
+                                    region: Any,
+                                    _quote: Any,
+                                    _trip_label: str = trip_label,
+                                    _route_label: str = route_label,
+                                ) -> None:
+                                    self._handle_bot_challenge_resolved(
+                                        region, trip_label=_trip_label, route_label=_route_label
+                                    )
+
                                 async def on_pair_progress(progress_payload: dict[str, Any]) -> None:
                                     if self._cancel_event.is_set():
                                         raise asyncio.CancelledError
@@ -2359,6 +2416,8 @@ class DesktopUIService:
                                     transport="page",
                                     on_region_start=on_region_start,
                                     on_challenge=on_challenge,
+                                    on_challenge_waiting=on_challenge_waiting,
+                                    on_challenge_resolved=on_challenge_resolved,
                                     scan_mode="preview_first",
                                     rerun_scope=current_scope,
                                     selected_region_codes=sorted(current_selected_codes),

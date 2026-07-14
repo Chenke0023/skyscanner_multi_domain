@@ -3,6 +3,7 @@
 ## Unreleased
 
 - Notify the desktop user immediately when a market triggers a bot/CAPTCHA challenge, and retain unresolved challenge tabs instead of closing them when the scan wait expires.
+- Keep timed-out CAPTCHA markets in a manual-verification wait state, then automatically resume extraction and refresh desktop results after verification succeeds.
 
 ## 1.3.0 - 2026-07-13
 

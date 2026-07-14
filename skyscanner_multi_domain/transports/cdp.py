@@ -677,6 +677,8 @@ async def compare_via_pages(
     keep_tabs: bool = False,
     keep_challenge_tabs: bool = True,
     on_challenge: Callable[[RegionConfig, FlightQuote], Any] | None = None,
+    on_challenge_waiting: Callable[[RegionConfig, FlightQuote], Any] | None = None,
+    on_challenge_resolved: Callable[[RegionConfig, FlightQuote], Any] | None = None,
 ) -> list[FlightQuote]:
     if build_search_url is None:
         from skyscanner_multi_domain.scan.orchestrator import build_search_url as _bsu
@@ -703,6 +705,9 @@ async def compare_via_pages(
         owned_tab_ids: set[str] = set()
         challenge_tab_ids: set[str] = set()
         notified_challenge_regions: set[str] = set()
+        active_challenge_regions: set[str] = set()
+        waiting_challenge_regions: set[str] = set()
+        recovery_deadlines: dict[str, float] = {}
         domain_tabs: dict[str, str] = dict(manual_tabs or {})
 
         for region in selected_regions:
@@ -854,7 +859,10 @@ async def compare_via_pages(
 
                     latest_quotes[region.code] = final_quote
                     is_challenge = final_quote.status in {"page_challenge", "px_challenge"}
+                    now = time.monotonic()
+                    was_challenge = region.code in active_challenge_regions
                     if is_challenge:
+                        active_challenge_regions.add(region.code)
                         if domain_tab_id:
                             challenge_tab_ids.add(domain_tab_id)
                         final_quote.fetch_metadata["challenge_tab_retained"] = (
@@ -865,9 +873,31 @@ async def compare_via_pages(
                             callback_result = on_challenge(region, final_quote)
                             if asyncio.iscoroutine(callback_result):
                                 await callback_result
+                        if now >= deadline and region.code not in waiting_challenge_regions:
+                            waiting_challenge_regions.add(region.code)
+                            final_quote.fetch_metadata["waiting_for_manual_verification"] = True
+                            if on_challenge_waiting is not None:
+                                callback_result = on_challenge_waiting(region, final_quote)
+                                if asyncio.iscoroutine(callback_result):
+                                    await callback_result
                     else:
+                        active_challenge_regions.discard(region.code)
                         challenge_tab_ids.discard(domain_tab_id)
-                    if final_quote.price is None and time.monotonic() < deadline:
+                        if was_challenge:
+                            # Give the results page time to finish rendering after
+                            # the user completes the browser verification.
+                            recovery_deadlines[region.code] = now + 60
+                            if on_challenge_resolved is not None:
+                                callback_result = on_challenge_resolved(region, final_quote)
+                                if asyncio.iscoroutine(callback_result):
+                                    await callback_result
+
+                    should_keep_polling = final_quote.price is None and (
+                        now < deadline
+                        or is_challenge
+                        or now < recovery_deadlines.get(region.code, 0)
+                    )
+                    if should_keep_polling:
                         next_pending[region.code] = region
 
                 if not next_pending:

@@ -336,6 +336,8 @@ async def run_page_scan(
     on_progress: ScanProgressCallback | None = None,
     config: Any | None = None,
     on_challenge: Callable[[RegionConfig, FlightQuote], Any] | None = None,
+    on_challenge_waiting: Callable[[RegionConfig, FlightQuote], Any] | None = None,
+    on_challenge_resolved: Callable[[RegionConfig, FlightQuote], Any] | None = None,
 ) -> list[FlightQuote]:
     """Scan selected markets through the system browser's CDP endpoint.
 
@@ -548,6 +550,8 @@ async def run_page_scan(
                         keep_tabs=keep_tabs,
                         keep_challenge_tabs=keep_challenge_tabs,
                         on_challenge=on_challenge,
+                        on_challenge_waiting=on_challenge_waiting,
+                        on_challenge_resolved=on_challenge_resolved,
                     )
                 else:
                     quotes = await compare_via_cdp_structured(
