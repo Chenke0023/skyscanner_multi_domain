@@ -114,6 +114,23 @@ def test_country_suggestions_are_not_truncated_for_short_queries(tmp_path: Path)
     assert "BR" in codes
 
 
+def test_smart_location_suggestions_mix_places_and_countries(tmp_path: Path) -> None:
+    service = build_service(tmp_path)
+
+    payload = service.get_location_suggestions(
+        "destination",
+        "巴",
+        {"smartMode": True, "destinationCountry": False},
+    )
+    kinds = {item["kind"] for item in payload["items"]}
+    codes = {item["code"] for item in payload["items"]}
+
+    assert "country" in kinds
+    assert "airport" in kinds or "metro" in kinds
+    assert "PK" in codes
+    assert "BCN" in codes
+
+
 def test_country_mode_empty_query_returns_complete_dropdown(tmp_path: Path) -> None:
     service = build_service(tmp_path)
 

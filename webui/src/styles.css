@@ -267,6 +267,20 @@ button {
   color: var(--color-danger);
 }
 
+.location-label-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.location-mode-badge {
+  margin-bottom: 7px;
+  color: var(--color-muted);
+  font-size: 0.7rem;
+  font-weight: 600;
+}
+
 /* Suggestion dropdown ------------------------------------------------------ */
 .suggestion-list {
   position: absolute;
@@ -289,6 +303,10 @@ button {
 
 .suggestion-list button {
   width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
   text-align: left;
   padding: 8px 10px;
   border-radius: 10px;
@@ -300,6 +318,26 @@ button {
 
 .suggestion-list button:hover {
   background: rgba(0, 0, 0, 0.03);
+}
+
+.suggestion-kind {
+  flex: 0 0 auto;
+  padding: 2px 7px;
+  border-radius: 999px;
+  background: #f1f0ed;
+  color: var(--color-muted);
+  font-size: 0.68rem;
+  font-weight: 700;
+}
+
+.suggestion-kind-country {
+  background: #e8f1ec;
+  color: #3f6b52;
+}
+
+.suggestion-kind-metro {
+  background: #eceef5;
+  color: #525f82;
 }
 
 /* Date inputs -------------------------------------------------------------- */

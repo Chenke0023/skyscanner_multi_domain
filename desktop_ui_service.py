@@ -206,11 +206,13 @@ class DesktopUIService:
             )
         use_country = current_form["origin_country"] if field_name == "origin" else current_form["destination_country"]
         prefer_metro = bool(options.get("preferMetro", not current_form["exact_airport"])) if options else not current_form["exact_airport"]
+        smart_mode = bool(options.get("smartMode")) if options else False
         suggestions = self._resolve_location_suggestions(
             field=field_name,
             value=query,
             use_country_mode=use_country,
             prefer_metro=prefer_metro,
+            smart_mode=smart_mode,
         )
         return {
             "field": field_name,
@@ -927,7 +929,22 @@ class DesktopUIService:
         value: str,
         use_country_mode: bool,
         prefer_metro: bool,
+        smart_mode: bool = False,
     ) -> list[LocationRecord]:
+        if smart_mode:
+            raw = value.strip()
+            if not raw:
+                return []
+            locations = self.query.location_resolver.search_locations(
+                raw,
+                prefer_metro=prefer_metro,
+                limit=5,
+            )
+            countries = self.query.location_resolver.search_countries(raw, limit=None)
+            return [
+                *locations,
+                *(LocationRecord(name=item.name, code=item.code, kind="country") for item in countries),
+            ]
         if use_country_mode:
             country_records = (
                 self.query.location_resolver.search_countries(value, limit=None)

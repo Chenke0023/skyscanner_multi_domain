@@ -156,25 +156,24 @@ describe("App", () => {
     expect(await screen.findAllByText("browser_unavailable")).toHaveLength(2);
   });
 
-  it("opens the complete country dropdown for an empty country field", async () => {
+  it("offers countries and cities together and switches to country scope", async () => {
     const state = stateWithEvidence();
     state.form.destination = "";
-    state.form.destination_country = true;
     state.results.successRows = [];
-    let emptyCountryLookupSeen = false;
+    let smartLookupSeen = false;
     window.pywebview = {
       api: {
         get_initial_state: async () => state,
         get_ui_state: async () => state,
         update_query_state: async () => state,
         get_location_suggestions: async (field, query, options) => {
-          emptyCountryLookupSeen =
-            emptyCountryLookupSeen ||
-            (field === "destination" && query === "" && Boolean(options?.destinationCountry));
+          smartLookupSeen =
+            smartLookupSeen ||
+            (field === "destination" && query === "巴" && Boolean(options?.smartMode));
           return {
             field,
             items: [
-              { name: "中国", code: "CN", kind: "country", label: "中国 (CN, 国家)" },
+              { name: "巴塞罗那", code: "BCN", kind: "metro", label: "巴塞罗那 (BCN, 城市)" },
               { name: "巴基斯坦", code: "PK", kind: "country", label: "巴基斯坦 (PK, 国家)" },
             ],
           };
@@ -184,10 +183,16 @@ describe("App", () => {
 
     render(<App />);
 
-    fireEvent.focus(await screen.findByPlaceholderText("例如：东京"));
+    const destinationInput = await screen.findByPlaceholderText("例如：东京");
+    fireEvent.focus(destinationInput);
+    fireEvent.change(destinationInput, { target: { value: "巴" } });
 
-    expect(await screen.findByText("巴基斯坦 (PK, 国家)")).toBeInTheDocument();
-    expect(emptyCountryLookupSeen).toBe(true);
+    expect(await screen.findByRole("button", { name: /巴塞罗那.*城市/ })).toBeInTheDocument();
+    fireEvent.click(await screen.findByRole("button", { name: /巴基斯坦.*国家/ }));
+    expect(destinationInput).toHaveValue("巴基斯坦");
+    expect(await screen.findByText("国家范围")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /巴基斯坦.*国家/ })).not.toBeInTheDocument();
+    expect(smartLookupSeen).toBe(true);
   });
 
   it("dismisses location suggestions after selecting an airport", async () => {
@@ -216,10 +221,10 @@ describe("App", () => {
     const originInput = await screen.findByPlaceholderText("例如：北京");
     fireEvent.focus(originInput);
     fireEvent.change(originInput, { target: { value: "巴" } });
-    fireEvent.click(await screen.findByRole("button", { name: "巴塞罗那 (BCN) - ES" }));
+    fireEvent.click(await screen.findByRole("button", { name: /巴塞罗那.*机场/ }));
 
     expect(originInput).toHaveValue("巴塞罗那");
-    expect(screen.queryByRole("button", { name: "巴塞罗那 (BCN) - ES" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /巴塞罗那.*机场/ })).not.toBeInTheDocument();
     expect(suggestionLookups).toBe(1);
   });
 

@@ -162,12 +162,7 @@ function App() {
 
   useEffect(() => {
     let cancelled = false;
-    const shouldFetchCompleteCountryList = Boolean(form?.origin_country);
-    if (
-      activeField !== "origin" ||
-      !form ||
-      (!originDeferred.trim() && !shouldFetchCompleteCountryList)
-    ) {
+    if (activeField !== "origin" || !form || !originDeferred.trim()) {
       setSuggestions((current) => ({ ...current, origin: [] }));
       return () => {
         cancelled = true;
@@ -179,6 +174,7 @@ function App() {
         originCountry: form.origin_country,
         destinationCountry: form.destination_country,
         preferMetro: !form.exact_airport,
+        smartMode: true,
       })
       .then((response) => {
         if (!cancelled) {
@@ -193,12 +189,7 @@ function App() {
 
   useEffect(() => {
     let cancelled = false;
-    const shouldFetchCompleteCountryList = Boolean(form?.destination_country);
-    if (
-      activeField !== "destination" ||
-      !form ||
-      (!destinationDeferred.trim() && !shouldFetchCompleteCountryList)
-    ) {
+    if (activeField !== "destination" || !form || !destinationDeferred.trim()) {
       setSuggestions((current) => ({ ...current, destination: [] }));
       return () => {
         cancelled = true;
@@ -210,6 +201,7 @@ function App() {
         originCountry: form.origin_country,
         destinationCountry: form.destination_country,
         preferMetro: false,
+        smartMode: true,
       })
       .then((response) => {
         if (!cancelled) {

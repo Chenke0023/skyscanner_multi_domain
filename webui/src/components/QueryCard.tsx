@@ -134,11 +134,16 @@ export function QueryCard({
     <div className="query-card">
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-6 gap-y-6">
         <div className="relative" ref={originRef}>
-          <label className="field-label">出发地</label>
+          <div className="location-label-row">
+            <label className="field-label">出发地</label>
+            <span className="location-mode-badge">
+              {form.origin_country ? "国家范围" : form.exact_airport ? "机场" : "城市 / 机场 / 国家"}
+            </span>
+          </div>
           <input
             className="form-control"
             value={form.origin}
-            onChange={(e) => onFormPatch({ origin: e.target.value })}
+            onChange={(e) => onFormPatch({ origin: e.target.value, origin_country: false })}
             onFocus={() => onActiveFieldChange("origin")}
             placeholder="例如：北京"
           />
@@ -149,12 +154,15 @@ export function QueryCard({
                   key={`${item.code}-${item.name}`}
                   type="button"
                   onClick={() => {
-                    onFormPatch({ origin: item.name });
+                    onFormPatch({ origin: item.name, origin_country: item.kind === "country" });
                     onActiveFieldChange(null);
                     onSuggestionsChange((current) => ({ ...current, origin: [] }));
                   }}
                 >
-                  {item.label}
+                  <span>{item.label}</span>
+                  <span className={`suggestion-kind suggestion-kind-${item.kind}`}>
+                    {item.kind === "country" ? "国家" : item.kind === "metro" ? "城市" : "机场"}
+                  </span>
                 </button>
               ))}
             </div>
@@ -162,11 +170,16 @@ export function QueryCard({
         </div>
 
         <div className="relative" ref={destRef}>
-          <label className="field-label">目的地</label>
+          <div className="location-label-row">
+            <label className="field-label">目的地</label>
+            <span className="location-mode-badge">
+              {form.destination_country ? "国家范围" : form.exact_airport ? "机场" : "城市 / 机场 / 国家"}
+            </span>
+          </div>
           <input
             className="form-control"
             value={form.destination}
-            onChange={(e) => onFormPatch({ destination: e.target.value })}
+            onChange={(e) => onFormPatch({ destination: e.target.value, destination_country: false })}
             onFocus={() => onActiveFieldChange("destination")}
             placeholder="例如：东京"
           />
@@ -177,12 +190,15 @@ export function QueryCard({
                   key={`${item.code}-${item.name}`}
                   type="button"
                   onClick={() => {
-                    onFormPatch({ destination: item.name });
+                    onFormPatch({ destination: item.name, destination_country: item.kind === "country" });
                     onActiveFieldChange(null);
                     onSuggestionsChange((current) => ({ ...current, destination: [] }));
                   }}
                 >
-                  {item.label}
+                  <span>{item.label}</span>
+                  <span className={`suggestion-kind suggestion-kind-${item.kind}`}>
+                    {item.kind === "country" ? "国家" : item.kind === "metro" ? "城市" : "机场"}
+                  </span>
                 </button>
               ))}
             </div>
@@ -250,8 +266,6 @@ export function QueryCard({
             <div className="sm:col-span-2 advanced-switch-grid">
               <Switch checked={form.combined_summary} onChange={(value) => onFormPatch({ combined_summary: value })} label="保存汇总" />
               <Switch checked={form.exact_airport} onChange={(value) => onFormPatch({ exact_airport: value })} label="严格机场" />
-              <Switch checked={form.origin_country} onChange={(value) => onFormPatch({ origin_country: value })} label="出发按国家" />
-              <Switch checked={form.destination_country} onChange={(value) => onFormPatch({ destination_country: value })} label="目的按国家" />
             </div>
           </div>
         </Collapsible>
