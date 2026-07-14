@@ -17,7 +17,7 @@ import time
 from dataclasses import asdict
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import aiohttp
 
@@ -564,10 +564,13 @@ async def compare_via_cdp_structured(
     cdp_mode: str = "attach",
     manual_tabs: dict[str, str] | None = None,
     keep_tabs: bool = False,
+    keep_challenge_tabs: bool = True,
+    on_challenge: Callable[[RegionConfig, FlightQuote], Any] | None = None,
 ) -> list[FlightQuote]:
     timeout = aiohttp.ClientTimeout(total=max(args.timeout, args.page_wait + 30, 45))
     quotes: list[FlightQuote] = []
     owned_tab_ids: set[str] = set()
+    challenge_tab_ids: set[str] = set()
     domain_tabs = dict(manual_tabs or {})
 
     async with aiohttp.ClientSession(timeout=timeout) as session:
@@ -708,6 +711,17 @@ async def compare_via_cdp_structured(
                 quote.fetch_metadata["stage_errors"] = capture.get("stageErrors", [])
                 quote.fetch_metadata["page_state"] = page_state
                 quote.fetch_metadata["navigation_trace"] = navigation_trace
+                if failure_reason == "failed_challenge" and tab_id:
+                    quote.status = "page_challenge"
+                    quote.error = "CDP structured 命中机器人 / CAPTCHA 验证页"
+                    challenge_tab_ids.add(tab_id)
+                    quote.fetch_metadata["challenge_tab_retained"] = (
+                        tab_id not in owned_tab_ids or keep_tabs or keep_challenge_tabs
+                    )
+                    if on_challenge is not None:
+                        callback_result = on_challenge(region, quote)
+                        if asyncio.iscoroutine(callback_result):
+                            await callback_result
                 needs_artifacts = quote.price is None or result.conflict_reason is not None or failure_stage is not None
                 if needs_artifacts:
                     diagnostic_dir = _write_diagnostics(
@@ -738,6 +752,8 @@ async def compare_via_cdp_structured(
         finally:
             if not keep_tabs:
                 for tab_id in owned_tab_ids:
+                    if keep_challenge_tabs and tab_id in challenge_tab_ids:
+                        continue
                     try:
                         await cdp_close_tab(session, tab_id)
                     except (aiohttp.ClientError, asyncio.TimeoutError, json.JSONDecodeError, RuntimeError) as exc:

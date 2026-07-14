@@ -3,7 +3,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from skyscanner_multi_domain.models import RegionConfig
 from skyscanner_multi_domain.transports.cdp import (
@@ -79,6 +79,28 @@ def test_quote_from_cdp_payload_marks_px_challenge_from_url() -> None:
     assert quote.status == "px_challenge"
     assert quote.price is None
     assert "PX" in (quote.error or "")
+
+
+def test_quote_from_cdp_payload_detects_bot_check_copy() -> None:
+    region = RegionConfig(
+        code="SG",
+        name="新加坡",
+        domain="https://www.skyscanner.com.sg",
+        currency="SGD",
+        locale="en-SG",
+    )
+    quote = _quote_from_cdp_payload(
+        region,
+        {
+            "url": "https://www.skyscanner.com.sg/transport/flights/bjs/ala/260429/",
+            "text": "Let's confirm you are not a bot before continuing.",
+        },
+        region.domain,
+    )
+
+    assert quote.status == "page_challenge"
+    assert quote.price is None
+    assert "通用验证码" in (quote.error or "")
 
 
 def test_get_matching_cdp_tabs_filters_by_path_and_region_aliases() -> None:
@@ -247,6 +269,69 @@ def test_compare_via_pages_creates_owned_tabs_and_closes_them() -> None:
         assert len(quotes) == 1
         assert quotes[0].status == "page_text"
         assert quotes[0].cheapest_price == 3072.0
+
+    asyncio.run(run_case())
+
+
+def test_compare_via_pages_notifies_and_retains_unresolved_challenge_tab() -> None:
+    args = argparse.Namespace(
+        origin="BJSA",
+        destination="ALA",
+        date="2026-04-29",
+        return_date=None,
+        page_wait=0,
+        timeout=5,
+    )
+    region = RegionConfig(
+        code="HK",
+        name="香港",
+        domain="https://www.skyscanner.com.hk",
+        currency="HKD",
+        locale="zh-HK",
+    )
+    target_url = "https://www.skyscanner.com.hk/transport/flights/bjsa/ala/260429/?adultsv2=1"
+    challenge_url = "https://www.skyscanner.com.hk/sttc/px/captcha-v2/index.html"
+    new_tab = {
+        "type": "page",
+        "url": target_url,
+        "webSocketDebuggerUrl": "ws://new-hk",
+        "id": "new-tab-1",
+    }
+    on_challenge = MagicMock()
+
+    class FakeSession:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return None
+
+    async def run_case() -> None:
+        with (
+            patch("skyscanner_multi_domain.transports.cdp.aiohttp.ClientSession", return_value=FakeSession()),
+            patch("skyscanner_multi_domain.transports.cdp.cdp_list_tabs", return_value=[new_tab]),
+            patch("skyscanner_multi_domain.transports.cdp.cdp_open_tab", return_value=new_tab),
+            patch("skyscanner_multi_domain.transports.cdp.cdp_close_tab") as mock_close,
+            patch(
+                "skyscanner_multi_domain.transports.cdp.cdp_eval",
+                return_value={"url": challenge_url, "text": "Press and hold to verify you are human"},
+            ),
+            patch("skyscanner_multi_domain.transports.cdp.asyncio.sleep", new=AsyncMock()),
+            patch("skyscanner_multi_domain.transports.cdp.time.monotonic", side_effect=[0.0, 100.0]),
+            patch("skyscanner_multi_domain.transports.cdp.emit_trace", lambda **k: None),
+        ):
+            quotes = await compare_via_pages(
+                args,
+                [region],
+                persist_failures=False,
+                build_search_url=lambda *_args: target_url,
+                on_challenge=on_challenge,
+            )
+
+        mock_close.assert_not_called()
+        on_challenge.assert_called_once_with(region, quotes[0])
+        assert quotes[0].status == "px_challenge"
+        assert quotes[0].fetch_metadata["challenge_tab_retained"] is True
 
     asyncio.run(run_case())
 

@@ -19,7 +19,7 @@ from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 from urllib.parse import urlparse
 
 import aiohttp
@@ -675,6 +675,8 @@ async def compare_via_pages(
     cdp_mode: str = "attach",
     manual_tabs: dict[str, str] | None = None,
     keep_tabs: bool = False,
+    keep_challenge_tabs: bool = True,
+    on_challenge: Callable[[RegionConfig, FlightQuote], Any] | None = None,
 ) -> list[FlightQuote]:
     if build_search_url is None:
         from skyscanner_multi_domain.scan.orchestrator import build_search_url as _bsu
@@ -699,6 +701,8 @@ async def compare_via_pages(
 
         # Owned-tab registry: only tabs we created are tracked here
         owned_tab_ids: set[str] = set()
+        challenge_tab_ids: set[str] = set()
+        notified_challenge_regions: set[str] = set()
         domain_tabs: dict[str, str] = dict(manual_tabs or {})
 
         for region in selected_regions:
@@ -849,6 +853,20 @@ async def compare_via_pages(
                         )
 
                     latest_quotes[region.code] = final_quote
+                    is_challenge = final_quote.status in {"page_challenge", "px_challenge"}
+                    if is_challenge:
+                        if domain_tab_id:
+                            challenge_tab_ids.add(domain_tab_id)
+                        final_quote.fetch_metadata["challenge_tab_retained"] = (
+                            domain_tab_id not in owned_tab_ids or keep_tabs or keep_challenge_tabs
+                        )
+                        if on_challenge is not None and region.code not in notified_challenge_regions:
+                            notified_challenge_regions.add(region.code)
+                            callback_result = on_challenge(region, final_quote)
+                            if asyncio.iscoroutine(callback_result):
+                                await callback_result
+                    else:
+                        challenge_tab_ids.discard(domain_tab_id)
                     if final_quote.price is None and time.monotonic() < deadline:
                         next_pending[region.code] = region
 
@@ -859,6 +877,8 @@ async def compare_via_pages(
         finally:
             if not keep_tabs:
                 for tab_id in owned_tab_ids:
+                    if keep_challenge_tabs and tab_id in challenge_tab_ids:
+                        continue
                     try:
                         await cdp_close_tab(session, tab_id)
                     except (aiohttp.ClientError, asyncio.TimeoutError, json.JSONDecodeError, RuntimeError) as exc:

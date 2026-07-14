@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from skyscanner_multi_domain.models import FlightQuote
 from skyscanner_multi_domain.scan.config import ScanConfig, TransportMode
@@ -22,16 +22,28 @@ def quote(region: str = "CN", *, price: float | None = 1234.0) -> FlightQuote:
 def test_page_is_default_and_uses_direct_cdp() -> None:
     page = AsyncMock(return_value=[quote()])
     structured = AsyncMock()
+    on_challenge = MagicMock()
     with (
         patch("skyscanner_multi_domain.transports.cdp.ensure_cdp_ready"),
         patch("skyscanner_multi_domain.transports.cdp.compare_via_pages", page),
         patch("skyscanner_multi_domain.transports.cdp_structured.compare_via_cdp_structured", structured),
     ):
-        rows = asyncio.run(run_page_scan("BJS", "ALA", "2026-06-10", ["CN"], config=ScanConfig(no_trace=True)))
+        rows = asyncio.run(
+            run_page_scan(
+                "BJS",
+                "ALA",
+                "2026-06-10",
+                ["CN"],
+                config=ScanConfig(no_trace=True),
+                on_challenge=on_challenge,
+            )
+        )
 
     assert rows[0].price == 1234.0
     assert rows[0].source_kind == "page"
     page.assert_awaited_once()
+    assert page.await_args.kwargs["on_challenge"] is on_challenge
+    assert page.await_args.kwargs["keep_challenge_tabs"] is True
     structured.assert_not_awaited()
     assert len(rows[0].attempt_history) == 1
 

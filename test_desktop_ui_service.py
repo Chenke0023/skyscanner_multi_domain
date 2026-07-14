@@ -5,6 +5,7 @@ from unittest.mock import patch
 
 from desktop_ui_service import DesktopUIService
 from skyscanner_multi_domain.geo.location_resolver import load_country_records
+from skyscanner_multi_domain.models import FlightQuote, RegionConfig
 from skyscanner_multi_domain.scan.confirmation import PriceConfirmationStore
 from skyscanner_multi_domain.scan.history import ScanHistoryStore
 
@@ -16,6 +17,35 @@ def build_service(tmp_path: Path) -> DesktopUIService:
     service.history_store = ScanHistoryStore(tmp_path / "scan_history.sqlite3")
     service._refresh_history_lists()
     return service
+
+
+def test_bot_challenge_updates_status_log_and_sends_notification(tmp_path: Path) -> None:
+    service = build_service(tmp_path)
+    region = RegionConfig(
+        code="HK",
+        name="香港",
+        domain="https://www.skyscanner.com.hk",
+        locale="zh-HK",
+        currency="HKD",
+    )
+    quote = FlightQuote(
+        region="HK",
+        domain=region.domain,
+        price=None,
+        currency="HKD",
+        source_url=f"{region.domain}/captcha",
+        status="px_challenge",
+        fetch_metadata={"challenge_tab_retained": True},
+    )
+
+    with patch("desktop_ui_service._send_desktop_notification") as notify:
+        service._handle_bot_challenge(region, quote, trip_label="2026-08-01")
+
+    state = service.get_ui_state()
+    assert "触发机器人 / CAPTCHA 检查" in state["status"]["message"]
+    assert "已保留浏览器标签页" in state["status"]["message"]
+    assert state["logs"][-1]["message"] == state["status"]["message"]
+    notify.assert_called_once_with("Skyscanner 需要人工验证", state["status"]["message"])
 
 
 def test_update_query_state_persists_form_and_hints(tmp_path: Path) -> None:

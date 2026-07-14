@@ -37,7 +37,19 @@ def check_captcha_in_page(page_text: str, page: Any | None = None) -> tuple[bool
         "cloudflare": ["cf-turnstile", "cloudflare", "turnstile", "cf.challenge"],
         "recaptcha": ["g-recaptcha", "recaptcha", "google recaptcha"],
         "hcaptcha": ["h-captcha", "hcaptcha"],
-        "generic": ["captcha", "verify you are human", "human verification"],
+        "generic": [
+            "captcha",
+            "verify you are human",
+            "human verification",
+            "not a robot",
+            "are you a robot",
+            "not a bot",
+            "bot check",
+            "security check",
+            "机器人验证",
+            "人机验证",
+            "安全检查",
+        ],
     }
 
     text_parts = [page_text]

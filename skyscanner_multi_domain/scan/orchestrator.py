@@ -335,6 +335,7 @@ async def run_page_scan(
     history_store: Any | None = None,
     on_progress: ScanProgressCallback | None = None,
     config: Any | None = None,
+    on_challenge: Callable[[RegionConfig, FlightQuote], Any] | None = None,
 ) -> list[FlightQuote]:
     """Scan selected markets through the system browser's CDP endpoint.
 
@@ -489,6 +490,7 @@ async def run_page_scan(
     cdp_mode = getattr(getattr(config, "cdp_mode", None), "value", "attach")
     manual_tabs = dict(getattr(config, "manual_tabs", None) or {})
     keep_tabs = bool(getattr(config, "keep_tabs", False))
+    keep_challenge_tabs = bool(getattr(config, "keep_challenge_tabs", True))
     planner = AttemptPlanner(config)
     quotes: list[FlightQuote]
 
@@ -544,6 +546,8 @@ async def run_page_scan(
                         cdp_mode=cdp_mode,
                         manual_tabs=manual_tabs,
                         keep_tabs=keep_tabs,
+                        keep_challenge_tabs=keep_challenge_tabs,
+                        on_challenge=on_challenge,
                     )
                 else:
                     quotes = await compare_via_cdp_structured(
@@ -555,6 +559,8 @@ async def run_page_scan(
                         cdp_mode=cdp_mode,
                         manual_tabs=manual_tabs,
                         keep_tabs=keep_tabs,
+                        keep_challenge_tabs=keep_challenge_tabs,
+                        on_challenge=on_challenge,
                     )
 
         quotes = apply_plan_metadata(quotes)

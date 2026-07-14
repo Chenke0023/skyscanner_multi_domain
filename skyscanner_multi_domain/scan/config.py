@@ -34,6 +34,7 @@ class ScanConfig:
     cdp_mode: CdpMode = CdpMode.ATTACH
     cdp_host: str = "http://localhost:9222"
     keep_tabs: bool = False
+    keep_challenge_tabs: bool = True
     manual_tabs: dict[str, str] = field(default_factory=dict)
     low_confidence_policy: LowConfidencePolicy = LowConfidencePolicy.ACCEPT_REVIEW
     rankable_confidence: float = 0.80

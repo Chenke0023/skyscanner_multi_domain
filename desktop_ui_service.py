@@ -1051,6 +1051,24 @@ class DesktopUIService:
         self._logs.append({"timestamp": timestamp, "message": message})
         self._logs = self._logs[-400:]
 
+    def _handle_bot_challenge(
+        self,
+        region: Any,
+        quote: Any,
+        *,
+        trip_label: str,
+        route_label: str | None = None,
+    ) -> None:
+        context = f"{trip_label} / {route_label}" if route_label else trip_label
+        region_label = f"{region.name}（{region.code}）"
+        retained = bool(getattr(quote, "fetch_metadata", {}).get("challenge_tab_retained", True))
+        action = "已保留浏览器标签页，请在浏览器中完成人机验证。" if retained else "请立即在浏览器中完成人机验证。"
+        message = f"{context}：{region_label} 触发机器人 / CAPTCHA 检查。{action}"
+        with self._lock:
+            self._status_message = message
+            self._log_locked(message)
+        _send_desktop_notification("Skyscanner 需要人工验证", message)
+
     def _reset_derived_state(self) -> None:
         self._cheapest_conclusion = _build_cheapest_conclusion([])
         self._recommendation_conclusion = _build_recommendation_payload([])
@@ -1814,6 +1832,9 @@ class DesktopUIService:
                                 region_name=region.name,
                             )
 
+                        def on_challenge(region: Any, quote: Any, _trip_label: str = trip_label) -> None:
+                            self._handle_bot_challenge(region, quote, trip_label=_trip_label)
+
                         self._log(f"开始扫描行程 {trip_label}。")
                         current_scope = rerun_scope
                         current_selected_codes = set(normalized_selected_codes)
@@ -1954,6 +1975,7 @@ class DesktopUIService:
                             timeout=30,
                             transport="page",
                             on_region_start=on_region_start,
+                            on_challenge=on_challenge,
                             scan_mode="preview_first",
                             rerun_scope=current_scope,
                             selected_region_codes=sorted(current_selected_codes),
@@ -2233,6 +2255,19 @@ class DesktopUIService:
                                         region_name=f"{region.name} / {_route_label}",
                                     )
 
+                                def on_challenge(
+                                    region: Any,
+                                    quote: Any,
+                                    _trip_label: str = trip_label,
+                                    _route_label: str = route_label,
+                                ) -> None:
+                                    self._handle_bot_challenge(
+                                        region,
+                                        quote,
+                                        trip_label=_trip_label,
+                                        route_label=_route_label,
+                                    )
+
                                 async def on_pair_progress(progress_payload: dict[str, Any]) -> None:
                                     if self._cancel_event.is_set():
                                         raise asyncio.CancelledError
@@ -2323,6 +2358,7 @@ class DesktopUIService:
                                     timeout=30,
                                     transport="page",
                                     on_region_start=on_region_start,
+                                    on_challenge=on_challenge,
                                     scan_mode="preview_first",
                                     rerun_scope=current_scope,
                                     selected_region_codes=sorted(current_selected_codes),

@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Notify the desktop user immediately when a market triggers a bot/CAPTCHA challenge, and retain unresolved challenge tabs instead of closing them when the scan wait expires.
+
 ## 1.3.0 - 2026-07-13
 
 ### Breaking changes
