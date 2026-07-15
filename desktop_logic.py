@@ -12,6 +12,7 @@ from skyscanner_multi_domain.geo.location_resolver import (
     AIRPORT_DATASET_PATH,
     LOCATION_MAPPINGS_PATH,
 )
+from skyscanner_multi_domain.scan.fetch_types import is_decision_eligible
 from skyscanner_multi_domain.scan.history import source_kind_label, summarize_query_history
 
 
@@ -84,27 +85,6 @@ def _numeric_or_inf(value: object) -> float:
 def _numeric_or_none(value: object) -> float | None:
     return float(value) if isinstance(value, (int, float)) else None
 
-
-def _row_is_decision_eligible(row: CombinedQuoteRow) -> bool:
-    """Return whether a row may participate in minimum-price decisions.
-
-    Older saved scans do not carry ``rankable``. For those rows, fall back to
-    the persisted source/confidence metadata so known weak text matches cannot
-    reappear as a current minimum after an app restart.
-    """
-    if row.get("decision_eligible") is False or row.get("rankable") is False:
-        return False
-    if str(row.get("price_source") or "").strip() == "first_price_fallback":
-        return False
-    confidence = row.get("confidence")
-    if (
-        row.get("rankable") is None
-        and isinstance(confidence, (int, float))
-        and not isinstance(confidence, bool)
-        and float(confidence) < 0.80
-    ):
-        return False
-    return True
 
 
 def _compute_stability_label(
@@ -202,7 +182,7 @@ def _enrich_decision_rows(
 ) -> list[CombinedQuoteRow]:
     enriched: list[CombinedQuoteRow] = []
     history_summary = summarize_query_history(history_records) if history_records else None
-    eligible_rows = [row for row in rows if _row_is_decision_eligible(row)]
+    eligible_rows = [row for row in rows if is_decision_eligible(row)]
     recommended_signature = (
         _row_signature(min(eligible_rows, key=_decision_price_key)) if eligible_rows else None
     )
@@ -231,7 +211,7 @@ def _build_top_recommendations(
     candidates = [
         row
         for row in rows
-        if _row_is_decision_eligible(row)
+        if is_decision_eligible(row)
         and (
             isinstance(row.get("cheapest_cny_price"), (int, float))
             or isinstance(row.get("best_cny_price"), (int, float))
@@ -247,7 +227,7 @@ def _build_market_delta_explanation(
     priced_rows = [
         row
         for row in rows
-        if _row_is_decision_eligible(row)
+        if is_decision_eligible(row)
         and isinstance(row.get("cheapest_cny_price"), (int, float))
     ]
     if len(priced_rows) < 2:
@@ -270,10 +250,17 @@ def _build_market_delta_explanation(
     return explanation + "。"
 
 
+def _itinerary_legs_for_payload(row: CombinedQuoteRow) -> list[dict[str, Any]]:
+    value = row.get("itinerary_legs")
+    if not isinstance(value, list):
+        return []
+    return [dict(leg) for leg in value[:2] if isinstance(leg, dict)]
+
+
 def _build_recommendation_payload(
     rows: list[CombinedQuoteRow],
     history_records: list[Any] | None = None,
-) -> dict[str, str | None]:
+) -> dict[str, Any]:
     recommendations = _build_top_recommendations(rows, mode="cheapest", limit=2)
     if not recommendations:
         return {
@@ -316,6 +303,7 @@ def _build_recommendation_payload(
         "price": f"¥{float(winner_price):,.2f}",
         "supporting": f"{winner.get('date') or '-'} · {winner.get('route') or '-'}",
         "meta": f"{source_text} · {stability} · {reliability}",
+        "itinerary_legs": _itinerary_legs_for_payload(winner),
         "insight": (
             f"{spread_text} {_build_market_delta_explanation(rows, history_records or [])}".strip()
         ),
@@ -329,7 +317,7 @@ def _build_calendar_summary(
 ) -> dict[str, dict[str, CombinedQuoteRow]]:
     grouped: dict[str, dict[str, CombinedQuoteRow]] = {}
     for row in rows:
-        if not _row_is_decision_eligible(row):
+        if not is_decision_eligible(row):
             continue
         trip_label = str(row.get("date") or "").strip()
         if not trip_label:
@@ -364,11 +352,11 @@ def _build_compare_rows(
         )
         previous = previous_index.get(key)
         current_price = (
-            row.get("cheapest_cny_price") if _row_is_decision_eligible(row) else None
+            row.get("cheapest_cny_price") if is_decision_eligible(row) else None
         )
         previous_price = (
             previous.get("cheapest_cny_price")
-            if previous and _row_is_decision_eligible(previous)
+            if previous and is_decision_eligible(previous)
             else None
         )
         if isinstance(current_price, (int, float)) and isinstance(previous_price, (int, float)):
@@ -427,7 +415,7 @@ def _build_window_summary_text(
     priced_rows = [
         row
         for row in rows
-        if _row_is_decision_eligible(row)
+        if is_decision_eligible(row)
         and isinstance(row.get("cheapest_cny_price"), (int, float))
     ]
     if not priced_rows:
@@ -541,11 +529,11 @@ def _write_query_state(state_path: Path, payload: dict[str, Any]) -> None:
     )
 
 
-def _build_cheapest_conclusion(rows: list[CombinedQuoteRow]) -> dict[str, str | None]:
+def _build_cheapest_conclusion(rows: list[CombinedQuoteRow]) -> dict[str, Any]:
     cheapest_candidates = [
         row
         for row in rows
-        if _row_is_decision_eligible(row)
+        if is_decision_eligible(row)
         and isinstance(row.get("cheapest_cny_price"), (int, float))
     ]
     if cheapest_candidates:
@@ -579,6 +567,7 @@ def _build_cheapest_conclusion(rows: list[CombinedQuoteRow]) -> dict[str, str | 
                 f"{winner.get('date') or '-'} · {winner.get('route') or '-'} · "
                 f"{winner.get('status') or '-'}"
             ),
+            "itinerary_legs": _itinerary_legs_for_payload(winner),
             "insight": delta_text,
             "link": str(winner.get("link") or ""),
             "button_text": "打开最低价结果页",
@@ -587,7 +576,7 @@ def _build_cheapest_conclusion(rows: list[CombinedQuoteRow]) -> dict[str, str | 
     native_only_candidates = [
         row
         for row in rows
-        if _row_is_decision_eligible(row)
+        if is_decision_eligible(row)
         and isinstance(row.get("cheapest_display_price"), str)
         and row.get("cheapest_display_price") not in {"", "-"}
     ]
@@ -605,7 +594,7 @@ def _build_cheapest_conclusion(rows: list[CombinedQuoteRow]) -> dict[str, str | 
     excluded_rows = [
         row
         for row in rows
-        if not _row_is_decision_eligible(row)
+        if not is_decision_eligible(row)
         and (
             isinstance(row.get("cheapest_cny_price"), (int, float))
             or bool(row.get("excluded_price_display"))
@@ -660,7 +649,7 @@ def _find_cheapest_highlight_signatures(
     cheapest_candidates = [
         row
         for row in rows
-        if _row_is_decision_eligible(row)
+        if is_decision_eligible(row)
         and isinstance(row.get("cheapest_cny_price"), (int, float))
     ]
     if not cheapest_candidates:
@@ -674,7 +663,7 @@ def _find_cheapest_highlight_signatures(
 
 
 def _row_has_price(row: CombinedQuoteRow) -> bool:
-    return _row_is_decision_eligible(row) and any(
+    return is_decision_eligible(row) and any(
         isinstance(row.get(key), (int, float))
         for key in ("best_cny_price", "cheapest_cny_price")
     )

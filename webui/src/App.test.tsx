@@ -26,8 +26,32 @@ function stateWithEvidence(): UIState {
     history: { favorites: [], recent: [], historyDetail: "" },
     alerts: { config: null, summary: "", pendingRetryRegions: [] },
     results: {
-      cheapestConclusion: { headline: "最低价", price: "¥1,234", supporting: "", meta: "", insight: "", button_text: "打开", link: null },
-      recommendationConclusion: { headline: "推荐", price: "¥1,234", supporting: "", meta: "", insight: "", button_text: "打开", link: null },
+      cheapestConclusion: {
+        headline: "最低价",
+        price: "¥1,234",
+        supporting: "",
+        meta: "",
+        insight: "",
+        button_text: "打开",
+        link: null,
+        itinerary_legs: [
+          { direction: "outbound", departure_time: "08:10", arrival_time: "11:25", stop_count: 0, duration_minutes: 195 },
+          { direction: "return", departure_time: "18:30", arrival_time: "23:10", stop_count: 1, duration_minutes: 280 },
+        ],
+      },
+      recommendationConclusion: {
+        headline: "推荐",
+        price: "¥1,234",
+        supporting: "",
+        meta: "",
+        insight: "",
+        button_text: "打开",
+        link: null,
+        itinerary_legs: [
+          { direction: "outbound", departure_time: "08:10", arrival_time: "11:25", stop_count: 0, duration_minutes: 195 },
+          { direction: "return", departure_time: "18:30", arrival_time: "23:10", stop_count: 1, duration_minutes: 280 },
+        ],
+      },
       topRecommendations: [],
       calendar: { kind: "empty", cells: [] },
       compareRows: [],
@@ -97,6 +121,66 @@ describe("App", () => {
     expect(advancedToggle).toHaveAttribute("aria-expanded", "true");
     expect(await screen.findByText("等待秒数")).toBeInTheDocument();
     expect(await screen.findByText("保存汇总")).toBeInTheDocument();
+  });
+
+  it("shows duration and stops directly on both primary result cards", async () => {
+    const state = stateWithEvidence();
+    state.results.topRecommendations = [state.results.successRows[0]];
+    window.pywebview = { api: { get_initial_state: async () => state, get_ui_state: async () => state } };
+
+    render(<App />);
+
+    expect((await screen.findAllByText("往返总时长"))).toHaveLength(2);
+    expect(screen.getAllByText("7小时55分")).toHaveLength(2);
+    expect(screen.getAllByText("往返转机")).toHaveLength(2);
+    expect(screen.getAllByText("共 1 次")).toHaveLength(2);
+    expect(screen.getAllByText(/去程 08:10–11:25 · 3小时15分 · 直飞/)).toHaveLength(2);
+    expect(screen.getAllByText(/返程 18:30–23:10 · 4小时40分 · 转机1次/)).toHaveLength(2);
+    expect(screen.getByText("7小时55分 · 共 1 次")).toBeInTheDocument();
+    expect(screen.queryByText("显示原始结果")).not.toBeInTheDocument();
+  });
+
+  it("shows one-way duration and stops directly without opening details", async () => {
+    const state = stateWithEvidence();
+    const oneWayLeg = {
+      direction: "outbound" as const,
+      departure_time: "08:10",
+      arrival_time: "13:25",
+      stop_count: 1,
+      duration_minutes: 315,
+    };
+    state.form.trip_type = "one_way";
+    state.form.return_date = "";
+    state.results.cheapestConclusion.itinerary_legs = [oneWayLeg];
+    state.results.recommendationConclusion.itinerary_legs = [oneWayLeg];
+    state.results.successRows[0].itinerary_legs = [oneWayLeg];
+    state.results.topRecommendations = [state.results.successRows[0]];
+    window.pywebview = { api: { get_initial_state: async () => state, get_ui_state: async () => state } };
+
+    render(<App />);
+
+    expect(await screen.findAllByText("单程总时长")).toHaveLength(2);
+    expect(screen.getAllByText("5小时15分")).toHaveLength(2);
+    expect(screen.getAllByText("单程转机")).toHaveLength(2);
+    expect(screen.getAllByText("共 1 次")).toHaveLength(2);
+    expect(
+      screen.getAllByText("单程 08:10–13:25 · 5小时15分 · 转机1次"),
+    ).toHaveLength(2);
+    expect(screen.getByText("5小时15分 · 共 1 次")).toBeInTheDocument();
+    expect(screen.queryByText("显示原始结果")).not.toBeInTheDocument();
+  });
+
+  it("makes missing itinerary data visible instead of silently omitting it", async () => {
+    const state = stateWithEvidence();
+    delete state.results.cheapestConclusion.itinerary_legs;
+    delete state.results.recommendationConclusion.itinerary_legs;
+    window.pywebview = { api: { get_initial_state: async () => state, get_ui_state: async () => state } };
+
+    render(<App />);
+
+    expect(
+      await screen.findAllByText("该最低价结果暂未读取到总时长和转机次数"),
+    ).toHaveLength(2);
   });
 
   it("shows parser details in result evidence", async () => {

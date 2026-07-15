@@ -11,10 +11,10 @@ from skyscanner_multi_domain.scan.orchestrator import run_page_scan
 def quote(region: str = "CN", *, price: float | None = 1234.0) -> FlightQuote:
     return FlightQuote(
         region=region,
-        domain="https://example.test",
+        domain="https://www.skyscanner.cn",
         price=price,
         currency="CNY",
-        source_url=f"https://example.test/{region.lower()}",
+        source_url="https://www.skyscanner.cn/transport/flights/bjs/ala/260610/?adultsv2=1",
         status="ok" if price is not None else "page_parse_failed",
     )
 
@@ -47,6 +47,41 @@ def test_page_is_default_and_uses_direct_cdp() -> None:
     structured.assert_not_awaited()
     assert len(rows[0].attempt_history) == 1
 
+
+
+def test_orchestrator_discards_transport_price_from_wrong_route() -> None:
+    wrong = quote()
+    wrong.source_url = "https://www.skyscanner.cn/transport/flights/bjs/tbs/260610/"
+    wrong.best_price = 1200.0
+    wrong.cheapest_price = 1100.0
+    page = AsyncMock(return_value=[wrong])
+
+    with (
+        patch("skyscanner_multi_domain.transports.cdp.ensure_cdp_ready"),
+        patch("skyscanner_multi_domain.transports.cdp.compare_via_pages", page),
+        patch(
+            "skyscanner_multi_domain.scan.orchestrator._persist_failure_log",
+            side_effect=lambda row, **_: row,
+        ),
+    ):
+        rows = asyncio.run(
+            run_page_scan(
+                "BJS",
+                "ALA",
+                "2026-06-10",
+                ["CN"],
+                config=ScanConfig(no_trace=True),
+            )
+        )
+
+    assert rows[0].status == "page_semantic_mismatch"
+    assert rows[0].route_mismatch is True
+    assert rows[0].price is None
+    assert rows[0].best_price is None
+    assert rows[0].cheapest_price is None
+    assert rows[0].rankable is False
+    assert rows[0].fetch_metadata["route_validation_layer"] == "orchestrator"
+    assert rows[0].attempt_history[0]["action"] == "terminal"
 
 def test_structured_mode_is_explicit() -> None:
     structured = AsyncMock(return_value=[quote()])

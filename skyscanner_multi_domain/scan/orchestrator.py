@@ -16,6 +16,13 @@ from urllib.parse import urlencode
 from skyscanner_multi_domain.runtime.paths import get_failure_log_file, get_traces_dir
 from skyscanner_multi_domain.diagnostics.attempt_trace import flush as flush_attempt_trace
 from skyscanner_multi_domain.models import FlightQuote, RegionConfig
+from skyscanner_multi_domain.route_validation import (
+    SEMANTIC_MISMATCH_STATUS,
+    clear_quote_prices,
+    is_challenge_status,
+    reject_quote_route_mismatch,
+    search_route_matches_requested_url,
+)
 from skyscanner_multi_domain.scan.trace import (
     ScanTraceContext,
     ScanTraceWriter,
@@ -146,6 +153,40 @@ def build_search_url(
         ]
     )
     return f"{path}?{query}"
+
+
+def enforce_quote_route_safety(
+    quotes: list[FlightQuote],
+    regions: list[RegionConfig],
+    *,
+    origin: str,
+    destination: str,
+    travel_date: str,
+    return_date: str | None = None,
+) -> list[FlightQuote]:
+    """Final fail-closed guard before any quote reaches ranking or persistence."""
+    region_by_code = {region.code: region for region in regions}
+    for quote in quotes:
+        region = region_by_code.get(quote.region)
+        if region is None:
+            clear_quote_prices(quote)
+            quote.status = SEMANTIC_MISMATCH_STATUS
+            quote.route_mismatch = True
+            quote.confidence = 0.0
+            quote.error = f"结果市场不在请求范围内：{quote.region}"
+            quote.fetch_metadata["route_validation"] = "unexpected_region"
+            continue
+        if is_challenge_status(quote.status):
+            continue
+        requested_url = build_search_url(region, origin, destination, travel_date, return_date)
+        if not search_route_matches_requested_url(quote.source_url, requested_url):
+            reject_quote_route_mismatch(
+                quote,
+                requested_url=requested_url,
+                actual_url=quote.source_url,
+            )
+            quote.fetch_metadata["route_validation_layer"] = "orchestrator"
+    return quotes
 
 
 def _safe_failure_token(value: str) -> str:
@@ -571,6 +612,14 @@ async def run_page_scan(
                         on_challenge=on_challenge,
                     )
 
+        quotes = enforce_quote_route_safety(
+            quotes,
+            selected_regions,
+            origin=origin,
+            destination=destination,
+            travel_date=date,
+            return_date=return_date,
+        )
         quotes = apply_plan_metadata(quotes)
         completed: list[str] = []
         for region, quote in zip(selected_regions, quotes, strict=False):

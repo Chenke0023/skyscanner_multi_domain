@@ -2,12 +2,54 @@ import type { Dispatch, SetStateAction } from "react";
 import type { ResultRow, UIState } from "../types";
 import { EmptyState, ToolbarButton } from "./common";
 import { RawResults } from "./RawResults";
+import { summarizeItinerary } from "./itinerary";
 import {
   confidenceClass,
   confidenceLabel,
   formatMoney,
   numberValue,
 } from "./resultUtils";
+
+function ItinerarySummary({
+  value,
+  showUnavailable,
+}: {
+  value: unknown;
+  showUnavailable: boolean;
+}) {
+  const summary = summarizeItinerary(value);
+  if (!summary.hasMetrics) {
+    return showUnavailable ? (
+      <div className="itinerary-summary unavailable" role="status">
+        该最低价结果暂未读取到总时长和转机次数
+      </div>
+    ) : null;
+  }
+
+  return (
+    <div className="itinerary-summary" aria-label="最低价行程信息">
+      <div className="itinerary-metrics">
+        <div className="itinerary-metric">
+          <small>{summary.durationLabel}</small>
+          <strong>{summary.durationText || "未读取到"}</strong>
+        </div>
+        <div className="itinerary-metric">
+          <small>{summary.stopsLabel}</small>
+          <strong>{summary.stopsText || "未读取到"}</strong>
+        </div>
+      </div>
+      {summary.detailLines.length > 0 ? (
+        <div className="itinerary-detail-list">
+          {summary.detailLines.map((line) => <span key={line}>{line}</span>)}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function hasPricedConclusion(card: Record<string, unknown>): boolean {
+  return /^¥\s*[\d,]/.test(String(card.price ?? "")) || Boolean(card.link);
+}
 
 function FetchSummaryCard({ trust }: { trust: UIState["results"]["trust"] }) {
   const fetch = trust?.fetchQualityTelemetry ?? {};
@@ -106,33 +148,51 @@ export function ResultStream({
 
   return (
     <div className="result-stream">
-      <section className="summary-card">
-        <p className="eyebrow">最低价结论</p>
-        <h2>{String(cheapestCard.headline ?? "-")}</h2>
-        <div className="summary-price">{String(cheapestCard.price ?? "-")}</div>
-        <p className="summary-supporting">{String(cheapestCard.supporting ?? "")}</p>
-        <p className="summary-meta">{String(cheapestCard.meta ?? "")}</p>
-        <p className="summary-insight">{String(cheapestCard.insight ?? "")}</p>
-        {cheapestCard.link ? (
-          <button className="primary-button subtle" onClick={() => onOpenLink(String(cheapestCard.link))} type="button">
-            {String(cheapestCard.button_text ?? "打开链接")}
-          </button>
-        ) : null}
-      </section>
+      <div className="summary-grid">
+        <section className="summary-card">
+          <p className="eyebrow">最低价结论</p>
+          <h2>{String(cheapestCard.headline ?? "-")}</h2>
+          <div className="summary-price">{String(cheapestCard.price ?? "-")}</div>
+          <p className="summary-supporting">{String(cheapestCard.supporting ?? "")}</p>
+          <ItinerarySummary
+            value={cheapestCard.itinerary_legs}
+            showUnavailable={hasPricedConclusion(cheapestCard)}
+          />
+          <p className="summary-meta">{String(cheapestCard.meta ?? "")}</p>
+          <p className="summary-insight">{String(cheapestCard.insight ?? "")}</p>
+          {cheapestCard.link ? (
+            <button
+              className="primary-button subtle"
+              onClick={() => onOpenLink(String(cheapestCard.link))}
+              type="button"
+            >
+              {String(cheapestCard.button_text ?? "打开链接")}
+            </button>
+          ) : null}
+        </section>
 
-      <section className="summary-card alt">
-        <p className="eyebrow">推荐下单方案</p>
-        <h2>{String(recommendationCard.headline ?? "-")}</h2>
-        <div className="summary-price">{String(recommendationCard.price ?? "-")}</div>
-        <p className="summary-supporting">{String(recommendationCard.supporting ?? "")}</p>
-        <p className="summary-meta">{String(recommendationCard.meta ?? "")}</p>
-        <p className="summary-insight">{String(recommendationCard.insight ?? "")}</p>
-        {recommendationCard.link ? (
-          <button className="primary-button subtle" onClick={() => onOpenLink(String(recommendationCard.link))} type="button">
-            {String(recommendationCard.button_text ?? "打开链接")}
-          </button>
-        ) : null}
-      </section>
+        <section className="summary-card alt">
+          <p className="eyebrow">推荐下单方案</p>
+          <h2>{String(recommendationCard.headline ?? "-")}</h2>
+          <div className="summary-price">{String(recommendationCard.price ?? "-")}</div>
+          <p className="summary-supporting">{String(recommendationCard.supporting ?? "")}</p>
+          <ItinerarySummary
+            value={recommendationCard.itinerary_legs}
+            showUnavailable={hasPricedConclusion(recommendationCard)}
+          />
+          <p className="summary-meta">{String(recommendationCard.meta ?? "")}</p>
+          <p className="summary-insight">{String(recommendationCard.insight ?? "")}</p>
+          {recommendationCard.link ? (
+            <button
+              className="primary-button subtle"
+              onClick={() => onOpenLink(String(recommendationCard.link))}
+              type="button"
+            >
+              {String(recommendationCard.button_text ?? "打开链接")}
+            </button>
+          ) : null}
+        </section>
+      </div>
 
       <FetchSummaryCard trust={results.trust} />
 
@@ -140,24 +200,31 @@ export function ResultStream({
         <div className="top-rec-panel">
           <div className="panel-label">Top 方案</div>
           <div className="top-rec-list">
-            {results.topRecommendations.map((row, index) => (
-              <button
-                key={`${String(row.date)}-${String(row.region_code)}-${index}`}
-                className="top-rec-item"
-                onClick={() => row.link && onOpenLink(String(row.link))}
-                type="button"
-              >
-                <span>{index + 1}</span>
-                <div>
-                  <strong>{String(row.region_name ?? "-")}</strong>
-                  <small>{String(row.date ?? "-")} · {String(row.route ?? "-")}</small>
-                </div>
-                <em>{formatMoney(row.cheapest_cny_price)}</em>
-                <span className={`trust-badge ${confidenceClass(row.confidence)}`}>
-                  {confidenceLabel(row.confidence)}
-                </span>
-              </button>
-            ))}
+            {results.topRecommendations.map((row, index) => {
+              const itinerary = summarizeItinerary(row.itinerary_legs);
+              const compactItinerary = [itinerary.durationText, itinerary.stopsText]
+                .filter(Boolean)
+                .join(" · ");
+              return (
+                <button
+                  key={`${String(row.date)}-${String(row.region_code)}-${index}`}
+                  className="top-rec-item"
+                  onClick={() => row.link && onOpenLink(String(row.link))}
+                  type="button"
+                >
+                  <span>{index + 1}</span>
+                  <div>
+                    <strong>{String(row.region_name ?? "-")}</strong>
+                    <small>{String(row.date ?? "-")} · {String(row.route ?? "-")}</small>
+                    {compactItinerary ? <small className="top-rec-itinerary">{compactItinerary}</small> : null}
+                  </div>
+                  <em>{formatMoney(row.cheapest_cny_price)}</em>
+                  <span className={`trust-badge ${confidenceClass(row.confidence)}`}>
+                    {confidenceLabel(row.confidence)}
+                  </span>
+                </button>
+              );
+            })}
           </div>
         </div>
       )}

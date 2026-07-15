@@ -43,7 +43,12 @@ export function StatusBar({
           title={environmentStatusLabel}
           type="button"
         />
-        <span className="status-message text-sm text-stone-500" title={visibleMessage}>
+        <span
+          aria-atomic="true"
+          aria-live="polite"
+          className="status-message text-sm text-stone-500"
+          title={visibleMessage}
+        >
           {visibleMessage}
         </span>
         {status.progress.total > 0 ? (
@@ -54,7 +59,11 @@ export function StatusBar({
         {progressText ? <span className="plan-progress-chip">{progressText}</span> : null}
       </div>
       <div className="flex items-center gap-2">
-        {actionMessage ? <span className="text-sm text-stone-500">{actionMessage}</span> : null}
+        {actionMessage ? (
+          <span aria-live="polite" className="text-sm text-stone-500" role="status">
+            {actionMessage}
+          </span>
+        ) : null}
         {status.busy ? (
           <button
             className="topbar-button compact"
