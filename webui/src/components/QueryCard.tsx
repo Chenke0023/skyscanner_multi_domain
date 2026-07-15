@@ -7,21 +7,26 @@ export type SuggestionMap = {
 };
 
 function DateField({
+  id,
   label,
   value,
   onChange,
   min,
 }: {
+  id: string;
   label: string;
   value: string;
   onChange: (value: string) => void;
   min?: string;
 }) {
   return (
-    <div className="date-field">
-      <label className="field-label">{label}</label>
+    <div className="date-field query-field query-field-date">
+      <label className="field-label" htmlFor={id}>
+        {label}
+      </label>
       <div className="date-input-shell">
         <input
+          id={id}
           aria-label={label}
           className="form-control"
           type="date"
@@ -46,8 +51,10 @@ export function Switch({
   return (
     <button
       type="button"
+      role="switch"
+      aria-checked={checked}
       onClick={() => onChange(!checked)}
-      className="group flex items-center gap-3 cursor-pointer select-none"
+      className="switch-control group flex items-center gap-3 cursor-pointer select-none"
     >
       <span
         className={
@@ -86,14 +93,16 @@ function Collapsible({
         type="button"
         onClick={onToggle}
         aria-expanded={open}
-        className="flex items-center gap-1 text-sm text-stone-500 hover:text-stone-800 transition-colors cursor-pointer"
+        className="advanced-toggle"
       >
-        {label}
+        <span>{label}</span>
+        <span className="advanced-chevron" aria-hidden="true" />
       </button>
       <div
-        className={`grid transition-all duration-300 ease-out ${open ? "grid-rows-[1fr] opacity-100 mt-6 pt-6 border-t border-stone-100" : "grid-rows-[0fr] opacity-0 mt-0 pt-0 border-t border-transparent"}`}
+        aria-hidden={!open}
+        className={`collapsible-content ${open ? "is-open" : ""}`}
       >
-        <div className="overflow-hidden">{open ? children : null}</div>
+        <div className="collapsible-content-inner">{open ? children : null}</div>
       </div>
     </div>
   );
@@ -131,16 +140,24 @@ export function QueryCard({
   onStartScan: () => void;
 }) {
   return (
-    <div className="query-card">
-      <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-6 gap-y-6">
-        <div className="relative" ref={originRef}>
+    <section className="query-card" aria-label="航班搜索">
+      <div className="query-card-heading">
+        <div>
+          <p className="query-kicker">航班搜索</p>
+          <h1 id="query-card-title">比较不同市场的机票价格</h1>
+        </div>
+        <p>选择航线与日期，系统将核验每个站点的实际搜索路线。</p>
+      </div>
+      <div className="query-fields-grid">
+        <div className="relative query-field query-field-origin" ref={originRef}>
           <div className="location-label-row">
-            <label className="field-label">出发地</label>
+            <label className="field-label" htmlFor="origin-input">出发地</label>
             <span className="location-mode-badge">
               {form.origin_country ? "国家范围" : form.exact_airport ? "机场" : "城市 / 机场 / 国家"}
             </span>
           </div>
           <input
+            id="origin-input"
             className="form-control"
             value={form.origin}
             onChange={(e) => onFormPatch({ origin: e.target.value, origin_country: false })}
@@ -169,14 +186,15 @@ export function QueryCard({
           )}
         </div>
 
-        <div className="relative" ref={destRef}>
+        <div className="relative query-field query-field-destination" ref={destRef}>
           <div className="location-label-row">
-            <label className="field-label">目的地</label>
+            <label className="field-label" htmlFor="destination-input">目的地</label>
             <span className="location-mode-badge">
               {form.destination_country ? "国家范围" : form.exact_airport ? "机场" : "城市 / 机场 / 国家"}
             </span>
           </div>
           <input
+            id="destination-input"
             className="form-control"
             value={form.destination}
             onChange={(e) => onFormPatch({ destination: e.target.value, destination_country: false })}
@@ -205,9 +223,10 @@ export function QueryCard({
           )}
         </div>
 
-        <div>
-          <label className="field-label">行程</label>
+        <div className="query-field query-field-trip">
+          <label className="field-label" htmlFor="trip-type-select">行程</label>
           <select
+            id="trip-type-select"
             className="form-control cursor-pointer"
             value={form.trip_type}
             onChange={(e) => onFormPatch({ trip_type: e.target.value })}
@@ -217,11 +236,17 @@ export function QueryCard({
           </select>
         </div>
 
-        <DateField label="出发日期" value={form.date} onChange={(value) => onFormPatch({ date: value })} />
+        <DateField
+          id="departure-date-input"
+          label="出发日期"
+          value={form.date}
+          onChange={(value) => onFormPatch({ date: value })}
+        />
 
         {form.trip_type === "round_trip" ? (
-          <div className="sm:col-span-2">
+          <div className="query-field query-field-return">
             <DateField
+              id="return-date-input"
               label="返程日期"
               value={form.return_date}
               min={form.date}
@@ -231,7 +256,7 @@ export function QueryCard({
         ) : null}
       </div>
 
-      <div className="mt-6">
+      <div className="advanced-section">
         <Collapsible
           open={advancedOpen}
           onToggle={() => onAdvancedOpenChange((current) => !current)}
@@ -239,24 +264,33 @@ export function QueryCard({
         >
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-6 gap-y-6">
             <div>
-              <label className="field-label">等待秒数</label>
+              <label className="field-label" htmlFor="wait-seconds-input">
+                等待秒数
+              </label>
               <input
+                id="wait-seconds-input"
                 className="form-control"
                 value={form.wait}
                 onChange={(e) => onFormPatch({ wait: e.target.value })}
               />
             </div>
             <div>
-              <label className="field-label">±天数</label>
+              <label className="field-label" htmlFor="date-window-input">
+                ±天数
+              </label>
               <input
+                id="date-window-input"
                 className="form-control"
                 value={form.date_window}
                 onChange={(e) => onFormPatch({ date_window: e.target.value })}
               />
             </div>
             <div className="sm:col-span-2">
-              <label className="field-label">额外地区</label>
+              <label className="field-label" htmlFor="extra-regions-input">
+                额外地区
+              </label>
               <input
+                id="extra-regions-input"
                 className="form-control"
                 value={form.regions}
                 onChange={(e) => onFormPatch({ regions: e.target.value })}
@@ -281,6 +315,6 @@ export function QueryCard({
           {busy ? "扫描中..." : "开始比价"}
         </button>
       </div>
-    </div>
+    </section>
   );
 }

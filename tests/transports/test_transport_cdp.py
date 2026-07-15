@@ -3,9 +3,10 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import ANY, AsyncMock, MagicMock, patch
 
 from skyscanner_multi_domain.models import RegionConfig
+from skyscanner_multi_domain.route_validation import search_route_matches_requested_url
 from skyscanner_multi_domain.transports.cdp import (
     _get_matching_cdp_tabs,
     _verify_browser_session_persistence_async,
@@ -162,6 +163,106 @@ def test_get_matching_cdp_tabs_filters_by_path_and_region_aliases() -> None:
     )
 
     assert matches == [tabs[0]]
+
+
+def test_search_route_match_ignores_query_changes() -> None:
+    requested = (
+        "https://www.skyscanner.es/transport/flights/bcn/tbs/260726/"
+        "?adultsv2=1&market=ES&locale=es-ES&currency=EUR"
+    )
+    actual = "https://www.skyscanner.es/transport/flights/BCN/TBS/260726/?adultsv2=1"
+
+    assert search_route_matches_requested_url(actual, requested)
+
+
+def test_search_route_match_allows_host_redirect_with_same_route() -> None:
+    requested = "https://www.skyscanner.com/transport/flights/bcn/tbs/260726/?market=GE"
+    actual = "https://www.skyscanner.ro/transport/flights/bcn/tbs/260726/?adultsv2=1"
+
+    assert search_route_matches_requested_url(actual, requested)
+
+
+def test_search_route_match_rejects_market_homepage() -> None:
+    requested = "https://www.skyscanner.es/transport/flights/bcn/tbs/260726/?adultsv2=1"
+
+    assert not search_route_matches_requested_url("https://www.skyscanner.es/", requested)
+
+
+def test_search_route_match_rejects_different_route_or_date() -> None:
+    requested = "https://www.skyscanner.es/transport/flights/bcn/tbs/260726/?adultsv2=1"
+
+    assert not search_route_matches_requested_url(
+        "https://www.skyscanner.es/transport/flights/mad/tbs/260726/",
+        requested,
+    )
+    assert not search_route_matches_requested_url(
+        "https://www.skyscanner.es/transport/flights/bcn/tbs/260727/",
+        requested,
+    )
+
+
+def test_compare_via_pages_reloads_route_mismatch_before_accepting_price() -> None:
+    args = argparse.Namespace(
+        origin="BCN",
+        destination="TBS",
+        date="2026-07-26",
+        return_date=None,
+        page_wait=0,
+        timeout=5,
+    )
+    region = RegionConfig(
+        code="ES",
+        name="España",
+        domain="https://www.skyscanner.es",
+        currency="EUR",
+        locale="es-ES",
+    )
+    target_url = "https://www.skyscanner.es/transport/flights/bcn/tbs/260726/?adultsv2=1"
+    tab = {
+        "type": "page",
+        "url": target_url,
+        "webSocketDebuggerUrl": "ws://es-tab",
+        "id": "es-tab-id",
+    }
+
+    class FakeSession:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return None
+
+    async def run_case() -> None:
+        with (
+            patch("skyscanner_multi_domain.transports.cdp.aiohttp.ClientSession", return_value=FakeSession()),
+            patch("skyscanner_multi_domain.transports.cdp.asyncio.sleep", new=AsyncMock()),
+            patch("skyscanner_multi_domain.transports.cdp.cdp_list_tabs", return_value=[tab]),
+            patch("skyscanner_multi_domain.transports.cdp.cdp_open_tab", return_value=tab),
+            patch("skyscanner_multi_domain.transports.cdp.cdp_close_tab"),
+            patch(
+                "skyscanner_multi_domain.transports.cdp.cdp_eval",
+                side_effect=[
+                    {"url": "https://www.skyscanner.es/", "text": "Best\n€99\nCheapest\n€88"},
+                    {"url": target_url, "text": "Best\n€300\nCheapest\n€275"},
+                ],
+            ),
+            patch("skyscanner_multi_domain.transports.cdp.cdp_navigate_tab") as navigate,
+            patch("skyscanner_multi_domain.transports.cdp.emit_trace", lambda **k: None),
+        ):
+            quotes = await compare_via_pages(
+                args,
+                [region],
+                persist_failures=False,
+                build_search_url=lambda *_args: target_url,
+            )
+
+        navigate.assert_awaited_once_with(ANY, "es-tab-id", target_url)
+        assert len(quotes) == 1
+        assert quotes[0].status == "page_text"
+        assert quotes[0].cheapest_price == 275.0
+        assert quotes[0].price != 88.0
+
+    asyncio.run(run_case())
 
 
 def test_compare_via_pages_recovers_from_stale_tab_id() -> None:

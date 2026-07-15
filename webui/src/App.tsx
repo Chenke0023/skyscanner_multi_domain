@@ -379,7 +379,13 @@ function App() {
         >
           历史
         </button>
-        <span className="text-base font-semibold text-stone-900">Skyscanner</span>
+        <div className="brand-lockup" aria-label="Skyscanner 多市场机票比价">
+          <span className="brand-mark" aria-hidden="true">S</span>
+          <span className="brand-copy">
+            <strong>多市场机票比价</strong>
+            <small>Skyscanner</small>
+          </span>
+        </div>
         <button
           className="topbar-button"
           onClick={() => setRightDrawerOpen(true)}
@@ -390,7 +396,7 @@ function App() {
       </header>
 
       {/* Main ------------------------------------------------------------ */}
-      <main className={`flex-1 flex flex-col gap-5 px-4 py-6 ${hasAnyResults ? "" : "items-center justify-center"}`}>
+      <main className={`app-main ${hasAnyResults ? "has-results" : "empty"}`}>
         {/* Query Card ------------------------------------------------------ */}
         <QueryCard
           form={form}

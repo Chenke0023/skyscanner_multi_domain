@@ -9,12 +9,16 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from skyscanner_multi_domain.route_validation import is_semantic_mismatch
+
 
 def _best_rankable(quotes: list[Any]) -> Any | None:
     """Return the cheapest rankable quote, or None."""
     priced = [
         q for q in quotes
-        if q.price is not None and getattr(q, "rankable", None) is not False
+        if q.price is not None
+        and getattr(q, "rankable", None) is not False
+        and not is_semantic_mismatch(q)
     ]
     if not priced:
         return None

@@ -17,15 +17,23 @@ import time
 from dataclasses import asdict
 from datetime import datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Callable
 
 import aiohttp
 
 from skyscanner_multi_domain.models import FlightQuote, RegionConfig
+from skyscanner_multi_domain.parsing.challenge import check_captcha_in_page
 from skyscanner_multi_domain.parsing.dom_parser import parse_dom_cards, parse_text_fallback
 from skyscanner_multi_domain.parsing.hydration_parser import enrich_hydration_candidates, parse_hydration_scripts
 from skyscanner_multi_domain.parsing.network_parser import enrich_network_candidates, parse_network_json
 from skyscanner_multi_domain.parsing.quote_merge import resolve_quote
+from skyscanner_multi_domain.route_validation import (
+    MAX_ROUTE_RECOVERY_ATTEMPTS,
+    clear_quote_prices,
+    reject_quote_route_mismatch,
+    search_route_matches_requested_url,
+)
 from skyscanner_multi_domain.runtime.paths import get_failure_log_file
 from skyscanner_multi_domain.transports.cdp import (
     cdp_close_tab,
@@ -180,6 +188,17 @@ def _classify_page_state(state: dict[str, Any]) -> str:
     return "unknown"
 
 
+def _capture_has_challenge(
+    capture: dict[str, Any],
+    page_state: dict[str, Any] | None,
+) -> bool:
+    if page_state and page_state.get("has_challenge"):
+        return True
+    page_url = str(capture.get("url") or "")
+    page_text = str(capture.get("pageText") or "")
+    return check_captcha_in_page(page_text, SimpleNamespace(url=page_url))[0]
+
+
 def _classify_failure_reason(
     failure_stage: str | None,
     page_state: dict[str, Any] | None,
@@ -189,6 +208,8 @@ def _classify_failure_reason(
     """Classify the specific reason why no quote was extracted."""
     if failure_stage in ("target_select", "wait_result"):
         return "navigation_failed"
+    if capture.get("routeValidation") == "mismatch":
+        return "failed_route_mismatch"
 
     state = _classify_page_state(page_state or {}) if page_state else "unknown"
 
@@ -362,6 +383,10 @@ def _write_diagnostics(
                 "conflict_reason": result.conflict_reason,
                 "failure_stage": failure_stage or capture.get("failureStage"),
                 "stage_errors": capture.get("stageErrors", []),
+                "expected_url": capture.get("expectedUrl"),
+                "actual_url": capture.get("actualUrl", capture.get("url")),
+                "route_validation": capture.get("routeValidation"),
+                "route_retry_count": capture.get("routeRetryCount", 0),
                 "captcha_detected": "challenge" in (final_quote.status or "").lower(),
                 "timestamp": datetime.now(timezone.utc).isoformat(timespec="seconds"),
             },
@@ -411,10 +436,12 @@ def _write_diagnostics(
                 "confidence": result.confidence,
                 "conflict_reason": result.conflict_reason,
                 "failure_stage": failure_stage or capture.get("failureStage"),
-                "failure_reason": _classify_failure_reason(
-                    failure_stage, page_state, capture, result
-                ),
+                "failure_reason": _classify_failure_reason(failure_stage, page_state, capture, result),
                 "stage_errors": capture.get("stageErrors", []),
+                "expected_url": capture.get("expectedUrl"),
+                "actual_url": capture.get("actualUrl", capture.get("url")),
+                "route_validation": capture.get("routeValidation"),
+                "route_retry_count": capture.get("routeRetryCount", 0),
                 "page_health": capture.get("pageHealth", {}),
                 "page_state": page_state,
                 "navigation_trace": navigation_trace,
@@ -484,7 +511,9 @@ async def wait_for_result_state(
     return {"state": "timeout", "final_url": "", "ready_state": "unknown", "body_text_length": 0}, snapshots
 
 
-async def _capture_structured_artifacts(ws_url: str, url: str, trace: list[str]) -> tuple[dict[str, Any], str | None, dict[str, Any] | None]:
+async def _capture_structured_artifacts(
+    ws_url: str, url: str, trace: list[str]
+) -> tuple[dict[str, Any], str | None, dict[str, Any] | None]:
     capture: dict[str, Any] = {
         "url": url,
         "pageHealth": {},
@@ -630,7 +659,12 @@ async def compare_via_cdp_structured(
                             owned_tab_ids.add(tab_id)
                             trace.append("target_select:ok opened_replacement_tab=true")
                             failure_stage = None
-                        except (aiohttp.ClientError, asyncio.TimeoutError, json.JSONDecodeError, RuntimeError) as open_exc:
+                        except (
+                            aiohttp.ClientError,
+                            asyncio.TimeoutError,
+                            json.JSONDecodeError,
+                            RuntimeError,
+                        ) as open_exc:
                             capture["stageErrors"].append({"stage": "target_select", "error": str(open_exc)})
                 except (aiohttp.ClientError, asyncio.TimeoutError, json.JSONDecodeError, RuntimeError) as exc:
                     failure_stage = "target_select"
@@ -655,7 +689,9 @@ async def compare_via_cdp_structured(
                 if not ws_url:
                     failure_stage = failure_stage or "target_select"
                     capture["failureStage"] = failure_stage
-                    capture["stageErrors"].append({"stage": failure_stage, "error": "CDP tab has no webSocketDebuggerUrl"})
+                    capture["stageErrors"].append(
+                        {"stage": failure_stage, "error": "CDP tab has no webSocketDebuggerUrl"}
+                    )
                 else:
                     trace.append("screenshot_initial:start")
                     screenshot_initial = await _capture_screenshot(ws_url)
@@ -672,6 +708,54 @@ async def compare_via_cdp_structured(
                     if page_state is None:
                         page_state = capture.get("pageState")
 
+                    route_retry_count = 0
+                    while (
+                        not _capture_has_challenge(capture, page_state)
+                        and not search_route_matches_requested_url(str(capture.get("url") or ""), url)
+                        and tab_id
+                        and route_retry_count < MAX_ROUTE_RECOVERY_ATTEMPTS
+                    ):
+                        route_retry_count += 1
+                        actual_url = str(capture.get("url") or "")
+                        trace.append(f"route_validation:mismatch retry={route_retry_count} actual={actual_url}")
+                        try:
+                            ws_url = await cdp_navigate_tab(session, tab_id, url)
+                        except (
+                            aiohttp.ClientError,
+                            asyncio.TimeoutError,
+                            json.JSONDecodeError,
+                            RuntimeError,
+                        ) as exc:
+                            capture.setdefault("stageErrors", []).append({"stage": "route_recovery", "error": str(exc)})
+                            trace.append(f"route_recovery:failed {exc}")
+                            break
+
+                        retry_state, retry_timeline = await wait_for_result_state(ws_url, args.page_wait)
+                        if retry_state is not None:
+                            page_state = retry_state
+                        state_timeline.extend(retry_timeline)
+                        capture, retry_failure_stage, _ = await _capture_structured_artifacts(
+                            ws_url,
+                            url,
+                            trace,
+                        )
+                        failure_stage = failure_stage or retry_failure_stage
+
+                    source_url = str(capture.get("url") or url)
+                    route_challenge = _capture_has_challenge(capture, page_state)
+                    route_matches = search_route_matches_requested_url(source_url, url)
+                    capture.update(
+                        {
+                            "expectedUrl": url,
+                            "actualUrl": source_url,
+                            "routeRetryCount": route_retry_count,
+                            "routeValidation": (
+                                "challenge" if route_challenge else "match" if route_matches else "mismatch"
+                            ),
+                        }
+                    )
+                    trace.append(f"route_validation:{capture['routeValidation']}")
+
                     nav_expr = _navigation_trace_expression(url)
                     try:
                         navigation_trace = await _safe_eval(ws_url, "nav_trace", nav_expr)
@@ -686,20 +770,36 @@ async def compare_via_cdp_structured(
 
                 source_url = str(capture.get("url") or url)
                 evidences = []
-                enriched_network_candidates = enrich_network_candidates(network_candidates)
-                enriched_hydration_candidates = enrich_hydration_candidates(list(capture.get("hydrationScripts") or []))
-                trace.append(f"network_capture:metadata_only candidates={len(enriched_network_candidates)}")
-                trace.append(f"hydration_scan:candidates={len(enriched_hydration_candidates)}")
-                evidences.extend(parse_network_json(region, source_url, network_candidates))
-                evidences.extend(parse_hydration_scripts(region, source_url, list(capture.get("hydrationScripts") or [])))
-                evidences.extend(parse_dom_cards(
-                    region,
-                    source_url,
-                    list(capture.get("domCards") or []),
-                    round_trip=bool(getattr(args, "return_date", None)),
-                ))
-                if not evidences:
-                    evidences.extend(parse_text_fallback(region, source_url, str(capture.get("pageText") or "")))
+                unsafe_page = capture.get("routeValidation") in {"mismatch", "challenge"}
+                if unsafe_page:
+                    enriched_network_candidates = []
+                    enriched_hydration_candidates = []
+                    trace.append("evidence_parse:skipped_unsafe_page")
+                else:
+                    enriched_network_candidates = enrich_network_candidates(network_candidates)
+                    enriched_hydration_candidates = enrich_hydration_candidates(
+                        list(capture.get("hydrationScripts") or [])
+                    )
+                    trace.append(f"network_capture:metadata_only candidates={len(enriched_network_candidates)}")
+                    trace.append(f"hydration_scan:candidates={len(enriched_hydration_candidates)}")
+                    evidences.extend(parse_network_json(region, source_url, network_candidates))
+                    evidences.extend(
+                        parse_hydration_scripts(
+                            region,
+                            source_url,
+                            list(capture.get("hydrationScripts") or []),
+                        )
+                    )
+                    evidences.extend(
+                        parse_dom_cards(
+                            region,
+                            source_url,
+                            list(capture.get("domCards") or []),
+                            round_trip=bool(getattr(args, "return_date", None)),
+                        )
+                    )
+                    if not evidences:
+                        evidences.extend(parse_text_fallback(region, source_url, str(capture.get("pageText") or "")))
                 result = resolve_quote(region, source_url, evidences)
                 result.decision_trace[:0] = trace
                 result.final_quote.fetch_metadata["decision_trace"] = result.decision_trace
@@ -708,6 +808,14 @@ async def compare_via_cdp_structured(
                 if failure_stage and quote.price is None:
                     quote.error = f"CDP structured failed at {failure_stage}: {failure_reason}"
                     quote.status = f"cdp_structured_{failure_reason}_failed"
+                if capture.get("routeValidation") == "mismatch":
+                    reject_quote_route_mismatch(
+                        quote,
+                        requested_url=url,
+                        actual_url=source_url,
+                    )
+                    quote.fetch_metadata["route_retry_count"] = capture.get("routeRetryCount", 0)
+                    result.decision_trace.append("route_validation:discarded_all_evidence")
                 quote.extract_attempt_count = 1
                 quote.progressive_wait_used = args.page_wait
                 quote.fetch_metadata["elapsed_ms"] = int((time.monotonic() - started) * 1000)
@@ -717,6 +825,7 @@ async def compare_via_cdp_structured(
                 quote.fetch_metadata["page_state"] = page_state
                 quote.fetch_metadata["navigation_trace"] = navigation_trace
                 if failure_reason == "failed_challenge" and tab_id:
+                    clear_quote_prices(quote)
                     quote.status = "page_challenge"
                     quote.error = "CDP structured 命中机器人 / CAPTCHA 验证页"
                     challenge_tab_ids.add(tab_id)
@@ -751,7 +860,14 @@ async def compare_via_cdp_structured(
                             transport="cdp_structured",
                             route_key=_route_key(args),
                             page_text=str(capture.get("pageText") or ""),
-                            extra={"diagnostic_dir": diagnostic_dir, "failure_stage": failure_stage, "failure_reason": failure_reason},
+                            extra={
+                                "diagnostic_dir": diagnostic_dir,
+                                "failure_stage": failure_stage,
+                                "failure_reason": failure_reason,
+                                "expected_url": url,
+                                "actual_url": source_url,
+                                "route_retry_count": capture.get("routeRetryCount", 0),
+                            },
                         )
                 quotes.append(quote)
         finally:

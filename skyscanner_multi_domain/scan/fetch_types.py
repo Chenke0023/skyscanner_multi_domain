@@ -2,12 +2,18 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import Enum
 from typing import TYPE_CHECKING, Any
 
+from skyscanner_multi_domain.route_validation import clear_quote_prices, is_semantic_mismatch
+
 if TYPE_CHECKING:
     from skyscanner_multi_domain.models import FlightQuote
+
+
+UNRANKABLE_PRICE_SOURCES = frozenset({"first_price_fallback"})
 
 
 class AttemptAction(Enum):
@@ -31,12 +37,34 @@ def _value(value: Any) -> str:
     return str(getattr(value, "value", value))
 
 
+def is_decision_eligible(row: Mapping[str, object]) -> bool:
+    """Keep weak or explicitly unrankable prices out of price decisions."""
+    if is_semantic_mismatch(row):
+        return False
+    if row.get("decision_eligible") is False or row.get("rankable") is False:
+        return False
+    if str(row.get("price_source") or "").strip() in UNRANKABLE_PRICE_SOURCES:
+        return False
+    confidence = row.get("confidence")
+    return not (
+        row.get("rankable") is None
+        and isinstance(confidence, (int, float))
+        and not isinstance(confidence, bool)
+        and float(confidence) < 0.80
+    )
+
+
 def apply_quote_trust_policy(quote: "FlightQuote", *, config: Any | None = None) -> "FlightQuote":
     rankable_threshold = float(getattr(config, "rankable_confidence", 0.80))
     policy = _value(getattr(config, "low_confidence_policy", "accept-review"))
     challenge_policy = _value(getattr(config, "challenge_policy", "stop"))
 
-    if quote.status in {"page_challenge", "px_challenge"}:
+    if is_semantic_mismatch(quote):
+        clear_quote_prices(quote)
+        quote.rankable = False
+        quote.result_visibility = "hidden"
+        quote.requires_manual_review = False
+    elif quote.status in {"page_challenge", "px_challenge"}:
         quote.rankable = False
         quote.result_visibility = "visible" if challenge_policy == "manual" else "hidden"
         quote.requires_manual_review = challenge_policy == "manual"
@@ -44,6 +72,10 @@ def apply_quote_trust_policy(quote: "FlightQuote", *, config: Any | None = None)
         quote.rankable = False
         quote.result_visibility = "hidden"
         quote.requires_manual_review = False
+    elif quote.price_source in UNRANKABLE_PRICE_SOURCES:
+        quote.rankable = False
+        quote.result_visibility = "hidden" if policy == "hide" else "visible"
+        quote.requires_manual_review = policy == "accept-review"
     elif (quote.confidence if quote.confidence is not None else 1.0) >= rankable_threshold:
         quote.rankable = True
         quote.result_visibility = "visible"
@@ -70,6 +102,13 @@ class AttemptPlanner:
                 quote.error or "Browser challenge requires user action",
                 confidence,
                 manual,
+            )
+        if is_semantic_mismatch(quote):
+            return AttemptPlan(
+                AttemptAction.TERMINAL,
+                "semantic_mismatch",
+                quote.error or "Route/date validation failed",
+                confidence,
             )
         if quote.price is None:
             return AttemptPlan(AttemptAction.TERMINAL, "failure", quote.error or quote.status, confidence)

@@ -2,6 +2,7 @@ import { Fragment, useState } from "react";
 import type { Dispatch, SetStateAction } from "react";
 import type { ResultRow, UIState } from "../types";
 import { EmptyState, ToolbarButton } from "./common";
+import { formatDuration, normalizeItineraryLegs } from "./itinerary";
 import {
   confidenceClass,
   confidenceLabel,
@@ -24,17 +25,8 @@ function technicalDetailEntries(row: ResultRow): Array<[string, string]> {
   return entries.filter(([, value]) => Boolean(value));
 }
 
-function formatDuration(minutes: number | null | undefined): string {
-  if (!Number.isInteger(minutes) || !minutes || minutes <= 0) return "";
-  const hours = Math.floor(minutes / 60);
-  const remainder = minutes % 60;
-  if (hours && remainder) return `${hours}小时${remainder}分`;
-  if (hours) return `${hours}小时`;
-  return `${remainder}分钟`;
-}
-
 function ItineraryCell({ row }: { row: ResultRow }) {
-  const legs = Array.isArray(row.itinerary_legs) ? row.itinerary_legs.slice(0, 2) : [];
+  const legs = normalizeItineraryLegs(row.itinerary_legs);
   const visibleLegs = legs.map((leg, index) => {
     const details: string[] = [];
     if (leg.departure_time && leg.arrival_time) details.push(`${leg.departure_time}–${leg.arrival_time}`);

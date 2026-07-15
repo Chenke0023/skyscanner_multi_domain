@@ -42,6 +42,11 @@ from skyscanner_multi_domain.parsing.page_parser import (
 from skyscanner_multi_domain.geo.regions import REGION_HOST_ALIASES
 from skyscanner_multi_domain.parsing.challenge import build_captcha_quote, check_captcha_in_page
 from skyscanner_multi_domain.parsing.itinerary_parser import match_itinerary_legs
+from skyscanner_multi_domain.route_validation import (
+    MAX_ROUTE_RECOVERY_ATTEMPTS,
+    reject_quote_route_mismatch,
+    search_route_matches_requested_url,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -620,19 +625,10 @@ def _quote_from_cdp_payload(
 ) -> FlightQuote:
     page_url = str(payload.get("url", fallback_url))
     page_text = str(payload.get("text", ""))
-    quote = extract_page_quote(region, page_url, page_text)
-    quote.source_kind = "page"
-    if quote.price is not None:
-        target_price = quote.cheapest_price if quote.cheapest_price is not None else quote.price
-        raw_cards = payload.get("cards")
-        cards = [card for card in raw_cards if isinstance(card, dict)] if isinstance(raw_cards, list) else []
-        quote.itinerary_legs = match_itinerary_legs(
-            cards,
-            target_price,
-            round_trip=bool(payload.get("returnDate")),
-        )
-        return quote
 
+    # Challenge pages may contain currency-looking copy. Detect them before
+    # attempting price extraction so route validation does not disrupt the
+    # manual verification flow.
     has_captcha, captcha_type = check_captcha_in_page(
         page_text,
         SimpleNamespace(url=page_url),
@@ -646,6 +642,18 @@ def _quote_from_cdp_payload(
         )
         quote.source_kind = "page"
         return quote
+
+    quote = extract_page_quote(region, page_url, page_text)
+    quote.source_kind = "page"
+    if quote.price is not None:
+        target_price = quote.cheapest_price if quote.cheapest_price is not None else quote.price
+        raw_cards = payload.get("cards")
+        cards = [card for card in raw_cards if isinstance(card, dict)] if isinstance(raw_cards, list) else []
+        quote.itinerary_legs = match_itinerary_legs(
+            cards,
+            target_price,
+            round_trip=bool(payload.get("returnDate")),
+        )
     return quote
 
 
@@ -732,6 +740,8 @@ async def compare_via_pages(
         active_challenge_regions: set[str] = set()
         waiting_challenge_regions: set[str] = set()
         recovery_deadlines: dict[str, float] = {}
+        route_retry_counts: dict[str, int] = {}
+        max_route_retries = MAX_ROUTE_RECOVERY_ATTEMPTS
         domain_tabs: dict[str, str] = dict(manual_tabs or {})
 
         for region in selected_regions:
@@ -860,18 +870,46 @@ async def compare_via_pages(
                         str(domain_tab.get("url", "")),
                     )
                     page_text = str(payload.get("text", ""))
+                    actual_url = str(payload.get("url", domain_tab.get("url", "")))
                     page_text_len_by_region[region.code] = len(page_text)
-                    page_url_by_region[region.code] = str(payload.get("url", domain_tab.get("url", "")))
+                    page_url_by_region[region.code] = actual_url
+                    now = time.monotonic()
+                    is_challenge = quote.status in {"page_challenge", "px_challenge"}
 
-                    final_quote = quote or FlightQuote(
-                        region=region.code,
-                        domain=region.domain,
-                        price=None,
-                        currency=region.currency,
-                        source_url=target_url,
-                        status="page_parse_failed",
-                        error="No price found",
-                    )
+                    if not is_challenge and not search_route_matches_requested_url(actual_url, target_url):
+                        final_quote = reject_quote_route_mismatch(
+                            quote,
+                            requested_url=target_url,
+                            actual_url=actual_url,
+                        )
+                        retry_count = route_retry_counts.get(region.code, 0)
+                        final_quote.fetch_metadata.update(
+                            {
+                                "expected_url": target_url,
+                                "actual_url": actual_url,
+                                "route_retry_count": retry_count,
+                            }
+                        )
+                        if now < deadline and retry_count < max_route_retries and domain_tab_id:
+                            route_retry_counts[region.code] = retry_count + 1
+                            final_quote.fetch_metadata["route_retry_count"] = retry_count + 1
+                            try:
+                                await cdp_navigate_tab(session, domain_tab_id, target_url)
+                            except TabNotFoundError as exc:
+                                domain_tabs.pop(domain_host, None)
+                                owned_tab_ids.discard(domain_tab_id)
+                                final_quote.fetch_metadata["route_retry_error"] = str(exc)
+                            except (
+                                aiohttp.ClientError,
+                                asyncio.TimeoutError,
+                                json.JSONDecodeError,
+                                RuntimeError,
+                            ) as exc:
+                                final_quote.fetch_metadata["route_retry_error"] = str(exc)
+                            else:
+                                final_quote.fetch_metadata["route_retry_triggered"] = True
+                    else:
+                        final_quote = quote
 
                     if persist_failures and final_quote.price is None:
                         persist_failure_log(
@@ -879,12 +917,16 @@ async def compare_via_pages(
                             transport="page",
                             route_key=route_key,
                             page_text=page_text,
-                            extra={"expected_path": expected_path, "domain_host": domain_host},
+                            extra={
+                                "expected_path": expected_path,
+                                "domain_host": domain_host,
+                                "expected_url": target_url,
+                                "actual_url": actual_url,
+                            },
                         )
 
                     latest_quotes[region.code] = final_quote
                     is_challenge = final_quote.status in {"page_challenge", "px_challenge"}
-                    now = time.monotonic()
                     was_challenge = region.code in active_challenge_regions
                     if is_challenge:
                         active_challenge_regions.add(region.code)

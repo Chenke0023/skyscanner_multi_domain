@@ -13,6 +13,7 @@ from pathlib import Path
 from skyscanner_multi_domain.planning.date_window import format_trip_date_label
 from skyscanner_multi_domain.pricing.fx_rates import FxRateService
 from skyscanner_multi_domain.runtime.paths import get_reports_dir
+from skyscanner_multi_domain.scan.fetch_types import is_decision_eligible
 from skyscanner_multi_domain.scan.history import (
     can_reuse_page_for_row,
     classify_failure,
@@ -103,21 +104,6 @@ def _failed_reason_counts(rows: list[dict[str, object]]) -> dict[str, int]:
         counts[reason] = counts.get(reason, 0) + 1
     return counts
 
-
-def _row_is_decision_eligible(row: dict[str, object]) -> bool:
-    if row.get("decision_eligible") is False or row.get("rankable") is False:
-        return False
-    if str(row.get("price_source") or "").strip() == "first_price_fallback":
-        return False
-    confidence = row.get("confidence")
-    if (
-        row.get("rankable") is None
-        and isinstance(confidence, (int, float))
-        and not isinstance(confidence, bool)
-        and float(confidence) < 0.80
-    ):
-        return False
-    return True
 
 
 def _row_cny_value(row: dict[str, object]) -> float | None:
@@ -213,7 +199,7 @@ def build_decision_summary(
 ) -> list[str]:
     valid_pairs: list[tuple[dict[str, object], float]] = []
     for row in rows:
-        if not _row_is_decision_eligible(row):
+        if not is_decision_eligible(row):
             continue
         value = _row_cny_value(row)
         if value is not None:
@@ -427,19 +413,7 @@ class ResultService:
             observed_best = float(best_price) if best_price is not None else None
             observed_cheapest = float(cheapest_price) if cheapest_price is not None else None
             rankable = quote.get("rankable")
-            price_source = str(quote.get("price_source") or "").strip()
-            confidence = quote.get("confidence")
-            weak_fallback = price_source == "first_price_fallback"
-            below_rankable_threshold = (
-                isinstance(confidence, (int, float))
-                and not isinstance(confidence, bool)
-                and float(confidence) < 0.80
-            )
-            decision_eligible = not (
-                rankable is False
-                or weak_fallback
-                or (rankable is None and below_rankable_threshold)
-            )
+            decision_eligible = is_decision_eligible(quote)
 
             # Keep weak observations in the raw quote snapshot, but never turn them
             # into comparable prices. This prevents an arbitrary first text price

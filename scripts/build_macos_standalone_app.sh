@@ -113,6 +113,11 @@ PLIST="${APP_BUNDLE}/Contents/Info.plist"
 /usr/libexec/PlistBuddy -c "Delete :LSApplicationCategoryType" "${PLIST}" 2>/dev/null || true
 /usr/libexec/PlistBuddy -c "Add :LSApplicationCategoryType string public.app-category.travel" "${PLIST}"
 
+# Info.plist is changed after PyInstaller signs the bundle, so renew the
+# ad-hoc signature before smoke testing and archiving the distributable.
+/usr/bin/codesign --force --deep --sign - "${APP_BUNDLE}"
+/usr/bin/codesign --verify --deep --strict "${APP_BUNDLE}"
+
 # ── Verify bundle ────────────────────────────────────────────────
 APP_EXEC="${APP_BUNDLE}/Contents/MacOS/${APP_NAME}"
 if [[ ! -x "${APP_EXEC}" ]]; then

@@ -23,6 +23,7 @@ from skyscanner_multi_domain.runtime.launchd import (
 )
 from skyscanner_multi_domain.runtime.paths import PROJECT_ROOT, get_gui_state_file, get_reports_dir, get_traces_dir
 from skyscanner_multi_domain.scan.confirmation import ConfirmationStatus, PriceConfirmationStore, sample_from_row
+from skyscanner_multi_domain.scan.fetch_types import is_decision_eligible
 from skyscanner_multi_domain.scan.config import ScanConfig
 from skyscanner_multi_domain.scan.query_service import QueryService
 from skyscanner_multi_domain.scan.result_service import ResultService, format_itinerary_legs
@@ -53,7 +54,6 @@ from desktop_logic import (
     _normalize_query_state,
     _order_grouped_by_trip_labels,
     _row_has_price,
-    _row_is_decision_eligible,
     _row_signature,
     _send_desktop_notification,
     _sort_combined_rows,
@@ -1581,7 +1581,7 @@ class DesktopUIService:
         priced_rows = [
             row
             for row in current_rows
-            if _row_is_decision_eligible(row)
+            if is_decision_eligible(row)
             and isinstance(row.get("cheapest_cny_price"), (int, float))
         ]
         previous_rows = []
@@ -1609,7 +1609,7 @@ class DesktopUIService:
             previous_priced = [
                 row
                 for row in previous_rows
-                if _row_is_decision_eligible(row)
+                if is_decision_eligible(row)
                 and isinstance(row.get("cheapest_cny_price"), (int, float))
             ]
             if config.drop_amount is not None and previous_priced:
@@ -1626,7 +1626,7 @@ class DesktopUIService:
 
         if config.notify_on_recovery:
             previous_success = any(
-                _row_is_decision_eligible(row)
+                is_decision_eligible(row)
                 and isinstance(row.get("cheapest_cny_price"), (int, float))
                 for row in previous_rows
             )
